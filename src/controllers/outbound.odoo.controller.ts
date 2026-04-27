@@ -1226,7 +1226,6 @@ async function upsertVirtualLocationFromOdoo(
 
   const remarkParts = [
     "AUTO-VIRTUAL-LOCATION",
-    "Managed by Odoo only",
     normalizeNullableText(input.location_dest),
     normalizeNullableText(input.location_dest_owner_display),
   ].filter(Boolean);
@@ -1363,7 +1362,6 @@ async function upsertSwapBorSerLocationByName(
         status: "Activate",
         remark: [
           "AUTO-SWAP-LOCATION",
-          "Managed by swap auto create",
           normalizeNullableText(input.location_code),
         ]
           .filter(Boolean)
@@ -1392,7 +1390,6 @@ async function upsertSwapBorSerLocationByName(
       status: "Activate",
       remark: [
         "AUTO-SWAP-LOCATION",
-        "Managed by swap auto create",
         normalizeNullableText(input.location_code),
       ]
         .filter(Boolean)
