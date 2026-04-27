@@ -10,3 +10,4 @@ dist/
 # Logs
 logs/
 *.log
+test.json
