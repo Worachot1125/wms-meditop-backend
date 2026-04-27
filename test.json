@@ -1,0 +1,47 @@
+{
+  "params": {
+    "transfers": [
+      {
+        "picking_id": 596485,
+        "number": "WH/PD26-00015",
+        "location_id": 5,
+        "location": "Partners/Customers",
+        "location_owner": [],
+        "location_owner_display": [],
+        "location_dest_id": 8,
+        "location_dest": "WH/MDT",
+        "location_dest_owner": [],
+        "location_dest_owner_display": [],
+        "department_id": 6,
+        "department": "DIA - Diagnostic Division",
+        "reference": false,
+        "origin": "1580478",
+        "items": [
+          {
+            "sequence": 10,
+            "product_id": 20042,
+            "code": "RDX-TP3869",
+            "name": "Total Protein 9x51 ml. (9x245 Tests)  ",
+            "unit": "PACK",
+            "tracking": "lot",
+            "lot_id": 93357,
+            "lot_serial": "626709",
+            "expire_date": "2026-02-28",
+            "qty": 1,
+            "barcodes": [
+              {
+                "barcode_id": 2309,
+                "barcode": "05055273206555"
+              },
+              {
+                "barcode_id": 2186,
+                "barcode": "TP3869"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "jsonrpc": "2.0"
+}

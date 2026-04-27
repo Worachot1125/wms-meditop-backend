@@ -1,0 +1,1761 @@
+import { Request, Response } from "express";
+import { Prisma } from "@prisma/client";
+import { prisma } from "../lib/prisma";
+import { asyncHandler } from "../utils/asyncHandler";
+import { badRequest, notFound } from "../utils/appError";
+import {
+  formatWmsStockDaily,
+  type WmsStockDailyWithLocation,
+} from "../utils/formatters/wms_stock_daily.formatter";
+
+import { formatOdooInbound } from "../utils/formatters/odoo_inbound.formatter";
+import { formatOdooOutbound } from "../utils/formatters/odoo_outbound.formatter";
+import { formatTransferDocItem } from "../utils/formatters/transfer_item.formatter";
+import {
+  formatTransferMovement,
+  // buildInputNumberMap, // ถ้าจะ enrich barcode/input_number ค่อยเปิดใช้
+} from "../utils/formatters/transfer_movement.formatter";
+import { formatOdooAdjustment } from "../utils/formatters/adjustment.formatter";
+
+
+async function buildLocationMap(locationIds: number[]) {
+  const uniqueIds = [...new Set(locationIds.filter((id) => !!id))];
+
+  const map = new Map<number, any>();
+  if (uniqueIds.length === 0) return map;
+
+  const locations = await prisma.location.findMany({
+    where: {
+      id: { in: uniqueIds },
+    },
+    include: {
+      building: true,
+      zone: {
+        include: {
+          zone_type: true,
+        },
+      },
+    },
+  });
+
+  for (const loc of locations) {
+    map.set(loc.id, loc);
+  }
+
+  return map;
+}
+
+function buildWhere(req: Request) {
+  const rawSearch = req.query.search;
+  const search = typeof rawSearch === "string" ? rawSearch.trim() : "";
+
+  const selectedColumns = parseWmsStockDailySearchColumns(req.query.columns);
+
+  let where: any = buildWmsStockDailySearchWhere(search, selectedColumns);
+
+  const rawSnapshotDate = req.query.snapshot_date;
+  const snapshotDate =
+    typeof rawSnapshotDate === "string" ? rawSnapshotDate.trim() : "";
+
+  if (snapshotDate) {
+    const d = new Date(snapshotDate);
+    if (!Number.isNaN(d.getTime())) {
+      const yyyy = d.getUTCFullYear();
+      const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+      const dd = String(d.getUTCDate()).padStart(2, "0");
+
+      where = {
+        AND: [
+          where,
+          {
+            snapshot_date: {
+              gte: new Date(`${yyyy}-${mm}-${dd}T00:00:00.000Z`),
+              lt: new Date(`${yyyy}-${mm}-${dd}T23:59:59.999Z`),
+            },
+          },
+        ],
+      };
+    }
+  }
+
+  return where;
+}
+
+// GET ALL wms_stock_daily
+export const getWmsStockDailyAll = asyncHandler(
+  async (req: Request, res: Response) => {
+    const where = buildWhere(req);
+
+    const rows = await prisma.wms_stock_daily.findMany({
+      where,
+      orderBy: [{ snapshot_date: "desc" }, { id: "desc" }],
+    });
+
+    const locationMap = await buildLocationMap(
+      rows
+        .map((r) => r.location_id)
+        .filter((id): id is number => id !== null && id !== undefined),
+    );
+
+    const formatted = rows.map((row) =>
+      formatWmsStockDaily({
+        ...row,
+        locationRef: row.location_id
+          ? (locationMap.get(row.location_id) ?? null)
+          : null,
+      } as WmsStockDailyWithLocation),
+    );
+
+    return res.json(formatted);
+  },
+);
+
+function parseWmsStockDailySearchColumns(raw: unknown) {
+  if (typeof raw !== "string") return [];
+
+  const allowed = new Set([
+    "snapshot_date",
+    "product_code",
+    "product_name",
+    "unit",
+    "location_name",
+    "building",
+    "zone",
+    "zone_type",
+    "lot_name",
+    "expiration_date",
+    "quantity",
+  ]);
+
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .filter((s) => allowed.has(s));
+}
+
+function buildWmsStockDailySearchWhere(search: string, columns: string[]): any {
+  if (!search) return {};
+
+  const orConditions: any[] = [];
+
+  if (columns.includes("snapshot_date")) {
+    const maybeDate = new Date(search);
+    if (!Number.isNaN(maybeDate.getTime())) {
+      const yyyy = maybeDate.getUTCFullYear();
+      const mm = String(maybeDate.getUTCMonth() + 1).padStart(2, "0");
+      const dd = String(maybeDate.getUTCDate()).padStart(2, "0");
+
+      orConditions.push({
+        snapshot_date: {
+          gte: new Date(`${yyyy}-${mm}-${dd}T00:00:00.000Z`),
+          lt: new Date(`${yyyy}-${mm}-${dd}T23:59:59.999Z`),
+        },
+      });
+    }
+  }
+
+  if (columns.includes("product_code")) {
+    orConditions.push({
+      product_code: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (columns.includes("product_name")) {
+    orConditions.push({
+      product_name: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (columns.includes("unit")) {
+    orConditions.push({
+      unit: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (columns.includes("location_name")) {
+    orConditions.push({
+      location_name: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (columns.includes("building")) {
+    orConditions.push({
+      building: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (columns.includes("zone")) {
+    orConditions.push({
+      zone: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (columns.includes("zone_type")) {
+    orConditions.push({
+      zone_type: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (columns.includes("lot_name")) {
+    orConditions.push({
+      lot_name: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (columns.includes("expiration_date")) {
+    const maybeDate = new Date(search);
+    if (!Number.isNaN(maybeDate.getTime())) {
+      const yyyy = maybeDate.getUTCFullYear();
+      const mm = String(maybeDate.getUTCMonth() + 1).padStart(2, "0");
+      const dd = String(maybeDate.getUTCDate()).padStart(2, "0");
+
+      orConditions.push({
+        expiration_date: {
+          gte: new Date(`${yyyy}-${mm}-${dd}T00:00:00.000Z`),
+          lt: new Date(`${yyyy}-${mm}-${dd}T23:59:59.999Z`),
+        },
+      });
+    }
+  }
+
+  if (columns.includes("quantity")) {
+    const qty = Number(search);
+    if (!Number.isNaN(qty)) {
+      orConditions.push({
+        quantity: { equals: qty },
+      });
+    }
+  }
+
+  if (orConditions.length === 0) {
+    return { id: -1 };
+  }
+
+  return {
+    OR: orConditions,
+  };
+}
+
+// GET wms_stock_daily WITH PAGINATION
+export const getWmsStockDailyPaginated = asyncHandler(
+  async (req: Request, res: Response) => {
+    const page = Number(req.query.page) || 1;
+    const limit =
+      req.query.limit !== undefined ? Number(req.query.limit) || 10 : 10;
+
+    if (Number.isNaN(page) || page < 1) {
+      throw badRequest("page ต้องเป็นตัวเลขบวกที่มากกว่า 0");
+    }
+
+    if (Number.isNaN(limit) || limit < 1) {
+      throw badRequest("limit ต้องเป็นตัวเลขบวกที่มากกว่า 0");
+    }
+
+    const skip = (page - 1) * limit;
+    const where = buildWhere(req);
+
+    const [rows, total] = await Promise.all([
+      prisma.wms_stock_daily.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: [{ snapshot_date: "desc" }, { id: "desc" }],
+      }),
+      prisma.wms_stock_daily.count({ where }),
+    ]);
+
+    const locationMap = await buildLocationMap(
+      rows
+        .map((r) => r.location_id)
+        .filter((id): id is number => id !== null && id !== undefined),
+    );
+
+    const formatted = rows.map((row) =>
+      formatWmsStockDaily({
+        ...row,
+        locationRef: row.location_id
+          ? (locationMap.get(row.location_id) ?? null)
+          : null,
+      } as WmsStockDailyWithLocation),
+    );
+
+    return res.json({
+      data: formatted,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  },
+);
+
+// GET wms_stock_daily BY id
+export const getWmsStockDailyById = asyncHandler(
+  async (req: Request<{ id: string }>, res: Response) => {
+    const id = Number(req.params.id);
+
+    if (Number.isNaN(id) || id <= 0) {
+      throw badRequest("id ต้องเป็นตัวเลขที่ถูกต้อง");
+    }
+
+    const row = await prisma.wms_stock_daily.findUnique({
+      where: { id },
+    });
+
+    if (!row) throw notFound("ไม่พบ wms_stock_daily");
+
+    const locationMap = await buildLocationMap(
+      row.location_id ? [row.location_id] : [],
+    );
+
+    const formatted = formatWmsStockDaily({
+      ...row,
+      locationRef: row.location_id
+        ? (locationMap.get(row.location_id) ?? null)
+        : null,
+    } as WmsStockDailyWithLocation);
+
+    return res.json(formatted);
+  },
+);
+
+type ReportRow = {
+  source:
+    | "inbound"
+    | "outbound"
+    | "transfer_doc"
+    | "transfer_movement"
+    | "adjustment";
+  id: number;
+  no: string | null;
+  created_at: string;
+  type: string | null;
+  location: string | null;
+  location_dest: string | null;
+  user_ref: string | null;
+};
+
+function buildUserRef(user: any): string | null {
+  if (!user) return null;
+
+  const firstName = String(user.first_name ?? "").trim();
+  const lastName = String(user.last_name ?? "").trim();
+  const username = String(user.username ?? "").trim();
+
+  const fullName = `${firstName} ${lastName}`.trim();
+  if (fullName) return fullName;
+  if (username) return username;
+
+  return null;
+}
+
+function hasSVInNo(no: unknown): boolean {
+  return String(no ?? "").toUpperCase().includes("SV");
+}
+
+function resolveReportTypeFromNo(
+  no: unknown,
+  fallback: string | null | undefined,
+): string {
+  if (hasSVInNo(no)) return "SV";
+  return fallback ?? "";
+}
+
+export const getTransactionReport = asyncHandler(
+  async (req: Request, res: Response) => {
+    const rawSearch = req.query.search;
+    const search = typeof rawSearch === "string" ? rawSearch.trim() : "";
+
+    const rawPage = req.query.page;
+    const rawLimit = req.query.limit;
+
+    const page = rawPage !== undefined ? Number(rawPage) : 1;
+    const limit = rawLimit !== undefined ? Number(rawLimit) : 50;
+
+    if (Number.isNaN(page) || page < 1) {
+      throw badRequest("page ต้องเป็นตัวเลขมากกว่า 0");
+    }
+    if (Number.isNaN(limit) || limit < 1) {
+      throw badRequest("limit ต้องเป็นตัวเลขมากกว่า 0");
+    }
+
+    const rawDateFrom = req.query.date_from;
+    const rawDateTo = req.query.date_to;
+
+    const dateFrom =
+      typeof rawDateFrom === "string" && rawDateFrom.trim()
+        ? new Date(rawDateFrom)
+        : null;
+
+    const dateTo =
+      typeof rawDateTo === "string" && rawDateTo.trim()
+        ? new Date(rawDateTo)
+        : null;
+
+    if (dateFrom && Number.isNaN(dateFrom.getTime())) {
+      throw badRequest("date_from ไม่ถูกต้อง");
+    }
+    if (dateTo && Number.isNaN(dateTo.getTime())) {
+      throw badRequest("date_to ไม่ถูกต้อง");
+    }
+
+    const createdAtFilter =
+      dateFrom || dateTo
+        ? {
+            ...(dateFrom ? { gte: dateFrom } : {}),
+            ...(dateTo ? { lte: dateTo } : {}),
+          }
+        : undefined;
+
+    const [inbounds, outbounds, transferDocs, transferMovements, adjustments] =
+      await Promise.all([
+        prisma.inbound.findMany({
+          where: {
+            ...(createdAtFilter ? { created_at: createdAtFilter } : {}),
+            ...(search
+              ? {
+                  OR: [
+                    { no: { contains: search, mode: "insensitive" } },
+                    { location: { contains: search, mode: "insensitive" } },
+                    {
+                      location_dest: { contains: search, mode: "insensitive" },
+                    },
+                    { in_type: { contains: search, mode: "insensitive" } },
+                  ],
+                }
+              : {}),
+          },
+          select: {
+            id: true,
+            no: true,
+            created_at: true,
+            in_type: true,
+            location: true,
+            location_dest: true,
+          },
+        }),
+
+        prisma.outbound.findMany({
+          where: {
+            ...(createdAtFilter ? { created_at: createdAtFilter } : {}),
+            ...(search
+              ? {
+                  OR: [
+                    { no: { contains: search, mode: "insensitive" } },
+                    { location: { contains: search, mode: "insensitive" } },
+                    {
+                      location_dest: { contains: search, mode: "insensitive" },
+                    },
+                    { out_type: { contains: search, mode: "insensitive" } },
+                  ],
+                }
+              : {}),
+          },
+          select: {
+            id: true,
+            no: true,
+            created_at: true,
+            out_type: true,
+            location: true,
+            location_dest: true,
+          },
+        }),
+
+        prisma.transfer_doc.findMany({
+          where: {
+            ...(createdAtFilter ? { created_at: createdAtFilter } : {}),
+            ...(search
+              ? {
+                  OR: [
+                    { no: { contains: search, mode: "insensitive" } },
+                    { location: { contains: search, mode: "insensitive" } },
+                    {
+                      location_dest: { contains: search, mode: "insensitive" },
+                    },
+                    { in_type: { contains: search, mode: "insensitive" } },
+                  ],
+                }
+              : {}),
+          },
+          select: {
+            id: true,
+            no: true,
+            created_at: true,
+            in_type: true,
+            location: true,
+            location_dest: true,
+          },
+        }),
+
+        prisma.transfer_movement.findMany({
+          where: {
+            ...(createdAtFilter ? { created_at: createdAtFilter } : {}),
+            ...(search
+              ? {
+                  OR: [
+                    { no: { contains: search, mode: "insensitive" } },
+                    { status: { contains: search, mode: "insensitive" } },
+                    {
+                      user: {
+                        username: { contains: search, mode: "insensitive" },
+                      },
+                    },
+                    {
+                      user: {
+                        first_name: { contains: search, mode: "insensitive" },
+                      },
+                    },
+                    {
+                      user: {
+                        last_name: { contains: search, mode: "insensitive" },
+                      },
+                    },
+                  ],
+                }
+              : {}),
+          },
+          select: {
+            id: true,
+            no: true,
+            created_at: true,
+            status: true,
+            user: {
+              select: {
+                username: true,
+                first_name: true,
+                last_name: true,
+              },
+            },
+          },
+        }),
+
+        prisma.adjustment.findMany({
+          where: {
+            ...(createdAtFilter ? { created_at: createdAtFilter } : {}),
+            ...(search
+              ? {
+                  OR: [
+                    { no: { contains: search, mode: "insensitive" } },
+                    { type: { contains: search, mode: "insensitive" } },
+                    { status: { contains: search, mode: "insensitive" } },
+                    { origin: { contains: search, mode: "insensitive" } },
+                    { reference: { contains: search, mode: "insensitive" } },
+                  ],
+                }
+              : {}),
+          },
+          select: {
+            id: true,
+            no: true,
+            created_at: true,
+            type: true,
+          },
+        }),
+      ]);
+
+    const rows: ReportRow[] = [
+      ...inbounds.map(
+        (x): ReportRow => ({
+          source: "inbound",
+          id: x.id,
+          no: x.no ?? null,
+          created_at: x.created_at.toISOString(),
+          type: x.in_type ?? "IN",
+          location: x.location ?? null,
+          location_dest: x.location_dest ?? null,
+          user_ref: null,
+        }),
+      ),
+
+      ...outbounds.map(
+        (x): ReportRow => ({
+          source: "outbound",
+          id: x.id,
+          no: x.no ?? null,
+          created_at: x.created_at.toISOString(),
+          type: resolveReportTypeFromNo(x.no, x.out_type ?? "OUT"),
+          location: x.location ?? null,
+          location_dest: x.location_dest ?? null,
+          user_ref: null,
+        }),
+      ),
+
+      ...transferDocs.map(
+        (x): ReportRow => ({
+          source: "transfer_doc",
+          id: x.id,
+          no: x.no ?? null,
+          created_at: x.created_at.toISOString(),
+          type: x.in_type ?? "TF",
+          location: x.location ?? null,
+          location_dest: x.location_dest ?? null,
+          user_ref: null,
+        }),
+      ),
+
+      ...transferMovements.map(
+        (x): ReportRow => ({
+          source: "transfer_movement",
+          id: x.id,
+          no: x.no ?? null,
+          created_at: x.created_at.toISOString(),
+          type: "MOVE",
+          location: null,
+          location_dest: null,
+          user_ref: buildUserRef(x.user),
+        }),
+      ),
+
+      ...adjustments
+        .filter((x) => !hasSVInNo(x.no))
+        .map(
+          (x): ReportRow => ({
+            source: "adjustment",
+            id: x.id,
+            no: x.no ?? null,
+            created_at: x.created_at.toISOString(),
+            type: x.type ?? "ADJ",
+            location: null,
+            location_dest: null,
+            user_ref: null,
+          }),
+        ),
+    ];
+
+    rows.sort(
+      (a, b) =>
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+    );
+
+    const total = rows.length;
+    const start = (page - 1) * limit;
+    const end = start + limit;
+    const pagedRows = rows.slice(start, end);
+
+    return res.json({
+      data: pagedRows,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  },
+);
+
+function parseTransactionReportSearchColumns(raw: unknown) {
+  if (typeof raw !== "string") return [];
+
+  const allowed = new Set([
+    "no",
+    "created_at",
+    "type",
+    "location",
+    "location_dest",
+    "user_ref",
+    "status",
+    "reference",
+    "origin",
+  ]);
+
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .filter((s) => allowed.has(s));
+}
+
+function buildDateRangeFromSearch(search: string) {
+  const maybeDate = new Date(search);
+  if (Number.isNaN(maybeDate.getTime())) return null;
+
+  const yyyy = maybeDate.getUTCFullYear();
+  const mm = String(maybeDate.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(maybeDate.getUTCDate()).padStart(2, "0");
+
+  return {
+    gte: new Date(`${yyyy}-${mm}-${dd}T00:00:00.000Z`),
+    lte: new Date(`${yyyy}-${mm}-${dd}T23:59:59.999Z`),
+  };
+}
+
+function buildInboundReportWhere(
+  createdAtFilter: any,
+  search: string,
+  columns: string[],
+) {
+  const where: any = {
+    ...(createdAtFilter ? { created_at: createdAtFilter } : {}),
+  };
+
+  if (!search) return where;
+
+  const orConditions: any[] = [];
+
+  if (columns.includes("no")) {
+    orConditions.push({ no: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("location")) {
+    orConditions.push({ location: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("location_dest")) {
+    orConditions.push({
+      location_dest: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (columns.includes("type")) {
+    orConditions.push({ in_type: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("created_at")) {
+    const dateRange = buildDateRangeFromSearch(search);
+    if (dateRange) {
+      orConditions.push({ created_at: dateRange });
+    }
+  }
+
+  if (orConditions.length > 0) where.OR = orConditions;
+  else where.id = -1;
+
+  return where;
+}
+
+function buildOutboundReportWhere(
+  createdAtFilter: any,
+  search: string,
+  columns: string[],
+) {
+  const where: any = {
+    ...(createdAtFilter ? { created_at: createdAtFilter } : {}),
+  };
+
+  if (!search) return where;
+
+  const orConditions: any[] = [];
+
+  if (columns.includes("no")) {
+    orConditions.push({ no: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("location")) {
+    orConditions.push({ location: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("location_dest")) {
+    orConditions.push({
+      location_dest: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (columns.includes("type")) {
+    orConditions.push({ out_type: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("created_at")) {
+    const dateRange = buildDateRangeFromSearch(search);
+    if (dateRange) {
+      orConditions.push({ created_at: dateRange });
+    }
+  }
+
+  if (orConditions.length > 0) where.OR = orConditions;
+  else where.id = -1;
+
+  return where;
+}
+
+function buildTransferDocReportWhere(
+  createdAtFilter: any,
+  search: string,
+  columns: string[],
+) {
+  const where: any = {
+    ...(createdAtFilter ? { created_at: createdAtFilter } : {}),
+  };
+
+  if (!search) return where;
+
+  const orConditions: any[] = [];
+
+  if (columns.includes("no")) {
+    orConditions.push({ no: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("location")) {
+    orConditions.push({ location: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("location_dest")) {
+    orConditions.push({
+      location_dest: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (columns.includes("type")) {
+    orConditions.push({ in_type: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("created_at")) {
+    const dateRange = buildDateRangeFromSearch(search);
+    if (dateRange) {
+      orConditions.push({ created_at: dateRange });
+    }
+  }
+
+  if (orConditions.length > 0) where.OR = orConditions;
+  else where.id = -1;
+
+  return where;
+}
+
+function buildTransferMovementReportWhere(
+  createdAtFilter: any,
+  search: string,
+  columns: string[],
+) {
+  const where: any = {
+    ...(createdAtFilter ? { created_at: createdAtFilter } : {}),
+  };
+
+  if (!search) return where;
+
+  const orConditions: any[] = [];
+
+  if (columns.includes("no")) {
+    orConditions.push({ no: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("status")) {
+    orConditions.push({ status: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("user_ref")) {
+    orConditions.push({
+      user: { username: { contains: search, mode: "insensitive" } },
+    });
+    orConditions.push({
+      user: { first_name: { contains: search, mode: "insensitive" } },
+    });
+    orConditions.push({
+      user: { last_name: { contains: search, mode: "insensitive" } },
+    });
+  }
+
+  if (columns.includes("created_at")) {
+    const dateRange = buildDateRangeFromSearch(search);
+    if (dateRange) {
+      orConditions.push({ created_at: dateRange });
+    }
+  }
+
+  if (orConditions.length > 0) where.OR = orConditions;
+  else where.id = -1;
+
+  return where;
+}
+
+function buildAdjustmentReportWhere(
+  createdAtFilter: any,
+  search: string,
+  columns: string[],
+) {
+  const where: any = {
+    ...(createdAtFilter ? { created_at: createdAtFilter } : {}),
+  };
+
+  if (!search) return where;
+
+  const orConditions: any[] = [];
+
+  if (columns.includes("no")) {
+    orConditions.push({ no: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("type")) {
+    orConditions.push({ type: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("status")) {
+    orConditions.push({ status: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("origin")) {
+    orConditions.push({ origin: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("reference")) {
+    orConditions.push({ reference: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("created_at")) {
+    const dateRange = buildDateRangeFromSearch(search);
+    if (dateRange) {
+      orConditions.push({ created_at: dateRange });
+    }
+  }
+
+  if (orConditions.length > 0) where.OR = orConditions;
+  else where.id = -1;
+
+  return where;
+}
+
+function withDeletedAtNull<T extends Record<string, any> | undefined>(
+  where?: T,
+) {
+  return {
+    deleted_at: null,
+    ...(where ?? {}),
+  };
+}
+
+function normalizeProductCode(v: unknown): string {
+  return String(v ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\-_./]+/g, "");
+}
+
+
+export const getTransactionReportPaginated = asyncHandler(
+  async (req: Request, res: Response) => {
+    const page = Number(req.query.page) || 1;
+    const limit =
+      req.query.limit !== undefined ? Number(req.query.limit) || 10 : 10;
+
+    if (Number.isNaN(page) || page < 1) {
+      throw badRequest("page ต้องเป็นตัวเลขบวกที่มากกว่า 0");
+    }
+
+    if (Number.isNaN(limit) || limit < 1) {
+      throw badRequest("limit ต้องเป็นตัวเลขบวกที่มากกว่า 0");
+    }
+
+    const rawSearch = req.query.search;
+    const search = typeof rawSearch === "string" ? rawSearch.trim() : "";
+
+    const rawType = req.query.type;
+    const type =
+      typeof rawType === "string" ? rawType.trim().toUpperCase() : "";
+
+    const rawDateFrom = req.query.date_from;
+    const rawDateTo = req.query.date_to;
+
+    const dateFrom =
+      typeof rawDateFrom === "string" && rawDateFrom.trim()
+        ? new Date(rawDateFrom)
+        : null;
+
+    const dateTo =
+      typeof rawDateTo === "string" && rawDateTo.trim()
+        ? new Date(rawDateTo)
+        : null;
+
+    if (dateFrom && Number.isNaN(dateFrom.getTime())) {
+      throw badRequest("date_from ไม่ถูกต้อง");
+    }
+
+    if (dateTo && Number.isNaN(dateTo.getTime())) {
+      throw badRequest("date_to ไม่ถูกต้อง");
+    }
+
+    const createdAtFilter =
+      dateFrom || dateTo
+        ? {
+            ...(dateFrom ? { gte: dateFrom } : {}),
+            ...(dateTo ? { lte: dateTo } : {}),
+          }
+        : undefined;
+
+    const selectedColumns = parseTransactionReportSearchColumns(
+      req.query.columns,
+    );
+
+    const rawSortBy = String(req.query.sortBy ?? "created_at").trim();
+    const rawSortDir = String(req.query.sortDir ?? "desc")
+      .trim()
+      .toLowerCase();
+
+    type SortBy =
+      | "created_at"
+      | "no"
+      | "code"
+      | "name"
+      | "type"
+      | "location"
+      | "location_dest"
+      | "user_ref"
+      | "source";
+
+    type SortDir = "asc" | "desc";
+
+    const allowedSortBy: SortBy[] = [
+      "created_at",
+      "no",
+      "code",
+      "name",
+      "type",
+      "location",
+      "location_dest",
+      "user_ref",
+      "source",
+    ];
+
+    const sortBy: SortBy = allowedSortBy.includes(rawSortBy as SortBy)
+      ? (rawSortBy as SortBy)
+      : "created_at";
+
+    const sortDir: SortDir = rawSortDir === "asc" ? "asc" : "desc";
+
+    function normalizeText(v: unknown): string {
+      return String(v ?? "")
+        .trim()
+        .toLowerCase();
+    }
+
+    function firstNonEmpty(...values: any[]): string | null {
+      for (const value of values) {
+        if (value === null || value === undefined) continue;
+        const text = String(value).trim();
+        if (text) return text;
+      }
+      return null;
+    }
+
+    function goodsInExpKey(productId: unknown, lotId: unknown): string {
+      return `p:${Number(productId ?? 0)}|lot:${Number(lotId ?? 0)}`;
+    }
+
+    function getItemCode(item: any): string | null {
+      return firstNonEmpty(
+        item?.code,
+        item?.product_code,
+        item?.sku,
+        item?.product,
+      );
+    }
+
+    function getItemName(item: any): string | null {
+      return firstNonEmpty(item?.name, item?.product_name);
+    }
+
+    function withSingleItemDocument(doc: any, item: any) {
+      return {
+        ...doc,
+        items: item ? [item] : [],
+      };
+    }
+
+    function makeRowId(source: string, docId: any, item: any, index: number) {
+      return [
+        source,
+        docId ?? "doc",
+        index,
+        firstNonEmpty(
+          item?.id,
+          item?.sequence,
+          item?.product_id,
+          item?.code,
+          item?.lot_id,
+          item?.lot_serial,
+          item?.exp,
+        ) ?? "item",
+      ].join("-");
+    }
+
+    const [inbounds, outbounds, transferDocs, transferMovements, adjustments] =
+      await Promise.all([
+        prisma.inbound.findMany({
+          where: withDeletedAtNull(
+            buildInboundReportWhere(createdAtFilter, search, selectedColumns),
+          ),
+          include: {
+            goods_ins: {
+              where: { deleted_at: null },
+              include: {
+                barcode: true,
+              },
+              orderBy: { id: "asc" },
+            },
+          },
+        }),
+
+        prisma.outbound.findMany({
+          where: withDeletedAtNull(
+            buildOutboundReportWhere(createdAtFilter, search, selectedColumns),
+          ),
+          include: {
+            goods_outs: {
+              where: { deleted_at: null },
+              include: {
+                barcode_ref: true,
+                boxes: {
+                  where: { deleted_at: null },
+                  include: {
+                    box: true,
+                  },
+                },
+              },
+              orderBy: { id: "asc" },
+            },
+          },
+        }),
+
+        prisma.transfer_doc.findMany({
+          where: withDeletedAtNull(
+            buildTransferDocReportWhere(
+              createdAtFilter,
+              search,
+              selectedColumns,
+            ),
+          ),
+          include: {
+            transfer_doc_items: {
+              where: { deleted_at: null },
+              orderBy: { id: "asc" },
+            },
+          },
+        }),
+
+        prisma.transfer_movement.findMany({
+          where: withDeletedAtNull(
+            buildTransferMovementReportWhere(
+              createdAtFilter,
+              search,
+              selectedColumns,
+            ),
+          ),
+          include: {
+            user: true,
+            department: true,
+            items: {
+              where: { deleted_at: null },
+              orderBy: { id: "asc" },
+            },
+            movement_departments: {
+              include: {
+                department: true,
+              },
+            },
+            movement_user_works: {
+              include: {
+                user: true,
+              },
+            },
+          },
+        }),
+
+        prisma.adjustment.findMany({
+          where: withDeletedAtNull(
+            buildAdjustmentReportWhere(
+              createdAtFilter,
+              search,
+              selectedColumns,
+            ),
+          ),
+          include: {
+            items: {
+              where: { deleted_at: null },
+              orderBy: { id: "asc" },
+            },
+          },
+        }),
+      ]);
+
+    // ✅ doc.department_id คือ department id จาก Odoo
+    // ✅ ต้องเอาไปเทียบกับ department.odoo_id แล้วใช้ short_name มาแสดง
+    const departmentOdooIds = Array.from(
+      new Set(
+        [
+          ...inbounds.map((x: any) => x.department_id).filter(Boolean),
+          ...outbounds.map((x: any) => x.department_id).filter(Boolean),
+          ...transferDocs.map((x: any) => x.department_id).filter(Boolean),
+          ...transferMovements.map((x: any) => x.department_id).filter(Boolean),
+          ...adjustments.map((x: any) => x.department_id).filter(Boolean),
+        ].map((v) => Number(v)),
+      ),
+    ).filter((v) => Number.isFinite(v) && v > 0);
+
+    const departments = departmentOdooIds.length
+      ? await prisma.department.findMany({
+          where: {
+            odoo_id: { in: departmentOdooIds },
+            deleted_at: null,
+          },
+          select: {
+            id: true,
+            odoo_id: true,
+            short_name: true,
+            full_name: true,
+          },
+        })
+      : [];
+
+    const departmentMap = new Map<
+      number,
+      { short_name: string | null; full_name: string | null }
+    >();
+
+    for (const d of departments) {
+      if (d.odoo_id === null || d.odoo_id === undefined) continue;
+
+      const odooId = Number(d.odoo_id);
+      if (!Number.isFinite(odooId) || odooId <= 0) continue;
+
+      departmentMap.set(odooId, {
+        short_name: d.short_name ?? null,
+        full_name: d.full_name ?? null,
+      });
+    }
+
+    const expPairs = new Map<string, { product_id: number; lot_id: number }>();
+
+    const collectExpPair = (productId: unknown, lotId: unknown) => {
+      const p = Number(productId ?? 0);
+      const l = Number(lotId ?? 0);
+      if (!Number.isFinite(p) || p <= 0) return;
+      if (!Number.isFinite(l) || l <= 0) return;
+      expPairs.set(goodsInExpKey(p, l), { product_id: p, lot_id: l });
+    };
+
+    for (const doc of inbounds as any[]) {
+      for (const item of doc.goods_ins ?? []) {
+        collectExpPair(item.product_id, item.lot_id);
+      }
+    }
+
+    for (const doc of outbounds as any[]) {
+      for (const item of doc.goods_outs ?? []) {
+        collectExpPair(item.product_id, item.lot_id);
+      }
+    }
+
+    for (const doc of transferDocs as any[]) {
+      for (const item of doc.transfer_doc_items ?? []) {
+        collectExpPair(item.product_id, item.lot_id);
+      }
+    }
+
+    for (const doc of transferMovements as any[]) {
+      for (const item of doc.items ?? []) {
+        collectExpPair(item.product_id, item.lot_id);
+      }
+    }
+
+    for (const doc of adjustments as any[]) {
+      for (const item of doc.items ?? []) {
+        collectExpPair(item.product_id, item.lot_id);
+      }
+    }
+
+    const expRows = expPairs.size
+      ? await prisma.goods_in.findMany({
+          where: {
+            deleted_at: null,
+            OR: Array.from(expPairs.values()).map((x) => ({
+              product_id: x.product_id,
+              lot_id: x.lot_id,
+            })),
+          },
+          select: {
+            product_id: true,
+            lot_id: true,
+            exp: true,
+            id: true,
+          },
+          orderBy: { id: "desc" },
+        })
+      : [];
+
+    const expMap = new Map<string, string | null>();
+
+    for (const row of expRows) {
+      const key = goodsInExpKey(row.product_id, row.lot_id);
+      if (!expMap.has(key)) {
+        expMap.set(key, row.exp ? row.exp.toISOString() : null);
+      }
+    }
+
+    const codeSet = new Set<string>();
+
+    const collectCode = (code: unknown) => {
+      const c = normalizeProductCode(code);
+      if (c) codeSet.add(c);
+    };
+
+    for (const doc of inbounds as any[]) {
+      for (const item of doc.goods_ins ?? []) collectCode(item.code);
+    }
+
+    for (const doc of outbounds as any[]) {
+      for (const item of doc.goods_outs ?? []) collectCode(item.code);
+    }
+
+    for (const doc of transferDocs as any[]) {
+      for (const item of doc.transfer_doc_items ?? []) collectCode(item.code);
+    }
+
+    for (const doc of transferMovements as any[]) {
+      for (const item of doc.items ?? []) collectCode(item.code);
+    }
+
+    for (const doc of adjustments as any[]) {
+      for (const item of doc.items ?? []) collectCode(item.code);
+    }
+
+    const mdtRows = await prisma.wms_mdt_goods.findMany({
+      select: {
+        product_code: true,
+        zone_type: true,
+        id: true,
+      },
+      orderBy: { id: "desc" },
+    });
+
+    const zoneTypeMap = new Map<string, string | null>();
+
+    for (const row of mdtRows) {
+      const key = normalizeProductCode(row.product_code);
+      if (key && !zoneTypeMap.has(key)) {
+        zoneTypeMap.set(key, row.zone_type ?? null);
+      }
+    }
+
+    const getDepartmentName = (
+      departmentOdooId: unknown,
+      fallback?: string | null,
+    ): string => {
+      const odooId = Number(departmentOdooId ?? 0);
+      const found = departmentMap.get(odooId);
+
+      return found?.short_name || found?.full_name || fallback || "";
+    };
+
+    const getExp = (productId: unknown, lotId: unknown): string | null => {
+      const p = Number(productId ?? 0);
+      const l = Number(lotId ?? 0);
+      if (!Number.isFinite(p) || p <= 0) return null;
+      if (!Number.isFinite(l) || l <= 0) return null;
+      return expMap.get(goodsInExpKey(p, l)) ?? null;
+    };
+
+    const getZoneType = (code: unknown): string | null => {
+      return zoneTypeMap.get(normalizeProductCode(code)) ?? null;
+    };
+
+    type ReportRow = {
+      source: string;
+      id: number | string;
+      no: string | null;
+      created_at: string;
+      type: string | null;
+      location: string | null;
+      location_dest: string | null;
+      user_ref: string | null;
+      code: string | null;
+      name: string | null;
+      document: any;
+    };
+
+    const inboundRows: ReportRow[] = inbounds.flatMap((doc: any) => {
+      const formatted = formatOdooInbound(doc);
+
+      const items = (formatted.items ?? []).map((item: any) => ({
+        ...item,
+        exp: getExp(item.product_id, item.lot_id) ?? item.exp ?? null,
+        zone_type: getZoneType(item.code) ?? item.zone_type ?? null,
+      }));
+
+      const department = getDepartmentName(
+        doc.department_id,
+        formatted.department,
+      );
+
+      if (items.length === 0) {
+        return [
+          {
+            source: "inbound",
+            id: `inbound-${formatted.id}-empty`,
+            no: formatted.no,
+            created_at: formatted.created_at,
+            type: formatted.in_type ?? "IN",
+            location: formatted.location ?? null,
+            location_dest: formatted.location_dest ?? null,
+            user_ref: null,
+            code: null,
+            name: null,
+            document: {
+              ...formatted,
+              department,
+              items: [],
+            },
+          },
+        ];
+      }
+
+      return items.map((item: any, index: number) => ({
+        source: "inbound",
+        id: makeRowId("inbound", formatted.id, item, index),
+        no: formatted.no,
+        created_at: formatted.created_at,
+        type: formatted.in_type ?? "IN",
+        location: formatted.location ?? null,
+        location_dest: formatted.location_dest ?? null,
+        user_ref: null,
+        code: getItemCode(item),
+        name: getItemName(item),
+        document: withSingleItemDocument(
+          {
+            ...formatted,
+            department,
+          },
+          item,
+        ),
+      }));
+    });
+
+    const outboundRows: ReportRow[] = outbounds.flatMap((doc: any) => {
+      const formatted = formatOdooOutbound(doc);
+
+      const items = (formatted.items ?? []).map((item: any) => ({
+        ...item,
+        exp: getExp(item.product_id, item.lot_id) ?? item.exp ?? null,
+        zone_type: getZoneType(item.code) ?? item.zone_type ?? null,
+      }));
+
+      const resolvedType = resolveReportTypeFromNo(
+        formatted.no,
+        formatted.out_type ?? "OUT",
+      );
+
+      const department = getDepartmentName(
+        doc.department_id,
+        formatted.department,
+      );
+
+      if (items.length === 0) {
+        return [
+          {
+            source: "outbound",
+            id: `outbound-${formatted.id}-empty`,
+            no: formatted.no,
+            created_at: formatted.created_at,
+            type: resolvedType,
+            location: formatted.location ?? null,
+            location_dest: formatted.location_dest ?? null,
+            user_ref: null,
+            code: null,
+            name: null,
+            document: {
+              ...formatted,
+              out_type: resolvedType,
+              department,
+              items: [],
+            },
+          },
+        ];
+      }
+
+      return items.map((item: any, index: number) => ({
+        source: "outbound",
+        id: makeRowId("outbound", formatted.id, item, index),
+        no: formatted.no,
+        created_at: formatted.created_at,
+        type: resolvedType,
+        location: formatted.location ?? null,
+        location_dest: formatted.location_dest ?? null,
+        user_ref: null,
+        code: getItemCode(item),
+        name: getItemName(item),
+        document: withSingleItemDocument(
+          {
+            ...formatted,
+            out_type: resolvedType,
+            department,
+          },
+          item,
+        ),
+      }));
+    });
+
+    const transferDocRows: ReportRow[] = transferDocs.flatMap((doc: any) => {
+      const department = getDepartmentName(doc.department_id, doc.department);
+
+      const formattedItems = (doc.transfer_doc_items ?? []).map((item: any) => {
+        const expIso = getExp(item.product_id, item.lot_id);
+
+        return formatTransferDocItem({
+          ...item,
+          transfer_doc: {
+            ...doc,
+            department,
+          },
+          exp: expIso ? new Date(expIso) : (item.exp ?? null),
+          zone_type: getZoneType(item.code) ?? item.zone_type ?? null,
+        } as any);
+      });
+
+      const formattedDoc = {
+        id: doc.id,
+        no: doc.no ?? null,
+        lot: doc.lot ?? null,
+        date: doc.date.toISOString(),
+        quantity: doc.quantity ?? null,
+        in_type: doc.in_type ?? "TF",
+        department_id: doc.department_id ?? null,
+        department,
+        location: doc.location ?? null,
+        location_dest: doc.location_dest ?? null,
+        created_at: doc.created_at.toISOString(),
+        updated_at: doc.updated_at ? doc.updated_at.toISOString() : null,
+        items: formattedItems,
+      };
+
+      if (formattedItems.length === 0) {
+        return [
+          {
+            source: "transfer_doc",
+            id: `transfer_doc-${doc.id}-empty`,
+            no: doc.no ?? null,
+            created_at: doc.created_at.toISOString(),
+            type: doc.in_type ?? "TF",
+            location: doc.location ?? null,
+            location_dest: doc.location_dest ?? null,
+            user_ref: null,
+            code: null,
+            name: null,
+            document: formattedDoc,
+          },
+        ];
+      }
+
+      return formattedItems.map((item: any, index: number) => ({
+        source: "transfer_doc",
+        id: makeRowId("transfer_doc", doc.id, item, index),
+        no: doc.no ?? null,
+        created_at: doc.created_at.toISOString(),
+        type: doc.in_type ?? "TF",
+        location: doc.location ?? null,
+        location_dest: doc.location_dest ?? null,
+        user_ref: null,
+        code: getItemCode(item),
+        name: getItemName(item),
+        document: withSingleItemDocument(formattedDoc, item),
+      }));
+    });
+
+    const transferMovementRows: ReportRow[] = transferMovements.flatMap(
+      (doc: any) => {
+        const formatted = formatTransferMovement(doc);
+
+        const items = (formatted.items ?? []).map((item: any) => ({
+          ...item,
+          exp: getExp(item.product_id, item.lot_id) ?? item.exp ?? null,
+          zone_type: getZoneType(item.code) ?? item.zone_type ?? null,
+        }));
+
+        const department = getDepartmentName(doc.department_id, null);
+        const userRef = buildUserRef(doc.user);
+
+        if (items.length === 0) {
+          return [
+            {
+              source: "transfer_movement",
+              id: `transfer_movement-${formatted.id}-empty`,
+              no: formatted.no ?? null,
+              created_at: formatted.created_at,
+              type: "MOVE",
+              location: null,
+              location_dest: null,
+              user_ref: userRef,
+              code: null,
+              name: null,
+              document: {
+                ...formatted,
+                department,
+                items: [],
+              },
+            },
+          ];
+        }
+
+        return items.map((item: any, index: number) => ({
+          source: "transfer_movement",
+          id: makeRowId("transfer_movement", formatted.id, item, index),
+          no: formatted.no ?? null,
+          created_at: formatted.created_at,
+          type: "MOVE",
+          location: null,
+          location_dest: null,
+          user_ref: userRef,
+          code: getItemCode(item),
+          name: getItemName(item),
+          document: withSingleItemDocument(
+            {
+              ...formatted,
+              department,
+            },
+            item,
+          ),
+        }));
+      },
+    );
+
+    const adjustmentRows: ReportRow[] = adjustments
+      .filter((doc: any) => !hasSVInNo(doc.no))
+      .flatMap((doc: any) => {
+        const formatted = formatOdooAdjustment(doc);
+
+        const items = (formatted.items ?? []).map((item: any) => ({
+          ...item,
+          exp: getExp(item.product_id, item.lot_id) ?? item.exp ?? null,
+          zone_type: getZoneType(item.code) ?? item.zone_type ?? null,
+        }));
+
+        const department = getDepartmentName(
+          doc.department_id,
+          formatted.department,
+        );
+
+        if (items.length === 0) {
+          return [
+            {
+              source: "adjustment",
+              id: `adjustment-${formatted.id}-empty`,
+              no: formatted.no,
+              created_at: formatted.created_at,
+              type: formatted.type ?? "ADJ",
+              location: null,
+              location_dest: null,
+              user_ref: null,
+              code: null,
+              name: null,
+              document: {
+                ...formatted,
+                department,
+                items: [],
+              },
+            },
+          ];
+        }
+
+        return items.map((item: any, index: number) => ({
+          source: "adjustment",
+          id: makeRowId("adjustment", formatted.id, item, index),
+          no: formatted.no,
+          created_at: formatted.created_at,
+          type: formatted.type ?? "ADJ",
+          location: null,
+          location_dest: null,
+          user_ref: null,
+          code: getItemCode(item),
+          name: getItemName(item),
+          document: withSingleItemDocument(
+            {
+              ...formatted,
+              department,
+            },
+            item,
+          ),
+        }));
+      });
+
+    let rows: ReportRow[] = [
+      ...inboundRows,
+      ...outboundRows,
+      ...transferDocRows,
+      ...transferMovementRows,
+      ...adjustmentRows,
+    ];
+
+    if (type) {
+      rows = rows.filter(
+        (row) => String(row.type ?? "").toUpperCase() === type,
+      );
+    }
+
+    rows.sort((a, b) => {
+      const dir = sortDir === "asc" ? 1 : -1;
+
+      const compareText = (x: unknown, y: unknown) =>
+        normalizeText(x).localeCompare(normalizeText(y), undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+
+      const compareDate = (x: unknown, y: unknown) => {
+        const tx = new Date(String(x ?? "")).getTime();
+        const ty = new Date(String(y ?? "")).getTime();
+        const ax = Number.isFinite(tx) ? tx : 0;
+        const ay = Number.isFinite(ty) ? ty : 0;
+        return ax - ay;
+      };
+
+      let result = 0;
+
+      switch (sortBy) {
+        case "no":
+          result = compareText(a.no, b.no);
+          break;
+        case "code":
+          result = compareText(a.code, b.code);
+          break;
+        case "name":
+          result = compareText(a.name, b.name);
+          break;
+        case "type":
+          result = compareText(a.type, b.type);
+          break;
+        case "location":
+          result = compareText(a.location, b.location);
+          break;
+        case "location_dest":
+          result = compareText(a.location_dest, b.location_dest);
+          break;
+        case "user_ref":
+          result = compareText(a.user_ref, b.user_ref);
+          break;
+        case "source":
+          result = compareText(a.source, b.source);
+          break;
+        case "created_at":
+        default:
+          result = compareDate(a.created_at, b.created_at);
+          break;
+      }
+
+      if (result !== 0) return result * dir;
+
+      const createdAtTie = compareDate(a.created_at, b.created_at);
+      if (createdAtTie !== 0) {
+        return createdAtTie * -1;
+      }
+
+      return compareText(a.no, b.no);
+    });
+
+    const total = rows.length;
+    const totalPages = Math.ceil(total / limit);
+    const skip = (page - 1) * limit;
+    const data = rows.slice(skip, skip + limit);
+
+    return res.json({
+      data,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages,
+        sortBy,
+        sortDir,
+      },
+    });
+  },
+);

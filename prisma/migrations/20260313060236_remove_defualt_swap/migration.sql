@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "swaps" ALTER COLUMN "status" DROP NOT NULL,
+ALTER COLUMN "status" DROP DEFAULT;

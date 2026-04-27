@@ -1,0 +1,1406 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model user {
+  id                        Int                           @id @default(autoincrement())
+  first_name                String
+  last_name                 String
+  tel                       String
+  username                  String                        @unique
+  password                  String
+  user_level                String
+  user_img                  String?
+  status                    String
+  remark                    String?
+  created_at                DateTime                      @default(now())
+  updated_at                DateTime?
+  deleted_at                DateTime?
+  email                     String                        @unique
+  pin                       String?                       @db.Char(6)
+  departments               user_department[]
+  outbound_batches          batch_outbound[]
+  transferMovements         transfer_movement[]
+  transferMovementUserWorks transfer_movement_user_work[]
+
+  @@map("users")
+}
+
+model department {
+  full_name                   String
+  short_name                  String
+  remark                      String?
+  created_at                  DateTime                       @default(now())
+  updated_at                  DateTime?
+  deleted_at                  DateTime?
+  department_code             String?
+  department_name             String?
+  is_active                   Boolean                        @default(true)
+  last_synced_at              DateTime?
+  odoo_id                     Int?                           @unique
+  id                          Int                            @id @default(autoincrement())
+  goods                       goods[]
+  users                       user_department[]
+  transferMovements           transfer_movement[]
+  borrowStocks                borrow_stock[]
+  transferMovementDepartments transfer_movement_department[]
+  swaps                       swap[]
+  borrowStockDepartments      borrow_stock_department[]
+
+  @@map("departments")
+}
+
+model user_department {
+  id            Int        @id @default(autoincrement())
+  user_id       Int
+  created_at    DateTime   @default(now())
+  department_id Int
+  department    department @relation(fields: [department_id], references: [id])
+  user          user       @relation(fields: [user_id], references: [id])
+
+  @@unique([user_id, department_id])
+  @@index([department_id])
+  @@map("user_departments")
+}
+
+model building {
+  full_name     String
+  short_name    String
+  remark        String?
+  created_at    DateTime   @default(now())
+  updated_at    DateTime?
+  deleted_at    DateTime?
+  building_code String?
+  id            Int        @id @default(autoincrement())
+  locations     location[]
+  zones         zone[]
+
+  @@map("buildings")
+}
+
+model zone_type {
+  full_name      String
+  short_name     String
+  remark         String?
+  created_at     DateTime  @default(now())
+  updated_at     DateTime?
+  deleted_at     DateTime?
+  description    String?
+  humidity_max   Float?
+  humidity_min   Float?
+  notes          String?
+  sequence       Int?
+  station_id     Int?      @unique
+  station_name   String?
+  temp_max       Float?
+  temp_min       Float?
+  zone_type_code String?
+  id             Int       @id @default(autoincrement())
+  goods          goods[]
+  zones          zone[]
+
+  @@map("zone_types")
+}
+
+model zone {
+  full_name    String
+  short_name   String
+  remark       String?
+  created_at   DateTime   @default(now())
+  updated_at   DateTime?
+  deleted_at   DateTime?
+  zone_code    String?
+  id           Int        @id @default(autoincrement())
+  building_id  Int
+  zone_type_id Int
+  locations    location[]
+  building     building   @relation(fields: [building_id], references: [id])
+  zone_type    zone_type  @relation(fields: [zone_type_id], references: [id])
+
+  @@map("zones")
+}
+
+model location {
+  full_name     String
+  lock_no       String?
+  location_img  String?
+  status        String
+  remark        String?
+  created_at    DateTime  @default(now())
+  updated_at    DateTime?
+  deleted_at    DateTime?
+  location_code String?
+  odoo_id       Int?
+  id            Int       @id @default(autoincrement())
+  building_id   Int
+  zone_id       Int
+  ignore        Boolean   @default(false)
+  building      building  @relation(fields: [building_id], references: [id])
+  zone          zone      @relation(fields: [zone_id], references: [id])
+  ncr_check     Boolean   @default(false)
+
+  swapsFrom swap[] @relation("SwapLocation")
+  swapsTo   swap[] @relation("SwapLocationDest")
+
+  goods_in_location_confirms              goods_in_location_confirm[]                   @relation("LocationToGoodsInConfirm")
+  goods_out_item_location_confirms        goods_out_item_location_confirm[]             @relation("LocationToGoodsOutItemConfirm")
+  transfer_doc_item_location_confirms     transfer_doc_item_location_confirm[]          @relation("LocationToTFConfirm")
+  transfer_doc_item_ncr_locations         transfer_doc_item_ncr_location[]              @relation("LocationToTFItemNcrLoc")
+  transfer_doc_item_location_put_confirms transfer_doc_item_location_put_confirm[]      @relation("LocationToTFPutConfirm")
+  transferMovementItemLocationPutConfirms transfer_movement_item_location_put_confirm[]
+  goodsOutItemLocationPicks               goods_out_item_location_pick[]
+  goodsOutItemLocationReturns             goods_out_item_location_return[]              @relation("LocationToGoodsOutItemReturn")
+
+  @@map("locations")
+}
+
+model goods {
+  id             String     @id
+  sku            String
+  name           String
+  lot            String
+  exp_date_start DateTime
+  exp_date_end   DateTime
+  unit           String
+  remark         String?
+  created_at     DateTime   @default(now())
+  updated_at     DateTime?
+  deleted_at     DateTime?
+  department_id  Int
+  zone_type_id   Int
+  department     department @relation(fields: [department_id], references: [id])
+  zone_type      zone_type  @relation(fields: [zone_type_id], references: [id])
+
+  @@map("goods")
+}
+
+model barcode {
+  barcode                    String
+  created_at                 DateTime            @default(now())
+  updated_at                 DateTime?
+  deleted_at                 DateTime?
+  active                     Boolean?            @default(true)
+  barcode_id                 Int?                @unique
+  barcode_last_modified_date DateTime?
+  exp_start                  Int?
+  exp_stop                   Int?
+  internal_use               Boolean?            @default(false)
+  lot_stop                   Int?
+  product_code               String?
+  product_id                 Int?
+  product_name               String?
+  ratio                      Float?
+  tracking                   String?
+  wms_goods_id               Int?
+  id                         Int                 @id @default(autoincrement())
+  lot_start                  Int?
+  barcode_length             Int?
+  wms_goods                  wms_mdt_goods?      @relation(fields: [wms_goods_id], references: [id])
+  goods_ins                  goods_in[]
+  goods_out_items            goods_out_item[]
+  transfer_doc_items         transfer_doc_item[]
+
+  @@index([barcode_id])
+  @@index([product_id])
+  @@index([wms_goods_id])
+  @@index([barcode])
+  @@map("barcodes")
+}
+
+model wms_mdt_goods {
+  product_id                 Int
+  product_code               String?
+  product_name               String?
+  product_type               String?
+  lot_id                     Int?
+  lot_name                   String?
+  expiration_date            DateTime?
+  department_code            String?
+  department_name            String?
+  unit                       String?
+  zone_type                  String?
+  user_manaul_url            String?
+  active                     Boolean?
+  product_last_modified_date DateTime?
+  lot_last_modified_date     DateTime?
+  id                         Int       @id @default(autoincrement())
+  department_id              Int?
+  tracking                   String?
+  zone_id                    Int?
+  input_number               Boolean   @default(false)
+  barcodes                   barcode[]
+
+  @@index([product_code])
+  @@index([lot_id])
+  @@index([product_id])
+  @@index([department_id])
+  @@index([zone_id])
+  @@map("wms_mdt_goods")
+}
+
+model stock {
+  id         Int    @id @default(autoincrement())
+  bucket_key String @unique
+
+  product_id   Int
+  product_code String?
+  product_name String?
+  unit         String?
+
+  location_id   Int?
+  location_name String?
+
+  lot_id           Int?
+  lot_name         String?
+  expiration_date  DateTime?
+  overwrite_remark String?
+
+  // ✅ เพิ่มตรงนี้
+  product_last_modified_date String? @db.VarChar(50)
+
+  source   String
+  quantity Decimal  @db.Decimal(18, 3)
+  count    Int?     @default(0)
+  active   Boolean? @default(true)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@map("stocks")
+}
+
+model inbound {
+  lot              String?
+  date             DateTime
+  quantity         Int?
+  in_type          String
+  department       String
+  created_at       DateTime   @default(now())
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  department_id    String?
+  location         String?
+  location_dest    String?
+  location_dest_id Int?
+  location_id      Int?
+  origin           String?
+  picking_id       Int?
+  reference        String?
+  invoice          String?
+  status           String     @default("pending")
+  no               String     @unique
+  id               Int        @id @default(autoincrement())
+  goods_ins        goods_in[]
+
+  @@map("inbounds")
+}
+
+model goods_in {
+  id               String    @id @default(uuid()) // ✅ เปลี่ยนให้ db gen uuid
+  name             String
+  quantity_receive Int?
+  quantity_count   Int?
+  unit             String
+  zone_type        String?
+  lot              String?
+  exp              DateTime?
+  barcode13        String?
+  qr_payload       String?
+  created_at       DateTime  @default(now())
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  code             String?
+  lot_id           Int?
+  lot_serial       String?
+  product_id       Int?
+  qty              Int?
+  sequence         Int?
+  tracking         String?
+  inbound_id       Int?
+  barcode_id       Int?
+  barcode_text     String?
+  barcode_payload  String?
+  confirmed_qty    Int?      @default(0)
+  user_ref         String?
+  in_process       Boolean   @default(false)
+  print_check      Boolean   @default(false)
+  location_dest    String?
+  barcode          barcode?  @relation(fields: [barcode_id], references: [id])
+  inbound          inbound?  @relation(fields: [inbound_id], references: [id])
+
+  goods_in_location_confirms goods_in_location_confirm[] @relation("GoodsInToLocConfirm")
+
+  // ✅ เก็บคีย์เดิมที่ซ้ำได้จาก Odoo
+  odoo_line_key        String?
+  odoo_sequence        Int?
+  goodsInScanHistories goods_in_scan_history[]
+
+  @@index([odoo_line_key])
+  @@index([inbound_id, product_id])
+  @@map("goods_ins")
+}
+
+model goods_in_scan_history {
+  id                 Int      @id @default(autoincrement())
+  goods_in_id        String
+  inbound_id         Int?
+  location_id        Int?
+  location_full_name String?
+  action_type        String // SCAN, UNDO, CLEAR, EDIT_SET
+  qty_delta          Int? // +1, -1, -5
+  qty_before         Int? // qty ของ goods_in ก่อน action
+  qty_after          Int? // qty ของ goods_in หลัง action
+  loc_qty_before     Int? // qty ของ location confirm ก่อน action
+  loc_qty_after      Int? // qty ของ location confirm หลัง action
+  note               String?
+  user_ref           String?
+  created_at         DateTime @default(now())
+
+  goods_in goods_in @relation(fields: [goods_in_id], references: [id])
+
+  @@index([goods_in_id, created_at])
+  @@index([inbound_id, created_at])
+  @@map("goods_in_scan_histories")
+}
+
+model doc_invoice {
+  id          String    @id
+  doc_invoice String    @unique
+  out_type    String
+  created_at  DateTime  @default(now())
+  updated_at  DateTime?
+  deleted_at  DateTime?
+  doc_barcode String?   @unique
+  invoices    invoice[]
+
+  @@map("doc_invoices")
+}
+
+model invoice {
+  id              String         @id
+  no              String         @unique
+  doc_invoice_id  String?
+  created_at      DateTime       @default(now())
+  updated_at      DateTime?
+  deleted_at      DateTime?
+  invoice_barcode String?        @unique
+  items           invoice_item[]
+  doc_invoice     doc_invoice?   @relation(fields: [doc_invoice_id], references: [id])
+
+  @@map("invoices")
+}
+
+model goods_out {
+  id         String          @id
+  sku        String
+  name       String
+  lock_no    String
+  lock_name  String
+  box_id     String?
+  created_at DateTime        @default(now())
+  deleted_at DateTime?
+  updated_at DateTime?
+  lot_no     String
+  barcode    String
+  boxes      goods_out_box[]
+  lot        lot             @relation(fields: [lot_no], references: [no])
+  invoices   invoice_item[]
+
+  @@map("goods_outs")
+}
+
+model invoice_item {
+  invoice_id   String
+  goods_out_id String
+  created_at   DateTime  @default(now())
+  id           Int       @id @default(autoincrement())
+  pack         Int       @default(0)
+  pick         Int       @default(0)
+  quantity     Int       @default(0)
+  updated_at   DateTime?
+  goods_out    goods_out @relation(fields: [goods_out_id], references: [id])
+  invoice      invoice   @relation(fields: [invoice_id], references: [id])
+
+  @@unique([invoice_id, goods_out_id])
+  @@map("invoice_items")
+}
+
+model box {
+  box_code        String?              @unique
+  box_name        String?
+  created_at      DateTime             @default(now())
+  deleted_at      DateTime?
+  updated_at      DateTime?
+  id              Int                  @id @default(autoincrement())
+  goods_outs      goods_out_box[]
+  goods_out_items goods_out_item_box[]
+
+  @@map("boxes")
+}
+
+model goods_out_box {
+  goods_out_id String
+  quantity     Int?
+  created_at   DateTime  @default(now())
+  id           Int       @id @default(autoincrement())
+  box_id       Int
+  box          box       @relation(fields: [box_id], references: [id])
+  goods_out    goods_out @relation(fields: [goods_out_id], references: [id])
+
+  @@unique([goods_out_id, box_id])
+  @@map("goods_out_boxes")
+}
+
+model goods_out_item_box {
+  id         Int            @id @default(autoincrement())
+  item_id    Int
+  quantity   Int?
+  created_at DateTime       @default(now())
+  updated_at DateTime?
+  deleted_at DateTime?
+  box_id     Int
+  box        box            @relation(fields: [box_id], references: [id])
+  item       goods_out_item @relation(fields: [item_id], references: [id])
+
+  @@unique([item_id, box_id])
+  @@map("goods_out_item_boxes")
+}
+
+model lot {
+  no         String      @id
+  name       String?
+  created_at DateTime    @default(now())
+  updated_at DateTime?
+  deleted_at DateTime?
+  goods_outs goods_out[]
+
+  @@map("lots")
+}
+
+model odoo_request_log {
+  id              Int      @id @default(autoincrement())
+  endpoint        String
+  method          String
+  request_body    String
+  response_status Int?
+  response_body   String?
+  error_message   String?
+  ip_address      String?
+  user_agent      String?
+  created_at      DateTime @default(now())
+
+  @@index([created_at])
+  @@index([endpoint])
+  @@map("odoo_request_logs")
+}
+
+model outbound {
+  no                     String                    @unique
+  picking_id             Int?
+  location_id            Int?
+  location               String?
+  location_dest_id       Int?
+  location_dest          String?
+  department_id          String?
+  department             String
+  reference              String?
+  origin                 String?
+  date                   DateTime                  @default(now())
+  out_type               String                    @default("DO")
+  invoice                String?
+  in_process             Boolean                   @default(false)
+  created_at             DateTime                  @default(now())
+  updated_at             DateTime?
+  deleted_at             DateTime?
+  outbound_barcode       String?                   @unique
+  id                     Int                       @id @default(autoincrement())
+  goods_outs             goods_out_item[]
+  batch_lock             batch_outbound?
+  adjust_lot_logs        adjust_lot_log[]
+  outboundLotAdjustments outbound_lot_adjustment[]
+  packProductOutbounds   pack_product_outbound[]
+
+  @@map("outbounds")
+}
+
+model pack_product {
+  id          Int       @id @default(autoincrement())
+  name        String    @unique
+  scan_prefix String
+  max_box     Int
+  status      String    @default("process")
+  remark      String?
+  batch_name  String?
+  created_at  DateTime  @default(now())
+  updated_at  DateTime?
+  deleted_at  DateTime?
+
+  outbounds pack_product_outbound[]
+  boxes     pack_product_box[]
+
+  @@index([name])
+  @@index([scan_prefix])
+  @@index([batch_name])
+  @@map("pack_products")
+}
+
+model pack_product_outbound {
+  id              Int      @id @default(autoincrement())
+  pack_product_id Int
+  outbound_id     Int
+  created_at      DateTime @default(now())
+
+  pack_product pack_product @relation(fields: [pack_product_id], references: [id])
+  outbound     outbound     @relation(fields: [outbound_id], references: [id])
+
+  @@unique([pack_product_id, outbound_id])
+  @@index([outbound_id])
+  @@map("pack_product_outbounds")
+}
+
+model pack_product_box {
+  id              Int       @id @default(autoincrement())
+  pack_product_id Int
+  box_no          Int
+  box_max         Int
+  box_label       String // 1/28
+  box_code        String // BO26-02985, 1576665_ 1/28
+  status          String    @default("open") // open, closed
+  created_at      DateTime  @default(now())
+  updated_at      DateTime?
+  deleted_at      DateTime?
+
+  pack_product pack_product            @relation(fields: [pack_product_id], references: [id])
+  items        pack_product_box_item[]
+
+  @@unique([pack_product_id, box_no])
+  @@index([pack_product_id, status])
+  @@map("pack_product_boxes")
+}
+
+model pack_product_box_item {
+  id                  Int       @id @default(autoincrement())
+  pack_product_box_id Int
+  goods_out_item_id   Int
+  quantity            Int       @default(0)
+  created_at          DateTime  @default(now())
+  updated_at          DateTime?
+  deleted_at          DateTime?
+
+  pack_box       pack_product_box @relation(fields: [pack_product_box_id], references: [id])
+  goods_out_item goods_out_item   @relation(fields: [goods_out_item_id], references: [id])
+
+  @@unique([pack_product_box_id, goods_out_item_id])
+  @@index([goods_out_item_id])
+  @@map("pack_product_box_items")
+}
+
+model goods_out_item {
+  sequence           Int?
+  product_id         Int?
+  code               String?
+  name               String
+  unit               String
+  tracking           String?
+  lot_id             Int?
+  lot_serial         String?
+  qty                Int?
+  sku                String?
+  lock_no            String?
+  lock_name          String?
+  barcode            String?
+  created_at         DateTime  @default(now())
+  updated_at         DateTime?
+  deleted_at         DateTime?
+  barcode_id         Int?
+  outbound_id        Int
+  id                 Int       @id @default(autoincrement())
+  pack               Int       @default(0)
+  pick               Int       @default(0)
+  rtc                Int       @default(0)
+  return             Int       @default(0)
+  rtc_check          Boolean   @default(false)
+  return_check       Boolean   @default(false)
+  status             String    @default("DRAFT")
+  user_pick          String?
+  user_pack          String?
+  pick_time          DateTime?
+  pack_time          DateTime?
+  barcode_text       String?
+  confirmed_pick     Int       @default(0)
+  in_process         Boolean   @default(false)
+  source_item_id     Int?
+  lot_adjustment_id  Int?
+  is_split_generated Boolean   @default(false)
+
+  source_item    goods_out_item?  @relation("GoodsOutItemSplit", fields: [source_item_id], references: [id])
+  split_children goods_out_item[] @relation("GoodsOutItemSplit")
+
+  lot_adjustment              outbound_lot_adjustment?          @relation(fields: [lot_adjustment_id], references: [id])
+  adjustments                 outbound_lot_adjustment[]         @relation("goodsOutItemAdjustments")
+  boxes                       goods_out_item_box[]
+  location_confirms           goods_out_item_location_confirm[] @relation("GoodsOutItemToLocConfirm")
+  barcode_ref                 barcode?                          @relation(fields: [barcode_id], references: [id])
+  outbound                    outbound                          @relation(fields: [outbound_id], references: [id])
+  goodsOutItemLocationPicks   goods_out_item_location_pick[]
+  adjust_lot_logs             adjust_lot_log[]
+  packProductBoxItems         pack_product_box_item[]
+  goodsOutItemLocationReturns goods_out_item_location_return[]
+
+  @@map("goods_out_items")
+}
+
+model adjust_lot_log {
+  id                Int     @id @default(autoincrement())
+  outbound_id       Int?
+  goods_out_item_id Int?
+  outbound_no       String?
+  event_name        String?
+  request_path      String?
+
+  odoo_url        String?
+  request_body    Json?
+  request_headers Json?
+  response_body   Json?
+  response_status Int?
+
+  api_key_masked String?
+  api_key_hash   String?
+
+  success       Boolean   @default(false)
+  error_message String?
+  started_at    DateTime  @default(now())
+  completed_at  DateTime?
+
+  created_at DateTime  @default(now())
+  updated_at DateTime?
+
+  outbound       outbound?       @relation(fields: [outbound_id], references: [id])
+  goods_out_item goods_out_item? @relation(fields: [goods_out_item_id], references: [id])
+
+  @@index([outbound_id])
+  @@index([goods_out_item_id])
+  @@index([outbound_no])
+  @@index([success])
+  @@index([started_at])
+  @@map("adjust_lot_logs")
+}
+
+model outbound_lot_adjustment {
+  id                Int @id @default(autoincrement())
+  outbound_id       Int
+  goods_out_item_id Int
+
+  reason     String?
+  status     String  @default("pending") // pending, sent, failed, cancelled
+  created_by String?
+  updated_by String?
+
+  original_lot_serial String?
+  original_lot_id     Int?
+  original_qty        Int
+
+  // เก็บ payload fragment ตาม pattern เดิมเป๊ะ
+  odoo_payload_fragment Json?
+  queue_no              Int? // ลำดับการสะสม
+  sent_at               DateTime?
+  send_error            String?
+
+  created_at DateTime  @default(now())
+  updated_at DateTime  @updatedAt
+  deleted_at DateTime?
+
+  outbound       outbound       @relation(fields: [outbound_id], references: [id])
+  goods_out_item goods_out_item @relation("goodsOutItemAdjustments", fields: [goods_out_item_id], references: [id])
+
+  lines         outbound_lot_adjustment_line[]
+  goodsOutItems goods_out_item[]
+
+  @@index([outbound_id])
+  @@index([goods_out_item_id])
+  @@index([status])
+  @@index([queue_no])
+}
+
+model outbound_lot_adjustment_line {
+  id            Int @id @default(autoincrement())
+  adjustment_id Int
+
+  lot_id     Int?
+  lot_serial String?
+  qty        Int
+  pick       Int     @default(0)
+
+  is_original_lot   Boolean @default(false)
+  goods_out_item_id Int? // row ที่ถูกสร้าง/อัปเดตจริงหลัง apply
+
+  created_at DateTime  @default(now())
+  updated_at DateTime  @updatedAt
+  deleted_at DateTime?
+
+  adjustment outbound_lot_adjustment @relation(fields: [adjustment_id], references: [id])
+
+  @@index([adjustment_id])
+  @@index([goods_out_item_id])
+}
+
+model odoo_sync_log {
+  id               Int       @id @default(autoincrement())
+  entity_type      String
+  sync_type        String
+  status           String
+  started_at       DateTime  @default(now())
+  completed_at     DateTime?
+  records_fetched  Int?
+  records_created  Int?
+  records_updated  Int?
+  records_disabled Int?
+  error_message    String?
+  triggered_by     String?
+
+  @@map("odoo_sync_logs")
+}
+
+model stock_balance {
+  id              Int       @id @default(autoincrement())
+  snapshot_date   DateTime
+  product_id      Int
+  product_code    String
+  location_id     Int?
+  location_path   String?
+  location_name   String?
+  lot_id          Int?
+  lot_name        String?
+  quantity        Decimal   @db.Decimal(18, 3)
+  expiration_date DateTime?
+  source          String
+  created_at      DateTime  @default(now())
+  updated_at      DateTime?
+  active          Boolean?  @default(true)
+
+  @@index([snapshot_date, source])
+  @@index([product_id, lot_id, location_id, snapshot_date, source])
+  @@index([snapshot_date, product_id, source])
+  @@map("stock_balances")
+}
+
+model adjustment {
+  id                  Int               @id @default(autoincrement())
+  no                  String?
+  inventory_id        Int?
+  picking_id          Int?
+  picking_no          String?
+  department_id       String?
+  department          String
+  reference           String?
+  origin              String?
+  description         String?
+  level               String? // post-process / in-process
+  type                String? // จากเลขเอกสาร 2-3 ตัวแรก
+  status              String            @default("pending") // pending, in-progress, completed, cancelled
+  is_system_generated Boolean           @default(false)
+  date                DateTime          @default(now())
+  created_at          DateTime          @default(now())
+  updated_at          DateTime?
+  deleted_at          DateTime?
+  items               adjustment_item[]
+
+  @@map("adjustments")
+}
+
+model adjustment_item {
+  id                          Int        @id @default(autoincrement())
+  adjustment_id               Int
+  sequence                    Int?
+  product_id                  Int?
+  code                        String?
+  name                        String
+  unit                        String
+  location_id                 Int?
+  location                    String?
+  location_owner              String?
+  location_owner_display      String?
+  location_dest_id            Int?
+  location_dest               String?
+  location_dest_owner         String?
+  location_dest_owner_display String?
+  tracking                    String?
+  lot_id                      Int?
+  lot_serial                  String?
+  qty                         Int?
+  exp                         DateTime?
+  barcode_payload             String?
+  qty_pick                    Int        @default(0)
+  created_at                  DateTime   @default(now())
+  updated_at                  DateTime?
+  deleted_at                  DateTime?
+  adjustment                  adjustment @relation(fields: [adjustment_id], references: [id])
+
+  @@map("adjustment_items")
+}
+
+model wms_stock_daily {
+  id            Int      @id @default(autoincrement())
+  snapshot_date DateTime // fix เป็น 00:00:00 ของวันนั้น
+
+  bucket_key   String // ใช้ key เดียวกับ live เพื่อ trace
+  product_id   Int
+  product_code String?
+  product_name String?
+  unit         String?
+
+  location_id   Int?
+  location_name String?
+
+  lot_id          Int?
+  lot_name        String?
+  expiration_date DateTime?
+
+  quantity Decimal @db.Decimal(18, 3)
+
+  created_at DateTime @default(now())
+
+  @@unique([snapshot_date, bucket_key]) // กันซ้ำชัดเจน
+  @@index([snapshot_date])
+  @@index([product_id, snapshot_date])
+  @@map("wms_stock_daily")
+}
+
+model bor_stock {
+  id            Int       @id @default(autoincrement())
+  snapshot_date DateTime?
+  no            String?
+  product_id    Int
+  product_code  String?
+  product_name  String?
+  unit          String?
+
+  location_id                  Int?
+  location_name                String?
+  location_owner               String?
+  location_owner_display       String?
+  location_dest_owner          String?
+  location_dest_owner_dispalay String?
+  lot_id                       Int?
+  lot_name                     String?
+  expiration_date              DateTime?
+
+  department_id   String?
+  department_name String?
+
+  product_last_modified_date String? @db.VarChar(50)
+
+  source   String
+  quantity Decimal  @db.Decimal(18, 3)
+  count    Int?     @default(0)
+  active   Boolean? @default(true)
+
+  created_at DateTime  @default(now())
+  updated_at DateTime  @updatedAt
+  deleted_at DateTime?
+  user_pick  String?
+
+  @@map("bor_stocks")
+}
+
+model ser_stock {
+  id            Int       @id @default(autoincrement())
+  snapshot_date DateTime?
+  no            String?
+  product_id    Int
+  product_code  String?
+  product_name  String?
+  unit          String?
+
+  location_id                  Int?
+  location_name                String?
+  location_owner               String?
+  location_owner_display       String?
+  location_dest_owner          String?
+  location_dest_owner_dispalay String?
+
+  department_id   String?
+  department_name String?
+
+  lot_id          Int?
+  lot_name        String?
+  expiration_date DateTime?
+
+  // ✅ เพิ่มตรงนี้
+  product_last_modified_date String? @db.VarChar(50)
+
+  source   String
+  quantity Decimal  @db.Decimal(18, 3)
+  count    Int?     @default(0)
+  active   Boolean? @default(true)
+
+  created_at DateTime  @default(now())
+  updated_at DateTime  @updatedAt
+  deleted_at DateTime?
+  user_pick  String?
+
+  @@map("ser_stocks")
+}
+
+model goods_in_location_confirm {
+  id                  Int      @id @default(autoincrement())
+  goods_in_id         String
+  location_id         Int
+  confirmed_qty       Int      @default(0)
+  stock_committed_qty Int      @default(0)
+  updated_at          DateTime @updatedAt
+  created_at          DateTime @default(now())
+
+  goods_in goods_in @relation("GoodsInToLocConfirm", fields: [goods_in_id], references: [id])
+  location location @relation("LocationToGoodsInConfirm", fields: [location_id], references: [id])
+
+  @@unique([goods_in_id, location_id], name: "uniq_goodsin_location")
+  @@index([goods_in_id])
+  @@index([location_id])
+}
+
+model goods_out_item_location_confirm {
+  id                Int      @id @default(autoincrement())
+  goods_out_item_id Int
+  location_id       Int
+  confirmed_pick    Int      @default(0)
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+
+  goods_out_item goods_out_item @relation("GoodsOutItemToLocConfirm", fields: [goods_out_item_id], references: [id])
+  location       location       @relation("LocationToGoodsOutItemConfirm", fields: [location_id], references: [id])
+
+  @@unique([goods_out_item_id, location_id], name: "uniq_goodsoutitem_location")
+  @@index([goods_out_item_id])
+  @@index([location_id])
+}
+
+model goods_out_item_location_pick {
+  id                Int      @id @default(autoincrement())
+  goods_out_item_id Int
+  location_id       Int
+  qty_pick          Int      @default(0)
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+
+  goods_out_item goods_out_item @relation(fields: [goods_out_item_id], references: [id])
+  location       location       @relation(fields: [location_id], references: [id])
+
+  @@unique([goods_out_item_id, location_id])
+  @@index([goods_out_item_id])
+  @@index([location_id])
+  @@map("goods_out_item_location_picks")
+}
+
+model goods_out_item_location_return {
+  id                Int      @id @default(autoincrement())
+  goods_out_item_id Int
+  location_id       Int
+  return            Int      @default(0)
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+
+  goods_out_item goods_out_item @relation(fields: [goods_out_item_id], references: [id])
+  location       location       @relation("LocationToGoodsOutItemReturn", fields: [location_id], references: [id])
+
+  @@unique([goods_out_item_id, location_id], name: "uniq_goi_return_location")
+}
+
+model barcode_count_department {
+  id              Int     @id @default(autoincrement())
+  department_code String?
+  barcode_count   String?
+
+  @@map("barcode_count_departments")
+}
+
+model batch_outbound {
+  id   Int     @id @default(autoincrement())
+  name String?
+
+  // ✅ ให้ required ไปเลย (ไม่ควร null)
+  outbound_id Int      @unique
+  outbound    outbound @relation(fields: [outbound_id], references: [id])
+
+  user_id Int
+  user    user @relation(fields: [user_id], references: [id])
+
+  // ✅ สถานะล็อก
+  status String  @default("process")
+  remark String?
+
+  created_at  DateTime  @default(now())
+  updated_at  DateTime?
+  released_at DateTime?
+
+  @@index([user_id])
+  @@index([status])
+  @@index([name])
+  @@map("batch_outbounds")
+}
+
+model transfer_doc {
+  lot                String?
+  date               DateTime
+  quantity           Int?
+  in_type            String
+  department         String?
+  created_at         DateTime            @default(now())
+  updated_at         DateTime?
+  deleted_at         DateTime?
+  department_id      String?
+  location           String?
+  location_dest      String?
+  location_dest_id   Int?
+  location_id        Int?
+  origin             String?
+  status             String              @default("pending")
+  picking_id         Int?
+  reference          String?
+  no                 String              @unique
+  id                 Int                 @id @default(autoincrement())
+  transfer_doc_items transfer_doc_item[]
+
+  @@map("transfer_docs")
+}
+
+model transfer_doc_item {
+  id               String    @id @default(uuid())
+  name             String
+  quantity_receive Int?
+  quantity_count   Int?
+  quantity_put     Int       @default(0)
+  unit             String
+  zone_type        String?
+  lot              String?
+  exp              DateTime?
+  barcode13        String?
+  qr_payload       String?
+  created_at       DateTime  @default(now())
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  code             String?
+  lot_id           Int?
+  lot_serial       String?
+  product_id       Int?
+  qty              Int?
+  sequence         Int?
+  tracking         String?
+  transfer_doc_id  Int?
+  barcode_id       Int?
+  barcode_text     String?
+  barcode_payload  String?
+  confirmed_qty    Int?      @default(0)
+  user_ref         String?
+  in_process       Boolean   @default(false)
+
+  barcode      barcode?      @relation(fields: [barcode_id], references: [id])
+  transfer_doc transfer_doc? @relation(fields: [transfer_doc_id], references: [id])
+
+  transfer_doc_item_location_confirms transfer_doc_item_location_confirm[] @relation("TFToLocConfirm")
+
+  ncr_locations                           transfer_doc_item_ncr_location[]         @relation("TFItemToNcrLoc")
+  transfer_doc_item_location_put_confirms transfer_doc_item_location_put_confirm[] @relation("TFToLocPutConfirm")
+
+  odoo_line_key String?
+  odoo_sequence Int?
+
+  @@index([odoo_line_key])
+  @@index([transfer_doc_id, product_id])
+  @@map("transfer_doc_items")
+}
+
+model transfer_doc_item_ncr_location {
+  id                   Int      @id @default(autoincrement())
+  transfer_doc_item_id String
+  location_id          Int
+  created_at           DateTime @default(now())
+
+  transfer_doc_item transfer_doc_item @relation("TFItemToNcrLoc", fields: [transfer_doc_item_id], references: [id], onDelete: Cascade)
+  location          location          @relation("LocationToTFItemNcrLoc", fields: [location_id], references: [id])
+
+  @@unique([transfer_doc_item_id, location_id], name: "uniq_tf_item_ncr_location")
+  @@index([transfer_doc_item_id])
+  @@index([location_id])
+  @@map("transfer_doc_item_ncr_locations")
+}
+
+model transfer_doc_item_location_confirm {
+  id                   Int      @id @default(autoincrement())
+  transfer_doc_item_id String
+  location_id          Int
+  confirmed_qty        Int      @default(0)
+  updated_at           DateTime @updatedAt
+  created_at           DateTime @default(now())
+
+  transfer_doc_item transfer_doc_item @relation("TFToLocConfirm", fields: [transfer_doc_item_id], references: [id])
+  location          location          @relation("LocationToTFConfirm", fields: [location_id], references: [id])
+
+  @@unique([transfer_doc_item_id, location_id], name: "uniq_tf_location")
+  @@index([transfer_doc_item_id])
+  @@index([location_id])
+}
+
+model transfer_doc_item_location_put_confirm {
+  id                   Int      @id @default(autoincrement())
+  transfer_doc_item_id String
+  location_id          Int
+  confirmed_put        Int      @default(0)
+  updated_at           DateTime @updatedAt
+  created_at           DateTime @default(now())
+
+  transfer_doc_item transfer_doc_item @relation("TFToLocPutConfirm", fields: [transfer_doc_item_id], references: [id])
+  location          location          @relation("LocationToTFPutConfirm", fields: [location_id], references: [id])
+
+  @@unique([transfer_doc_item_id, location_id], name: "uniq_tf_put_location")
+  @@index([transfer_doc_item_id])
+  @@index([location_id])
+  @@map("transfer_doc_item_location_put_confirms")
+}
+
+model transfer_movement {
+  id     Int    @id @default(autoincrement())
+  no     String @unique
+  status String @default("pick")
+
+  user_id Int
+  user    user @relation(fields: [user_id], references: [id])
+
+  // ✅ ของเดิม (compat)
+  user_work_id Int?
+
+  // ✅ ของเดิม (compat)
+  department_id Int
+  department    department @relation(fields: [department_id], references: [id])
+
+  // ✅ NEW relations (หลาย department / หลาย user_work)
+  movement_departments transfer_movement_department[]
+  movement_user_works  transfer_movement_user_work[]
+
+  created_at DateTime  @default(now())
+  updated_at DateTime?
+  deleted_at DateTime?
+
+  items transfer_movement_item[]
+
+  @@index([user_id])
+  @@index([department_id])
+  @@map("transfer_movements")
+}
+
+model transfer_movement_item {
+  id           String    @id @default(uuid()) // เหมือน goods_in
+  sequence     Int?
+  product_id   Int?
+  code         String?
+  name         String
+  lock_no      String?
+  lock_no_dest String?
+  lot_serial   String?
+  unit         String
+  exp          DateTime?
+  qty          Int?
+  qty_pick     Int       @default(0)
+  qty_put      Int       @default(0)
+  status       String?   @default("pick") // pick, put, completed
+
+  created_at DateTime  @default(now())
+  updated_at DateTime?
+  deleted_at DateTime?
+
+  transfer_movement_id                    Int?
+  transfer_movement                       transfer_movement?                            @relation(fields: [transfer_movement_id], references: [id])
+  transferMovementItemLocationPutConfirms transfer_movement_item_location_put_confirm[]
+
+  @@index([transfer_movement_id, product_id])
+  @@map("transfer_movement_items")
+}
+
+model transfer_movement_department {
+  id Int @id @default(autoincrement())
+
+  transfer_movement_id Int
+  department_id        Int
+
+  transfer_movement transfer_movement @relation(fields: [transfer_movement_id], references: [id])
+  department        department        @relation(fields: [department_id], references: [id])
+
+  created_at DateTime @default(now())
+
+  @@unique([transfer_movement_id, department_id])
+  @@index([department_id])
+  @@index([transfer_movement_id])
+  @@map("transfer_movement_departments")
+}
+
+model transfer_movement_user_work {
+  id Int @id @default(autoincrement())
+
+  transfer_movement_id Int
+  user_id              Int
+
+  transfer_movement transfer_movement @relation(fields: [transfer_movement_id], references: [id])
+  user              user              @relation(fields: [user_id], references: [id])
+
+  created_at DateTime @default(now())
+
+  @@unique([transfer_movement_id, user_id])
+  @@index([user_id])
+  @@index([transfer_movement_id])
+  @@map("transfer_movement_user_works")
+}
+
+model transfer_movement_item_location_put_confirm {
+  id                        Int      @id @default(autoincrement())
+  transfer_movement_item_id String
+  location_id               Int
+  confirmed_put             Int      @default(0)
+  updated_at                DateTime @updatedAt
+  created_at                DateTime @default(now())
+
+  transfer_movement_item transfer_movement_item @relation(fields: [transfer_movement_item_id], references: [id])
+  location               location               @relation(fields: [location_id], references: [id])
+
+  @@unique([transfer_movement_item_id, location_id], name: "uniq_mm_put_location")
+  @@index([transfer_movement_item_id])
+  @@index([location_id])
+  @@map("transfer_movement_item_location_put_confirms")
+}
+
+model borrow_stock {
+  id            Int    @id @default(autoincrement())
+  location_name String
+
+  department_id Int?
+  department    department? @relation(fields: [department_id], references: [id])
+
+  status     String    @default("pending")
+  user_ref   String?
+  remark     String?
+  created_at DateTime  @default(now())
+  updated_at DateTime?
+  deleted_at DateTime?
+
+  borrowStockItems       borrow_stock_item[]
+  borrowStockDepartments borrow_stock_department[]
+
+  @@map("borrow_stocks")
+}
+
+model borrow_stock_department {
+  id              Int @id @default(autoincrement())
+  borrow_stock_id Int
+  department_id   Int
+
+  borrow_stock borrow_stock @relation(fields: [borrow_stock_id], references: [id])
+  department   department   @relation(fields: [department_id], references: [id])
+
+  created_at DateTime @default(now())
+
+  @@unique([borrow_stock_id, department_id])
+  @@index([borrow_stock_id])
+  @@index([department_id])
+  @@map("borrow_stock_departments")
+}
+
+model borrow_stock_item {
+  id              Int          @id @default(autoincrement())
+  borrow_stock_id Int
+  borrow_stock    borrow_stock @relation(fields: [borrow_stock_id], references: [id])
+  code            String
+  name            String?
+  lot_serial      String
+  expiration_date DateTime?
+  system_qty      Int
+  executed_qty    Int?
+  created_at      DateTime     @default(now())
+  updated_at      DateTime?
+  deleted_at      DateTime?
+
+  @@map("borrow_stock_items")
+}
+
+model swap {
+  id         Int     @id @default(autoincrement())
+  name       String?
+  no         String? @unique
+  picking_id Int?
+
+  odoo_location_id   Int?
+  source_location_id Int?
+  source_location    String?
+
+  // ปลายทางจาก Odoo
+  odoo_location_dest_id Int?
+  dest_location_id      Int?
+  dest_location         String?
+
+  location_id   Int?
+  location      location? @relation("SwapLocation", fields: [location_id], references: [id])
+  location_name String
+
+  // relation ปลายทางในระบบเรา
+  location_dest_id   Int?
+  location_dest      location? @relation("SwapLocationDest", fields: [location_dest_id], references: [id])
+  location_dest_name String?
+
+  department_id Int?
+  department    department? @relation(fields: [department_id], references: [id])
+
+  status    String?
+  user_ref  String?
+  remark    String?
+  origin    String?
+  reference String?
+
+  created_at DateTime  @default(now())
+  updated_at DateTime?
+  deleted_at DateTime?
+
+  swapItems swap_item[]
+
+  @@index([picking_id])
+  @@index([location_id])
+  @@index([location_dest_id])
+  @@index([department_id])
+  @@index([status])
+  @@index([name])
+  @@map("swaps")
+}
+
+model swap_item {
+  id      Int  @id @default(autoincrement())
+  swap_id Int
+  swap    swap @relation(fields: [swap_id], references: [id])
+
+  source_sequence Int?
+  odoo_line_key   String?
+  product_id      Int?
+  code            String?
+  name            String?
+  unit            String?
+  tracking        String?
+
+  lot_id          Int?
+  lot_serial      String?
+  barcode_text    String?
+  expiration_date DateTime?
+
+  system_qty   Int @default(0)
+  executed_qty Int @default(0)
+
+  created_at DateTime  @default(now())
+  updated_at DateTime?
+  deleted_at DateTime?
+
+  @@index([swap_id])
+  @@index([product_id])
+  @@index([lot_serial])
+  @@index([odoo_line_key])
+  @@map("swap_items")
+}
