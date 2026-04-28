@@ -1978,142 +1978,275 @@ async function increaseStockFromOutboundReturnTx(
     return;
   }
 
-  await tx.stock.create({
-    data: {
+await tx.stock.create({
+  data: {
+    bucket_key: buildStockBucketKey({
+      source: "wms",
       product_id: args.item.product_id,
-      product_code: args.item.code ?? null,
-      product_name: args.item.name ?? null,
-      unit: args.item.unit ?? null,
       location_id: args.location.id,
-      location_name: args.location.full_name,
       lot_id: args.item.lot_id ?? null,
       lot_name: fallback.lot_serial ?? null,
       expiration_date: fallback.exp ?? null,
-      quantity: new Prisma.Decimal(qty),
-      source: "wms",
-      active: true,
-    } as any,
-  });
-}
+    }),
 
-function parseOutboundReturnBarcode(raw: string): ParsedBarcodeResult {
-  const fn =
-    (BarcodeHelper as any).parseBarcode ||
-    (BarcodeHelper as any).parseBarcodeForScan ||
-    (BarcodeHelper as any).parseBarcodeGS1 ||
-    (BarcodeHelper as any).parseScanBarcode;
+    product_id: args.item.product_id,
+    product_code: args.item.code ?? null,
+    product_name: args.item.name ?? null,
+    unit: args.item.unit ?? null,
 
-  if (typeof fn !== "function") {
-    throw badRequest(
-      "ไม่พบ barcode parser ใน helper_scan/barcode กรุณา map ชื่อ function ให้ตรงกับของจริง",
-    );
-  }
+    location_id: args.location.id,
+    location_name: args.location.full_name,
 
-  const parsed = fn(raw);
+    lot_id: args.item.lot_id ?? null,
+    lot_name: fallback.lot_serial ?? null,
+    expiration_date: fallback.exp ?? null,
 
-  return {
-    product_id: parsed?.product_id ?? null,
-    lot_serial: parsed?.lot_serial ?? parsed?.lot_name ?? null,
-    exp: parsed?.exp ? new Date(parsed.exp) : null,
-    barcode_text: parsed?.barcode_text ?? parsed?.barcode ?? raw ?? null,
-  };
+    quantity: new Prisma.Decimal(qty),
+    source: "wms",
+    active: true,
+  } as any,
+});
 }
 
 export const scanBarcodeOutboundReturn = asyncHandler(
   async (req: Request, res: Response) => {
-    const no = String(req.params.no || "");
+    const no = String(req.params.no || "").trim();
     const barcode = String(req.body?.barcode || "").trim();
     const location_full_name = String(
       req.body?.location_full_name || "",
     ).trim();
-    const qty_input = Number(req.body?.qty_input || 1);
+
+    const qtyInputRaw = req.body?.qty_input;
+    const qtyInput =
+      qtyInputRaw == null || qtyInputRaw === "" ? 1 : Number(qtyInputRaw);
 
     if (!no) throw badRequest("no is required");
     if (!barcode) throw badRequest("barcode is required");
     if (!location_full_name) throw badRequest("location_full_name is required");
 
-    const qty = Math.max(1, Math.floor(qty_input || 1));
+    if (!Number.isFinite(qtyInput) || qtyInput <= 0) {
+      throw badRequest("qty_input ต้องเป็นตัวเลขมากกว่า 0");
+    }
+
+    const qty = Math.max(1, Math.floor(qtyInput));
 
     const outbound = await prisma.outbound.findFirst({
       where: { no, deleted_at: null } as any,
+      select: {
+        id: true,
+        no: true,
+      },
     });
 
     if (!outbound) throw notFound("outbound not found");
 
     const location = await resolveLocationByFullNameBasic(location_full_name);
-    const parsed = parseOutboundReturnBarcode(barcode);
 
-    if (!parsed.product_id) {
-      throw badRequest("barcode นี้ parse product_id ไม่ได้");
+    const masterBc = await findMasterBarcodeForScan(barcode);
+
+    const masterBarcodeBase = masterBc
+      ? normalizeBarcodeBaseForMatch(masterBc.barcode ?? "")
+      : "";
+
+    const scannedBarcodeBase = normalizeBarcodeBaseForMatch(barcode);
+
+    let candidates: any[] = [];
+
+    if (masterBarcodeBase) {
+      candidates = await findCandidateGoodsOutItemsByBarcodeBase(
+        Number(outbound.id),
+        masterBarcodeBase,
+      );
     }
-
-    const candidates = await prisma.goods_out_item.findMany({
-      where: {
-        outbound_id: outbound.id,
-        deleted_at: null,
-        product_id: parsed.product_id,
-      },
-      orderBy: [{ id: "desc" }],
-    });
 
     if (!candidates.length) {
-      throw notFound(
-        `ไม่พบ goods_out_item สำหรับ product_id=${parsed.product_id}`,
+      candidates = await findCandidateGoodsOutItemsByScannedBarcode(
+        Number(outbound.id),
+        scannedBarcodeBase,
       );
     }
 
-    let matched =
-      candidates.find((item) => {
-        const sameLot =
-          (parsed.lot_serial ?? null) === (item.lot_serial ?? null);
-        const sameExp =
-          normalizeDateOnlyKey(parsed.exp) === normalizeDateOnlyKey(null);
-        if (parsed.lot_serial) return sameLot;
-        return true;
-      }) ?? candidates[0];
+    if (!candidates.length) {
+      throw badRequest(`ไม่พบสินค้าใน outbound สำหรับ barcode: ${barcode}`);
+    }
 
-    const maxReturnable = Math.max(
-      0,
-      Number(matched.confirmed_pick ?? 0) - Number(matched.return ?? 0),
-    );
+    let matched: any = null;
+    let parsedResult: any = null;
 
-    if (qty > maxReturnable) {
+    for (const item of candidates) {
+      if (item.product_id == null) continue;
+
+      if (
+        masterBc?.product_id != null &&
+        Number(masterBc.product_id) !== Number(item.product_id)
+      ) {
+        continue;
+      }
+
+      const parsedRaw = masterBc
+        ? parseScannedBarcodeByMasterMeta({
+            scannedBarcode: barcode,
+            masterBarcode: String(masterBc.barcode ?? ""),
+            lot_start: masterBc.lot_start,
+            lot_stop: masterBc.lot_stop,
+            exp_start: masterBc.exp_start,
+            exp_stop: masterBc.exp_stop,
+          })
+        : parseScannedBarcodeByBaseBarcode(
+            barcode,
+            String(item.barcode_text ?? ""),
+          );
+
+      const parsed: any = parsedRaw;
+
+      const lotMatched = lotMatchedNullable(
+        item.lot_serial,
+        parsed.lot_serial,
+      );
+
+      const stockExp = await findStockExpByProductLot(
+        Number(item.product_id),
+        item.lot_id ?? null,
+      );
+
+      const expMatched = expMatchedNullable(
+        stockExp,
+        parsed.exp ?? null,
+        parsed.exp_text,
+      );
+
+      if (!lotMatched) continue;
+      if (!expMatched) continue;
+
+      const parsedBarcodeText =
+        parsed.barcode_text ?? item.barcode_text ?? barcode;
+
+      const parsedExpText = parsed.exp_text ?? "999999";
+
+      const fallbackNormalizedScan = `${parsedBarcodeText}${
+        parsed.lot_serial ?? ""
+      }${parsedExpText !== "999999" ? parsedExpText : ""}`;
+
+      matched = item;
+      parsedResult = {
+        barcode_text: parsedBarcodeText,
+        lot_serial: parsed.lot_serial ?? null,
+        exp_text: parsedExpText,
+        exp: parsed.exp ?? null,
+        normalized_scan: parsed.normalized_scan ?? fallbackNormalizedScan,
+        matched_by: parsed.matched_by ?? (masterBc ? "FIXED_META" : "BASE"),
+      };
+      break;
+    }
+
+    if (!matched || !parsedResult) {
       throw badRequest(
-        `จำนวนคืนเกินกว่าที่คืนได้ item=${matched.id}, return ได้สูงสุด ${maxReturnable}`,
+        `ไม่พบสินค้าใน outbound ที่ตรงกับ barcode_text + lot_serial + exp สำหรับ barcode: ${barcode}`,
       );
     }
 
-    await prisma.$transaction(async (tx) => {
-      await tx.goods_out_item.update({
-        where: { id: matched.id },
+    const saved = await prisma.$transaction(async (tx) => {
+      const freshItem = await tx.goods_out_item.findUnique({
+        where: { id: Number(matched.id) },
+        select: {
+          id: true,
+          outbound_id: true,
+          product_id: true,
+          lot_id: true,
+          lot_serial: true,
+          code: true,
+          name: true,
+          unit: true,
+          qty: true,
+          pick: true,
+          confirmed_pick: true,
+          return: true,
+          return_check: true,
+          barcode_text: true,
+          deleted_at: true,
+        } as any,
+      });
+
+      if (!freshItem || freshItem.deleted_at) {
+        throw badRequest("ไม่พบ goods_out_item ที่ต้องการคืน");
+      }
+
+      const maxReturnable = Math.max(
+        0,
+        Number((freshItem as any).confirmed_pick ?? 0) -
+          Number((freshItem as any).return ?? 0),
+      );
+
+      if (qty > maxReturnable) {
+        throw badRequest(
+          `จำนวนคืนเกินกว่าที่คืนได้ item=${freshItem.id}, return ได้สูงสุด ${maxReturnable}`,
+        );
+      }
+
+      const updatedItem = await tx.goods_out_item.update({
+        where: { id: Number(freshItem.id) },
         data: {
-          return: { increment: qty },
+          return: {
+            increment: qty,
+          },
           return_check: false,
           updated_at: new Date(),
-        },
+        } as any,
       });
 
-      await (tx as any).goods_out_item_location_return.upsert({
-        where: {
-          uniq_goi_return_location: {
-            goods_out_item_id: matched.id,
-            location_id: location.id,
-          },
-        },
-        update: {
-          return_qty: { increment: qty },
-          updated_at: new Date(),
-        },
-        create: {
-          goods_out_item_id: matched.id,
-          location_id: location.id,
-          return_qty: qty,
-        },
-      });
+await (tx as any).goods_out_item_location_return.upsert({
+  where: {
+    uniq_goi_return_location: {
+      goods_out_item_id: Number(freshItem.id),
+      location_id: Number(location.id),
+    },
+  },
+  update: {
+    return: {
+      increment: qty,
+    },
+    updated_at: new Date(),
+  },
+  create: {
+    goods_out_item_id: Number(freshItem.id),
+    location_id: Number(location.id),
+    return: qty,
+  },
+});
+
+      return {
+        updatedItem,
+        appliedQty: qty,
+      };
     });
 
-    return res.json({
+    const detail = await buildOutboundDetail(
+      Number(outbound.id),
+      no,
+      Number(location.id),
+    );
+
+    const matchedLine =
+      detail.lines.find((l: any) => Number(l.id) === Number(matched.id)) ??
+      null;
+
+    const payload = {
       message: "scan return สำเร็จ",
+      ...detail,
+      scanned: {
+        barcode,
+        barcode_text: parsedResult.barcode_text,
+        lot_serial: parsedResult.lot_serial,
+        exp: parsedResult.exp ? new Date(parsedResult.exp).toISOString() : null,
+        normalized_scan: parsedResult.normalized_scan,
+        matched_by: parsedResult.matched_by,
+      },
+      location: {
+        location_id: location.id,
+        location_name: location.full_name,
+      },
+      returnQty: saved.appliedQty,
+      matchedLine,
       data: {
         outbound_id: outbound.id,
         outbound_no: outbound.no,
@@ -2123,14 +2256,17 @@ export const scanBarcodeOutboundReturn = asyncHandler(
         name: matched.name,
         lot_id: matched.lot_id,
         lot_serial: matched.lot_serial,
-        qty_return_added: qty,
+        qty_return_added: saved.appliedQty,
         location_id: location.id,
         location_full_name: location.full_name,
       },
-    });
+    };
+
+    emitOutboundRealtime(no, "outbound:scan_return", payload, Number(outbound.id));
+
+    return res.json(payload);
   },
 );
-
 /**
  * =========================
  * Confirm Pick -> Decrement Stock
@@ -2767,6 +2903,34 @@ export const confirmOutboundPickToStock = asyncHandler(
   },
 );
 
+function buildStockBucketKey(args: {
+  source?: string | null;
+  product_id: number;
+  location_id?: number | null;
+  lot_id?: number | null;
+  lot_name?: string | null;
+  expiration_date?: Date | string | null;
+}) {
+  const source = String(args.source ?? "wms").trim().toLowerCase();
+  const productId = Number(args.product_id || 0);
+  const locationId = args.location_id == null ? "null" : String(args.location_id);
+  const lotId = args.lot_id == null ? "null" : String(args.lot_id);
+  const lotName = String(args.lot_name ?? "").trim().toLowerCase();
+
+  const exp = args.expiration_date
+    ? new Date(args.expiration_date).toISOString().slice(0, 10)
+    : "null";
+
+  return [
+    source,
+    `p:${productId}`,
+    `loc:${locationId}`,
+    `lotid:${lotId}`,
+    `lot:${lotName || "null"}`,
+    `exp:${exp}`,
+  ].join("|");
+}
+
 export const confirmOutboundReturn = asyncHandler(
   async (req: Request, res: Response) => {
     const no = String(req.params.no || "");
@@ -2800,7 +2964,7 @@ export const confirmOutboundReturn = asyncHandler(
         ).goods_out_item_location_return.findMany({
           where: {
             goods_out_item_id: item.id,
-            return_qty: { gt: 0 },
+            return: { gt: 0 },
           },
           orderBy: [{ id: "asc" }],
         });
@@ -2838,7 +3002,7 @@ export const confirmOutboundReturn = asyncHandler(
               id: location.id,
               full_name: location.full_name,
             },
-            qty: Number(row.return_qty || 0),
+            qty: Number(row.return || 0),
           });
         }
 

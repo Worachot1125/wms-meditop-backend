@@ -2,28 +2,38 @@
   "params": {
     "transfers": [
       {
-        "picking_id": 593717,
-        "number": "GR26-00011",
-        "location_id": 8,
-        "location": "MDT",
+        "picking_id": 596437,
+        "no": "WH/TF/007",
+        "location_id": 11173,
+        "location": "WH/M_EXP&NCR",
+        "location_owner": [],
+        "location_owner_display": [],
         "location_dest_id": 8,
         "location_dest": "WH/MDT",
-        "department_id": 12,
-        "department": "RND - Renal Division",
-        "reference": "Bicarb,GR01203",
-        "origin": "POD-26-0001",
+        "location_dest_owner": [],
+        "location_dest_owner_display": [],
+        "department_id": 6,
+        "department": "DIA - Diagnostic Division",
+        "reference": false,
+        "origin": false,
         "items": [
           {
-            "sequence": 5,
-            "product_id": 24390,
-            "code": "APH-BICARB-HD",
-            "name": "น้ำยา 8972 Bicarb HD 2C-BIC-00-SA-500 ml  ",
-            "unit": "BAG",
+            "sequence": 10,
+            "product_id": 5778,
+            "code": "SMN-DM-10445022",
+            "name": "DM MALB Calibrator 1ML Fill 2 Sets/CA (2x5x1 ml)  ",
+            "unit": "PACK",
             "tracking": "lot",
-            "lot_id": 128912,
-            "lot_serial": "2429293202",
-            "expiration_date": "2026-06-30",
-            "qty": 3000
+            "lot_id": 119112,
+            "lot_serial": "5BD049",
+            "expire_date": "2026-02-01",
+            "qty": 1,
+            "barcodes": [
+              {
+                "barcode_id": 411,
+                "barcode": "00842768004896"
+              }
+            ]
           }
         ]
       }

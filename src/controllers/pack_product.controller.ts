@@ -95,7 +95,10 @@ function parseFlexibleDateSearch(search: string): {
   const raw = String(search ?? "").trim();
   if (!raw) return null;
 
-  const normalized = raw.replace(/\s*,\s*/g, " ").replace(/\s+/g, " ").trim();
+  const normalized = raw
+    .replace(/\s*,\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
   // dd/MM/yyyy [HH:mm[:ss]]
   const thaiLike = normalized.match(
@@ -171,7 +174,9 @@ function parseFlexibleDateSearch(search: string): {
   return null;
 }
 
-function buildPackProductSearchWhere(search: string): Prisma.pack_productWhereInput {
+function buildPackProductSearchWhere(
+  search: string,
+): Prisma.pack_productWhereInput {
   const trimmed = String(search ?? "").trim();
 
   if (!trimmed) {
@@ -192,10 +197,7 @@ function buildPackProductSearchWhere(search: string): Prisma.pack_productWhereIn
   // search เลข id / max_box
   const num = toSearchNumber(trimmed);
   if (num !== null) {
-    orConditions.push(
-      { id: num },
-      { max_box: num },
-    );
+    orConditions.push({ id: num }, { max_box: num });
   }
 
   // search date/time
@@ -339,7 +341,6 @@ function parsePackBarcode(rawInput: unknown): ParsedPackBarcode {
   };
 }
 
-
 function buildPackName(prefixRaw: string) {
   return `PACK_${prefixRaw}`;
 }
@@ -365,9 +366,7 @@ type OutboundWithBatch = {
   } | null;
 };
 
-function validatePackBatchName(
-  outbounds: OutboundWithBatch[],
-): {
+function validatePackBatchName(outbounds: OutboundWithBatch[]): {
   batch_name: string;
   batch_row_ids: number[];
   batch_statuses: string[];
@@ -390,7 +389,9 @@ function validatePackBatchName(
 
   const batchNames = Array.from(
     new Set(
-      outbounds.map((ob) => String(ob.batch_lock?.name ?? "").trim()).filter(Boolean),
+      outbounds
+        .map((ob) => String(ob.batch_lock?.name ?? "").trim())
+        .filter(Boolean),
     ),
   );
 
@@ -404,7 +405,9 @@ function validatePackBatchName(
     batch_name: batchNames[0],
     batch_row_ids: outbounds.map((ob) => Number(ob.batch_lock!.id)),
     batch_statuses: Array.from(
-      new Set(outbounds.map((ob) => String(ob.batch_lock?.status ?? "").trim())),
+      new Set(
+        outbounds.map((ob) => String(ob.batch_lock?.status ?? "").trim()),
+      ),
     ),
   };
 }
@@ -413,8 +416,10 @@ async function emitPackProductSocketUpdate(packProductId: number) {
   const full = await loadPackProductFull(packProductId);
   if (!full || full.deleted_at) return;
 
-  const formatted = formatPackProduct(full as any);
-  const summary = buildPackProductSummary({ packProduct: full });
+  const adjustedFull = applyReturnToPackProduct(full as any);
+
+  const formatted = formatPackProduct(adjustedFull as any);
+  const summary = buildPackProductSummary({ packProduct: adjustedFull });
 
   io.to(getPackProductRoom(packProductId)).emit("pack_product:updated", {
     pack_product_id: packProductId,
@@ -856,6 +861,58 @@ function pickSingleMatchedItem(
   parsedBarcodeText: string,
   parsedLotSerial: string,
 ) {
+  const matchDebugRows = allItems.map((item: any) => {
+    const rawNorm = normalizeScanText(rawBarcode);
+    const parsedBarcodeNorm = normalizeScanText(parsedBarcodeText);
+    const parsedLotNorm = normalizeScanText(parsedLotSerial);
+
+    const itemCodeNorm = normalizeScanText(item.code ?? "");
+    const itemBarcodeTextNorm = normalizeScanText(item.barcode_text ?? "");
+    const itemBarcodeMasterNorm = normalizeScanText(
+      item.barcode_ref?.barcode ?? "",
+    );
+    const itemLotNorm = normalizeScanText(item.lot_serial ?? "");
+
+    const barcodeMatched =
+      (!!itemBarcodeTextNorm && itemBarcodeTextNorm === parsedBarcodeNorm) ||
+      (!!itemBarcodeMasterNorm &&
+        itemBarcodeMasterNorm === parsedBarcodeNorm) ||
+      (!!itemCodeNorm && itemCodeNorm === parsedBarcodeNorm) ||
+      (!!itemBarcodeTextNorm && itemBarcodeTextNorm === rawNorm) ||
+      (!!itemBarcodeMasterNorm && itemBarcodeMasterNorm === rawNorm) ||
+      (!!itemCodeNorm && itemCodeNorm === rawNorm);
+
+    const lotMatched = !parsedLotNorm || parsedLotNorm === itemLotNorm;
+
+    return {
+      id: item.id,
+      outbound_no: item.outbound_no,
+      code: item.code,
+      barcode_text: item.barcode_text,
+      barcode_ref: item.barcode_ref?.barcode ?? null,
+      lot_serial: item.lot_serial,
+
+      rawNorm,
+      parsedBarcodeNorm,
+      parsedLotNorm,
+      itemCodeNorm,
+      itemBarcodeTextNorm,
+      itemBarcodeMasterNorm,
+      itemLotNorm,
+
+      barcodeMatched,
+      lotMatched,
+      finalMatched: barcodeMatched && lotMatched,
+
+      original_qty: item.original_qty,
+      return_qty: item.return_qty,
+      qty_after_return: item.qty,
+      pack: item.pack,
+      remaining: Math.max(0, Number(item.qty ?? 0) - Number(item.pack ?? 0)),
+    };
+  });
+
+
   const matchedItems = allItems.filter((item: any) =>
     goodsOutItemBarcodeMatched({
       rawBarcode,
@@ -864,7 +921,7 @@ function pickSingleMatchedItem(
       item,
     }),
   );
-
+  
   if (matchedItems.length === 0) {
     throw notFound("ไม่พบสินค้าใน pack_product นี้ที่ตรงกับ barcode ที่สแกน");
   }
@@ -888,6 +945,42 @@ function pickSingleMatchedItem(
   }
 
   return matchedItems[0];
+}
+
+function applyReturnToPackProduct(row: any) {
+  const cloned = {
+    ...row,
+    outbounds: Array.isArray(row?.outbounds)
+      ? row.outbounds.map((po: any) => ({
+          ...po,
+          outbound: po?.outbound
+            ? {
+                ...po.outbound,
+                goods_outs: Array.isArray(po.outbound?.goods_outs)
+                  ? po.outbound.goods_outs.map((item: any) => {
+                      const returnQty = Math.max(0, Number(item.return ?? 0));
+
+                      return {
+                        ...item,
+
+                        // ✅ แสดงยอดหลังหัก return
+                        qty: Math.max(0, Number(item.qty ?? 0) - returnQty),
+                        pick: Math.max(0, Number(item.pick ?? 0) - returnQty),
+
+                        // ✅ เก็บค่าเดิมไว้ เผื่อ FE อยากใช้
+                        original_qty: Number(item.qty ?? 0),
+                        original_pick: Number(item.pick ?? 0),
+                        return_qty: returnQty,
+                      };
+                    })
+                  : po.outbound?.goods_outs,
+              }
+            : po?.outbound,
+        }))
+      : row?.outbounds,
+  };
+
+  return cloned;
 }
 
 /**
@@ -985,14 +1078,14 @@ export const getPackProducts = asyncHandler(
     ]);
 
     return res.json({
-      data: rows.map((row) => formatPackProduct(row as any)),
+      data: rows.map((row) =>
+        formatPackProduct(applyReturnToPackProduct(row as any)),
+      ),
       meta: {
         page,
         limit,
         total,
         totalPages: Math.ceil(total / limit),
-
-        // ✅ เพิ่มตรงนี้
         statusCounts: {
           process: processCount,
           completed: completedCount,
@@ -1017,7 +1110,7 @@ export const getPackProductById = asyncHandler(
     }
 
     return res.json({
-      data: formatPackProduct(row as any),
+      data: formatPackProduct(applyReturnToPackProduct(row as any)),
     });
   },
 );
@@ -1078,7 +1171,7 @@ export const getPackProductByPrefix = asyncHandler(
     }
 
     return res.json({
-      data: formatPackProduct(row as any),
+      data: formatPackProduct(applyReturnToPackProduct(row as any)),
     });
   },
 );
@@ -1130,7 +1223,11 @@ export const getPackProductSummary = asyncHandler(
       throw notFound("ไม่พบ pack_product");
     }
 
-    const summary = buildPackProductSummary({ packProduct });
+    const adjustedPackProduct = applyReturnToPackProduct(packProduct as any);
+
+    const summary = buildPackProductSummary({
+      packProduct: adjustedPackProduct,
+    });
 
     return res.json({
       data: summary,
@@ -1447,6 +1544,8 @@ export const scanPackProductBarcode = asyncHandler(
         (b: any) => Number(b.id) === Number(txResult.activeBoxId),
       ) ?? null;
 
+    const adjustedFull = applyReturnToPackProduct(full as any);
+
     await emitPackProductSocketUpdate(txResult.packProductId);
 
     return res.json({
@@ -1476,11 +1575,12 @@ export const scanPackProductBarcode = asyncHandler(
               updated_at: currentBox.updated_at,
             }
           : null,
-        ...formatPackProduct(full as any),
+        ...formatPackProduct(adjustedFull as any),
       },
     });
   },
 );
+
 
 /**
  * POST /api/outbounds/pack-products/:packProductId/boxes/:boxId/scan-item
@@ -1564,7 +1664,9 @@ export const scanPackProductItem = asyncHandler(
     const parsedBarcodeText = normalizeText(parsed.barcode_text);
     const parsedLotSerial = normalizeText(parsed.lot_serial);
 
-    const allItems = (packProduct.outbounds ?? []).flatMap((row: any) =>
+    const adjustedPackProduct = applyReturnToPackProduct(packProduct as any);
+
+    const allItems = (adjustedPackProduct.outbounds ?? []).flatMap((row: any) =>
       (row.outbound?.goods_outs ?? []).map((item: any) => ({
         ...item,
         outbound_no: row.outbound?.no ?? null,
@@ -2302,7 +2404,7 @@ export const finalizePackProduct = asyncHandler(
         },
       });
     }
-
+    const adjustedPackProduct = applyReturnToPackProduct(packProduct as any);
     const maxBox = Number(packProduct.max_box ?? 0);
     const boxes = Array.isArray(packProduct.boxes) ? packProduct.boxes : [];
     const uniqueBoxNos = (
@@ -2324,7 +2426,7 @@ export const finalizePackProduct = asyncHandler(
       if (!uniqueBoxNos.includes(i)) missingBoxNos.push(i);
     }
 
-    const allItems = (packProduct.outbounds ?? []).flatMap((row: any) =>
+    const allItems = (adjustedPackProduct.outbounds ?? []).flatMap((row: any) =>
       (row.outbound?.goods_outs ?? []).map((item: any) => ({
         id: item.id,
         outbound_id: item.outbound_id,

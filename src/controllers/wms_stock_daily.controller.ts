@@ -17,7 +17,6 @@ import {
 } from "../utils/formatters/transfer_movement.formatter";
 import { formatOdooAdjustment } from "../utils/formatters/adjustment.formatter";
 
-
 async function buildLocationMap(locationIds: number[]) {
   const uniqueIds = [...new Set(locationIds.filter((id) => !!id))];
 
@@ -328,7 +327,8 @@ type ReportRow = {
     | "outbound"
     | "transfer_doc"
     | "transfer_movement"
-    | "adjustment";
+    | "adjustment"
+    | "swap";
   id: number;
   no: string | null;
   created_at: string;
@@ -353,7 +353,9 @@ function buildUserRef(user: any): string | null {
 }
 
 function hasSVInNo(no: unknown): boolean {
-  return String(no ?? "").toUpperCase().includes("SV");
+  return String(no ?? "")
+    .toUpperCase()
+    .includes("SV");
 }
 
 function resolveReportTypeFromNo(
@@ -907,6 +909,71 @@ function buildAdjustmentReportWhere(
   return where;
 }
 
+function buildSwapReportWhere(
+  createdAtFilter: any,
+  search: string,
+  columns: string[],
+) {
+  const where: any = {
+    ...(createdAtFilter ? { created_at: createdAtFilter } : {}),
+  };
+
+  if (!search) return where;
+
+  const orConditions: any[] = [];
+
+  if (columns.includes("no")) {
+    orConditions.push({ no: { contains: search, mode: "insensitive" } });
+    orConditions.push({ name: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("location")) {
+    orConditions.push({
+      source_location: { contains: search, mode: "insensitive" },
+    });
+    orConditions.push({
+      location_name: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (columns.includes("location_dest")) {
+    orConditions.push({
+      dest_location: { contains: search, mode: "insensitive" },
+    });
+    orConditions.push({
+      location_dest_name: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (columns.includes("status")) {
+    orConditions.push({ status: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("origin")) {
+    orConditions.push({ origin: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("reference")) {
+    orConditions.push({ reference: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("user_ref")) {
+    orConditions.push({ user_ref: { contains: search, mode: "insensitive" } });
+  }
+
+  if (columns.includes("created_at")) {
+    const dateRange = buildDateRangeFromSearch(search);
+    if (dateRange) {
+      orConditions.push({ created_at: dateRange });
+    }
+  }
+
+  if (orConditions.length > 0) where.OR = orConditions;
+  else where.id = -1;
+
+  return where;
+}
+
 function withDeletedAtNull<T extends Record<string, any> | undefined>(
   where?: T,
 ) {
@@ -922,7 +989,6 @@ function normalizeProductCode(v: unknown): string {
     .toLowerCase()
     .replace(/[\s\-_./]+/g, "");
 }
-
 
 export const getTransactionReportPaginated = asyncHandler(
   async (req: Request, res: Response) => {
@@ -1070,104 +1136,114 @@ export const getTransactionReportPaginated = asyncHandler(
       ].join("-");
     }
 
-    const [inbounds, outbounds, transferDocs, transferMovements, adjustments] =
-      await Promise.all([
-        prisma.inbound.findMany({
-          where: withDeletedAtNull(
-            buildInboundReportWhere(createdAtFilter, search, selectedColumns),
-          ),
-          include: {
-            goods_ins: {
-              where: { deleted_at: null },
-              include: {
-                barcode: true,
-              },
-              orderBy: { id: "asc" },
+    const [
+      inbounds,
+      outbounds,
+      transferDocs,
+      transferMovements,
+      adjustments,
+      swaps,
+    ] = await Promise.all([
+      prisma.inbound.findMany({
+        where: withDeletedAtNull(
+          buildInboundReportWhere(createdAtFilter, search, selectedColumns),
+        ),
+        include: {
+          goods_ins: {
+            where: { deleted_at: null },
+            include: {
+              barcode: true,
             },
+            orderBy: { id: "asc" },
           },
-        }),
+        },
+      }),
 
-        prisma.outbound.findMany({
-          where: withDeletedAtNull(
-            buildOutboundReportWhere(createdAtFilter, search, selectedColumns),
-          ),
-          include: {
-            goods_outs: {
-              where: { deleted_at: null },
-              include: {
-                barcode_ref: true,
-                boxes: {
-                  where: { deleted_at: null },
-                  include: {
-                    box: true,
-                  },
+      prisma.outbound.findMany({
+        where: withDeletedAtNull(
+          buildOutboundReportWhere(createdAtFilter, search, selectedColumns),
+        ),
+        include: {
+          goods_outs: {
+            where: { deleted_at: null },
+            include: {
+              barcode_ref: true,
+              boxes: {
+                where: { deleted_at: null },
+                include: {
+                  box: true,
                 },
               },
-              orderBy: { id: "asc" },
             },
+            orderBy: { id: "asc" },
           },
-        }),
+        },
+      }),
 
-        prisma.transfer_doc.findMany({
-          where: withDeletedAtNull(
-            buildTransferDocReportWhere(
-              createdAtFilter,
-              search,
-              selectedColumns,
-            ),
-          ),
-          include: {
-            transfer_doc_items: {
-              where: { deleted_at: null },
-              orderBy: { id: "asc" },
-            },
+      prisma.transfer_doc.findMany({
+        where: withDeletedAtNull(
+          buildTransferDocReportWhere(createdAtFilter, search, selectedColumns),
+        ),
+        include: {
+          transfer_doc_items: {
+            where: { deleted_at: null },
+            orderBy: { id: "asc" },
           },
-        }),
+        },
+      }),
 
-        prisma.transfer_movement.findMany({
-          where: withDeletedAtNull(
-            buildTransferMovementReportWhere(
-              createdAtFilter,
-              search,
-              selectedColumns,
-            ),
+      prisma.transfer_movement.findMany({
+        where: withDeletedAtNull(
+          buildTransferMovementReportWhere(
+            createdAtFilter,
+            search,
+            selectedColumns,
           ),
-          include: {
-            user: true,
-            department: true,
-            items: {
-              where: { deleted_at: null },
-              orderBy: { id: "asc" },
-            },
-            movement_departments: {
-              include: {
-                department: true,
-              },
-            },
-            movement_user_works: {
-              include: {
-                user: true,
-              },
+        ),
+        include: {
+          user: true,
+          department: true,
+          items: {
+            where: { deleted_at: null },
+            orderBy: { id: "asc" },
+          },
+          movement_departments: {
+            include: {
+              department: true,
             },
           },
-        }),
+          movement_user_works: {
+            include: {
+              user: true,
+            },
+          },
+        },
+      }),
 
-        prisma.adjustment.findMany({
-          where: withDeletedAtNull(
-            buildAdjustmentReportWhere(
-              createdAtFilter,
-              search,
-              selectedColumns,
-            ),
-          ),
-          include: {
-            items: {
-              where: { deleted_at: null },
-              orderBy: { id: "asc" },
-            },
+      prisma.adjustment.findMany({
+        where: withDeletedAtNull(
+          buildAdjustmentReportWhere(createdAtFilter, search, selectedColumns),
+        ),
+        include: {
+          items: {
+            where: { deleted_at: null },
+            orderBy: { id: "asc" },
           },
-        }),
-      ]);
+        },
+      }),
+      prisma.swap.findMany({
+        where: withDeletedAtNull(
+          buildSwapReportWhere(createdAtFilter, search, selectedColumns),
+        ),
+        include: {
+          department: true,
+          swapItems: {
+            where: { deleted_at: null },
+            orderBy: { id: "asc" },
+          },
+        },
+      }),
+    ]);
 
     // ✅ doc.department_id คือ department id จาก Odoo
     // ✅ ต้องเอาไปเทียบกับ department.odoo_id แล้วใช้ short_name มาแสดง
@@ -1178,7 +1254,7 @@ export const getTransactionReportPaginated = asyncHandler(
           ...outbounds.map((x: any) => x.department_id).filter(Boolean),
           ...transferDocs.map((x: any) => x.department_id).filter(Boolean),
           ...transferMovements.map((x: any) => x.department_id).filter(Boolean),
-          ...adjustments.map((x: any) => x.department_id).filter(Boolean),
+          ...swaps.map((x: any) => x.department_id).filter(Boolean),
         ].map((v) => Number(v)),
       ),
     ).filter((v) => Number.isFinite(v) && v > 0);
@@ -1255,6 +1331,12 @@ export const getTransactionReportPaginated = asyncHandler(
       }
     }
 
+    for (const doc of swaps as any[]) {
+      for (const item of doc.swapItems ?? []) {
+        collectExpPair(item.product_id, item.lot_id);
+      }
+    }
+
     const expRows = expPairs.size
       ? await prisma.goods_in.findMany({
           where: {
@@ -1308,6 +1390,10 @@ export const getTransactionReportPaginated = asyncHandler(
 
     for (const doc of adjustments as any[]) {
       for (const item of doc.items ?? []) collectCode(item.code);
+    }
+
+    for (const doc of swaps as any[]) {
+      for (const item of doc.swapItems ?? []) collectCode(item.code);
     }
 
     const mdtRows = await prisma.wms_mdt_goods.findMany({
@@ -1667,12 +1753,112 @@ export const getTransactionReportPaginated = asyncHandler(
         }));
       });
 
+    const swapRows: ReportRow[] = swaps.flatMap((doc: any) => {
+      const department =
+        doc.department?.short_name ||
+        doc.department?.full_name ||
+        getDepartmentName(doc.department_id, null);
+
+      const formattedItems = (doc.swapItems ?? []).map((item: any) => ({
+        id: item.id,
+        source_sequence: item.source_sequence ?? null,
+        odoo_line_key: item.odoo_line_key ?? null,
+        product_id: item.product_id ?? null,
+        code: item.code ?? null,
+        name: item.name ?? null,
+        unit: item.unit ?? null,
+        tracking: item.tracking ?? null,
+        lot_id: item.lot_id ?? null,
+        lot_serial: item.lot_serial ?? null,
+        barcode_text: item.barcode_text ?? null,
+        exp:
+          getExp(item.product_id, item.lot_id) ??
+          (item.expiration_date ? item.expiration_date.toISOString() : null),
+        expiration_date: item.expiration_date
+          ? item.expiration_date.toISOString()
+          : null,
+        zone_type: getZoneType(item.code),
+        system_qty: item.system_qty ?? 0,
+        executed_qty: item.executed_qty ?? 0,
+        created_at: item.created_at ? item.created_at.toISOString() : null,
+        updated_at: item.updated_at ? item.updated_at.toISOString() : null,
+      }));
+
+      const formattedDoc = {
+        id: doc.id,
+        name: doc.name ?? null,
+        no: doc.no ?? null,
+        picking_id: doc.picking_id ?? null,
+
+        odoo_location_id: doc.odoo_location_id ?? null,
+        source_location_id: doc.source_location_id ?? null,
+        source_location: doc.source_location ?? null,
+
+        odoo_location_dest_id: doc.odoo_location_dest_id ?? null,
+        dest_location_id: doc.dest_location_id ?? null,
+        dest_location: doc.dest_location ?? null,
+
+        location_id: doc.location_id ?? null,
+        location_name: doc.location_name ?? null,
+
+        location_dest_id: doc.location_dest_id ?? null,
+        location_dest_name: doc.location_dest_name ?? null,
+
+        department_id: doc.department_id ?? null,
+        department,
+
+        status: doc.status ?? null,
+        user_ref: doc.user_ref ?? null,
+        remark: doc.remark ?? null,
+        origin: doc.origin ?? null,
+        reference: doc.reference ?? null,
+
+        type: "SWAP",
+        created_at: doc.created_at.toISOString(),
+        updated_at: doc.updated_at ? doc.updated_at.toISOString() : null,
+        items: formattedItems,
+      };
+
+      if (formattedItems.length === 0) {
+        return [
+          {
+            source: "swap",
+            id: `swap-${doc.id}-empty`,
+            no: doc.no ?? null,
+            created_at: doc.created_at.toISOString(),
+            type: "SWAP",
+            location: doc.source_location ?? doc.location_name ?? null,
+            location_dest: doc.dest_location ?? doc.location_dest_name ?? null,
+            user_ref: doc.user_ref ?? null,
+            code: null,
+            name: null,
+            document: formattedDoc,
+          },
+        ];
+      }
+
+      return formattedItems.map((item: any, index: number) => ({
+        source: "swap",
+        id: makeRowId("swap", doc.id, item, index),
+        no: doc.no ?? null,
+        created_at: doc.created_at.toISOString(),
+        type: "SWAP",
+        location: doc.source_location ?? doc.location_name ?? null,
+        location_dest: doc.dest_location ?? doc.location_dest_name ?? null,
+        user_ref: doc.user_ref ?? null,
+        code: getItemCode(item),
+        name: getItemName(item),
+        document: withSingleItemDocument(formattedDoc, item),
+      }));
+    });
+
     let rows: ReportRow[] = [
       ...inboundRows,
       ...outboundRows,
       ...transferDocRows,
       ...transferMovementRows,
       ...adjustmentRows,
+      ...swapRows,
     ];
 
     if (type) {

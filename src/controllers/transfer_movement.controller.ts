@@ -1432,64 +1432,181 @@ async function buildMovementPutSummaryTx(
  * =========================
  */
 
+function normalizeMovementLocationNamesFromBody(body: any): string[] {
+  const names: string[] = [];
+
+  const single = String(body?.location_full_name ?? "").trim();
+  if (single) names.push(single);
+
+  if (Array.isArray(body?.locations)) {
+    for (const loc of body.locations) {
+      const name = String(loc?.location_full_name ?? "").trim();
+      if (name) names.push(name);
+    }
+  }
+
+  return Array.from(new Set(names));
+}
+
+async function resolveMovementLocationsByFullNames(fullNames: string[]) {
+  const normalized = Array.from(
+    new Set(fullNames.map((x) => String(x ?? "").trim()).filter(Boolean)),
+  );
+
+  if (normalized.length === 0) {
+    throw badRequest(
+      "กรุณาส่ง location_full_name หรือ locations[].location_full_name",
+    );
+  }
+
+  const rows = await prisma.location.findMany({
+    where: {
+      deleted_at: null,
+      full_name: { in: normalized },
+    },
+    select: {
+      id: true,
+      full_name: true,
+      ncr_check: true,
+    },
+  });
+
+  const byName = new Map(rows.map((x) => [x.full_name, x]));
+
+  for (const name of normalized) {
+    if (!byName.has(name)) {
+      throw badRequest(`ไม่พบ location full_name: ${name}`);
+    }
+  }
+
+  return normalized.map((name) => byName.get(name)!);
+}
+
+async function seedTransferMovementLocationDraftRowsTx(
+  tx: Prisma.TransactionClient,
+  input: {
+    transfer_movement_id: number;
+    location_ids: number[];
+  },
+) {
+  const itemRows = await tx.transfer_movement_item.findMany({
+    where: {
+      transfer_movement_id: input.transfer_movement_id,
+      deleted_at: null,
+    },
+    select: {
+      id: true,
+    },
+  });
+
+  if (itemRows.length === 0 || input.location_ids.length === 0) return;
+
+  for (const item of itemRows) {
+    for (const location_id of input.location_ids) {
+      await tx.transfer_movement_item_location_pick_confirm.upsert({
+        where: {
+          uniq_mm_pick_location: {
+            transfer_movement_item_id: item.id,
+            location_id,
+          },
+        },
+        update: {},
+        create: {
+          transfer_movement_item_id: item.id,
+          location_id,
+          confirmed_pick: 0,
+        },
+      });
+
+      await tx.transfer_movement_item_location_put_confirm.upsert({
+        where: {
+          uniq_mm_put_location: {
+            transfer_movement_item_id: item.id,
+            location_id,
+          },
+        },
+        update: {},
+        create: {
+          transfer_movement_item_id: item.id,
+          location_id,
+          confirmed_put: 0,
+        },
+      });
+    }
+  }
+}
+
 // POST /api/transfer_movements/:no/scan/location
 export const scanTransferMovementLocation = asyncHandler(
   async (req: Request, res: Response) => {
     const no = decodeURIComponent(String(req.params.no ?? "").trim());
-    const location_full_name = normalizeText(req.body.location_full_name);
-
     if (!no) throw badRequest("Invalid no");
-    if (!location_full_name) {
-      throw badRequest("กรุณาส่ง location_full_name");
-    }
 
     const doc = await prisma.transfer_movement.findUnique({
       where: { no },
-      include: { items: true },
+      include: {
+        items: {
+          where: { deleted_at: null },
+        },
+      },
     });
 
-    if (!doc) throw badRequest(`ไม่พบ transfer_movement: ${no}`);
+    if (!doc || doc.deleted_at) {
+      throw badRequest(`ไม่พบ transfer_movement: ${no}`);
+    }
 
-    const loc = await resolveLocationByFullName(location_full_name);
+    const requestedNames = normalizeMovementLocationNamesFromBody(req.body);
+    const locations = await resolveMovementLocationsByFullNames(requestedNames);
 
-    const items = doc.items.filter(
-      (it) =>
-        !it.deleted_at &&
-        (it.lock_no === location_full_name ||
-          it.lock_no_dest === location_full_name),
+    const validLocations = locations.filter((loc) =>
+      doc.items.some(
+        (it) =>
+          !it.deleted_at &&
+          (it.lock_no === loc.full_name || it.lock_no_dest === loc.full_name),
+      ),
     );
 
-    if (items.length === 0) {
+    if (validLocations.length === 0) {
       throw badRequest(
-        `ไม่พบรายการในเอกสาร ${no} ที่ location = ${location_full_name}`,
+        `ไม่พบรายการในเอกสาร ${no} ที่ตรงกับ location ที่ส่งมา`,
       );
     }
 
+    await prisma.$transaction(async (tx) => {
+      await tx.transfer_movement.update({
+        where: { id: doc.id },
+        data: { updated_at: new Date() } as any,
+      });
+    });
+
     const payload = {
       transfer_movement_no: no,
+      mode: "pick",
       location: {
+        location_id: validLocations[0].id,
+        location_name: validLocations[0].full_name,
+        ncr_check: validLocations[0].ncr_check,
+      },
+      locations: validLocations.map((loc) => ({
         location_id: loc.id,
         location_name: loc.full_name,
-      },
+        ncr_check: loc.ncr_check,
+      })),
     };
 
-    // realtime
     io.to(`tm:${no}`).emit("tm:scan_location", payload);
 
     return res.json(payload);
   },
 );
 
+
+
 // POST /api/transfer_movements/:no/scan/location/put
 export const scanTransferMovementPutLocation = asyncHandler(
   async (req: Request, res: Response) => {
     const no = decodeURIComponent(String(req.params.no ?? "").trim());
-    const location_full_name = normalizeText(req.body.location_full_name);
-
     if (!no) throw badRequest("Invalid no");
-    if (!location_full_name) {
-      throw badRequest("กรุณาส่ง location_full_name");
-    }
 
     const doc = await prisma.transfer_movement.findUnique({
       where: { no },
@@ -1500,19 +1617,31 @@ export const scanTransferMovementPutLocation = asyncHandler(
       throw badRequest(`ไม่พบ transfer_movement: ${no}`);
     }
 
-    // ✅ put: ขอแค่ location นี้มีอยู่ใน master locations
-    const loc = await resolveLocationByFullName(location_full_name);
+    const requestedNames = normalizeMovementLocationNamesFromBody(req.body);
+    const locations = await resolveMovementLocationsByFullNames(requestedNames);
+
+    await prisma.$transaction(async (tx) => {
+      await tx.transfer_movement.update({
+        where: { id: doc.id },
+        data: { updated_at: new Date() } as any,
+      });
+    });
 
     const payload = {
       transfer_movement_no: no,
       mode: "put",
       location: {
+        location_id: locations[0].id,
+        location_name: locations[0].full_name,
+        ncr_check: locations[0].ncr_check,
+      },
+      locations: locations.map((loc) => ({
         location_id: loc.id,
         location_name: loc.full_name,
-      },
+        ncr_check: loc.ncr_check,
+      })),
     };
 
-    // realtime
     io.to(`tm:${no}`).emit("tm:scan_put_location", payload);
 
     return res.json(payload);
@@ -1586,6 +1715,7 @@ export const scanTransferMovementNcrLocation = asyncHandler(
     });
   },
 );
+
 
 // POST /api/transfer_movements/:no/scan/barcode
 export const scanTransferMovementBarcode = asyncHandler(
@@ -1728,28 +1858,63 @@ export const scanTransferMovementBarcode = asyncHandler(
       };
 
       if (liveStatus !== "put") {
-        const currentPick = Math.max(
-          0,
-          Math.floor(Number(freshItem.qty_pick ?? 0)),
-        );
-        const nextPick = calcNext(currentPick);
+  const currentPick = Math.max(
+    0,
+    Math.floor(Number(freshItem.qty_pick ?? 0)),
+  );
 
-        const updatedItem = await tx.transfer_movement_item.update({
-          where: { id: freshItem.id },
-          data: {
-            qty_pick: nextPick,
-            updated_at: new Date(),
+  const nextPick = calcNext(currentPick);
+  const deltaPick = nextPick - currentPick;
+
+  const updatedItem = await tx.transfer_movement_item.update({
+    where: { id: freshItem.id },
+    data: {
+      qty_pick: nextPick,
+      updated_at: new Date(),
+    },
+  });
+
+  if (deltaPick !== 0) {
+    const existingPick =
+      await tx.transfer_movement_item_location_pick_confirm.upsert({
+        where: {
+          uniq_mm_pick_location: {
+            transfer_movement_item_id: freshItem.id,
+            location_id: loc.id,
           },
-        });
+        },
+        create: {
+          transfer_movement_item_id: freshItem.id,
+          location_id: loc.id,
+          confirmed_pick: 0,
+        },
+        update: {},
+      });
 
-        return {
-          stage: "pick" as const,
-          updatedItem,
-          confirmedAtLocation: null as number | null,
-          putLocations: [] as any[],
-          totalPut: null as number | null,
-        };
-      }
+    const currentPickAtLoc = Math.max(
+      0,
+      Math.floor(Number(existingPick.confirmed_pick ?? 0)),
+    );
+
+    const nextPickAtLoc = Math.max(0, currentPickAtLoc + deltaPick);
+
+    await tx.transfer_movement_item_location_pick_confirm.update({
+      where: { id: existingPick.id },
+      data: {
+        confirmed_pick: nextPickAtLoc,
+        updated_at: new Date(),
+      },
+    });
+  }
+
+  return {
+    stage: "pick" as const,
+    updatedItem,
+    confirmedAtLocation: null as number | null,
+    putLocations: [] as any[],
+    totalPut: null as number | null,
+  };
+}
 
       const existing =
         await tx.transfer_movement_item_location_put_confirm.upsert({
@@ -1870,6 +2035,88 @@ function asNonNegativeInt(v: unknown, name: string) {
   return i;
 }
 
+type ResolvedMovementLot = {
+  lot_id: number | null;
+  lot_name: string | null;
+  expiration_date: Date | null;
+};
+
+function toSafeDateOrNull(value: unknown): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  if (typeof value === "string" || typeof value === "number") {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  return null;
+}
+
+async function resolveMovementLotFromWmsTx(
+  tx: Prisma.TransactionClient,
+  args: {
+    product_id: number;
+    lot_serial?: string | null;
+    exp?: Date | string | null;
+  },
+): Promise<ResolvedMovementLot> {
+  const lotName = String(args.lot_serial ?? "").trim();
+  const expDate = toSafeDateOrNull(args.exp);
+  const expKey = expDate ? expDate.toISOString().slice(0, 10) : null;
+
+  const rows = await tx.wms_mdt_goods.findMany({
+    where: {
+      product_id: args.product_id,
+      ...(lotName ? { lot_name: lotName } : {}),
+    } as any,
+    select: {
+      lot_id: true,
+      lot_name: true,
+      expiration_date: true,
+    } as any,
+    orderBy: { id: "desc" },
+  });
+
+  const matched =
+    rows.find((r: any) => {
+      if (!expKey) return true;
+
+      const rowExp = toSafeDateOrNull(r.expiration_date);
+      const rowExpKey = rowExp ? rowExp.toISOString().slice(0, 10) : null;
+
+      return rowExpKey === expKey;
+    }) ??
+    rows[0] ??
+    null;
+
+  return {
+    lot_id:
+      matched?.lot_id != null && Number.isFinite(Number(matched.lot_id))
+        ? Number(matched.lot_id)
+        : null,
+    lot_name: matched?.lot_name != null
+      ? String(matched.lot_name)
+      : lotName || null,
+    expiration_date:
+      toSafeDateOrNull(matched?.expiration_date) ?? expDate ?? null,
+  };
+}
+
+type ConfirmPickInput = {
+  transfer_movement_id: number;
+  user_id: number;
+  locations: {
+    location_id: number;
+    lines: {
+      transfer_movement_item_id: string;
+      quantity_pick: number;
+    }[];
+  }[];
+};
+
 // POST /api/transfer_movements/:no/confirm/pick
 export const confirmTransferMovementPick = asyncHandler(
   async (
@@ -1877,44 +2124,177 @@ export const confirmTransferMovementPick = asyncHandler(
     res: Response,
   ) => {
     const no = decodeURIComponent(String(req.params.no ?? "").trim());
-    const location_full_name = asNonEmpty(
-      (req.body as any)?.location_full_name ??
-        (Array.isArray((req.body as any)?.locations)
-          ? (req.body as any).locations?.[0]?.location_full_name
-          : undefined),
-      "location_full_name",
-    );
 
     const doc = await prisma.transfer_movement.findUnique({
       where: { no },
-      include: { items: true },
+      include: {
+        items: {
+          where: { deleted_at: null },
+        },
+      },
     });
-    if (!doc) throw notFound(`ไม่พบ transfer_movement: ${no}`);
 
-    await resolveLocationByFullName(location_full_name);
+    if (!doc || doc.deleted_at) {
+      throw notFound(`ไม่พบ transfer_movement: ${no}`);
+    }
 
-    const changed = await prisma.$transaction(async (tx) => {
-      const r = await tx.transfer_movement_item.updateMany({
+    const result = await prisma.$transaction(async (tx) => {
+      const pickRows =
+        await tx.transfer_movement_item_location_pick_confirm.findMany({
+          where: {
+            confirmed_pick: { gt: 0 },
+            transfer_movement_item: {
+              transfer_movement_id: doc.id,
+              deleted_at: null,
+              OR: [{ status: null }, { status: "pick" }],
+            },
+          },
+          include: {
+            location: {
+              select: {
+                id: true,
+                full_name: true,
+              },
+            },
+            transfer_movement_item: true,
+          },
+          orderBy: [{ location_id: "asc" }, { id: "asc" }],
+        });
+
+      if (pickRows.length === 0) {
+        throw badRequest("ไม่พบรายการที่ scan pick ไว้สำหรับ confirm");
+      }
+
+      let decrementedStock = 0;
+      let confirmedRows = 0;
+      let skipped = 0;
+
+      for (const row of pickRows) {
+        const item = row.transfer_movement_item;
+        const loc = row.location;
+
+        if (!item || item.deleted_at || !loc) {
+          skipped++;
+          continue;
+        }
+
+        if (!item.product_id) {
+          skipped++;
+          continue;
+        }
+
+        const confirmQty = Math.max(
+          0,
+          Math.floor(Number(row.confirmed_pick ?? 0)),
+        );
+
+        if (confirmQty <= 0) {
+          skipped++;
+          continue;
+        }
+
+        const resolvedLot = await resolveMovementLotFromWmsTx(tx, {
+          product_id: item.product_id,
+          lot_serial: item.lot_serial ?? null,
+          exp: item.exp ?? null,
+        });
+
+        const stockExp = resolvedLot.expiration_date;
+
+        let stock = await tx.stock.findFirst({
+          where: {
+            source: "wms",
+            product_id: item.product_id,
+            location_id: loc.id,
+            lot_id: resolvedLot.lot_id ?? null,
+            lot_name: resolvedLot.lot_name ?? null,
+            expiration_date: stockExp,
+          } as any,
+          select: {
+            id: true,
+            quantity: true,
+            expiration_date: true,
+          },
+          orderBy: { id: "desc" },
+        });
+
+        if (!stock) {
+          stock = await tx.stock.findFirst({
+            where: {
+              source: "wms",
+              product_id: item.product_id,
+              location_id: loc.id,
+              lot_name: resolvedLot.lot_name ?? item.lot_serial ?? null,
+            } as any,
+            select: {
+              id: true,
+              quantity: true,
+              expiration_date: true,
+            },
+            orderBy: { id: "desc" },
+          });
+        }
+
+        if (!stock) {
+          throw badRequest(
+            `ไม่พบ stock สำหรับตัดออก (location=${loc.full_name}, product_id=${item.product_id}, lot=${resolvedLot.lot_name ?? item.lot_serial ?? "-"}, exp=${stockExp ? stockExp.toISOString().slice(0, 10) : "-"})`,
+          );
+        }
+
+        const stockQty = Number(stock.quantity ?? 0);
+
+        if (stockQty < confirmQty) {
+          throw badRequest(
+            `stock ไม่พอ (location=${loc.full_name}, product_id=${item.product_id}, lot=${resolvedLot.lot_name ?? item.lot_serial ?? "-"}, need=${confirmQty}, have=${stockQty})`,
+          );
+        }
+
+        await tx.stock.update({
+          where: { id: stock.id },
+          data: {
+            quantity: {
+              decrement: new Prisma.Decimal(confirmQty),
+            },
+            updated_at: new Date(),
+          } as any,
+        });
+
+        decrementedStock += confirmQty;
+        confirmedRows++;
+      }
+
+      const changed = await tx.transfer_movement_item.updateMany({
         where: {
           transfer_movement_id: doc.id,
           deleted_at: null,
           OR: [{ status: null }, { status: "pick" }],
         },
-        data: { status: "put", updated_at: new Date() },
+        data: {
+          status: "put",
+          updated_at: new Date(),
+        },
       });
 
       await tx.transfer_movement.update({
         where: { id: doc.id },
-        data: { status: "put", updated_at: new Date() } as any,
+        data: {
+          status: "put",
+          updated_at: new Date(),
+        } as any,
       });
 
-      return r.count;
+      return {
+        changed_items: changed.count,
+        confirmed_rows: confirmedRows,
+        decremented_stock: decrementedStock,
+        skipped,
+      };
     });
 
     return res.json({
-      message: "confirmPick สำเร็จ: เปลี่ยนรายการเป็น put แล้ว",
+      message: "confirmPick สำเร็จ: ตัด stock ตาม location ที่ scan จริงแล้ว",
       transfer_movement_no: no,
-      changed_items: changed,
+      ...result,
     });
   },
 );
@@ -1927,76 +2307,51 @@ export const confirmTransferMovementPut = asyncHandler(
   ) => {
     const no = decodeURIComponent(String(req.params.no ?? "").trim());
 
-    const location_full_name = asNonEmpty(
-      (req.body as any)?.location_full_name ??
-        (Array.isArray((req.body as any)?.locations)
-          ? (req.body as any).locations?.[0]?.location_full_name
-          : undefined),
-      "location_full_name",
-    );
-
-    const linesRaw =
-      (req.body as any)?.lines ??
-      (Array.isArray((req.body as any)?.locations)
-        ? (req.body as any).locations?.[0]?.lines
-        : undefined);
-
-    const lines = Array.isArray(linesRaw) ? linesRaw : [];
-
     const doc = await prisma.transfer_movement.findUnique({
       where: { no },
       include: {
-        items: true,
+        items: {
+          where: { deleted_at: null },
+        },
         user: { select: { id: true, pin: true } },
       },
     });
-    if (!doc) throw notFound(`ไม่พบ transfer_movement: ${no}`);
+
+    if (!doc || doc.deleted_at) {
+      throw notFound(`ไม่พบ transfer_movement: ${no}`);
+    }
 
     const pin = asPin((req.body as any)?.pin);
     const expectedPin = String(doc.user?.pin ?? "").trim();
+
     if (!expectedPin) throw badRequest("ผู้สร้างใบยังไม่ได้ตั้ง PIN");
     if (pin !== expectedPin) throw badRequest("PIN ไม่ถูกต้อง");
 
-    const loc = await resolveLocationByFullName(location_full_name);
-
     const result = await prisma.$transaction(async (tx) => {
+      // ✅ ดึงทุก location ที่มี confirmed_put จริง
       let targetRows =
         await tx.transfer_movement_item_location_put_confirm.findMany({
           where: {
-            location_id: loc.id,
             confirmed_put: { gt: 0 },
+            transfer_movement_item: {
+              transfer_movement_id: doc.id,
+              deleted_at: null,
+            },
           },
           include: {
+            location: {
+              select: {
+                id: true,
+                full_name: true,
+              },
+            },
             transfer_movement_item: true,
           },
+          orderBy: [{ location_id: "asc" }, { id: "asc" }],
         });
 
-      targetRows = targetRows.filter((r) => {
-        const it = r.transfer_movement_item;
-        return !!it && it.transfer_movement_id === doc.id && !it.deleted_at;
-      });
-
-      // ถ้ามี lines มา ให้บังคับ confirm เฉพาะ item ที่ส่งมา
-      if (lines.length > 0) {
-        const allowedIds = new Set(
-          lines
-            .map((l) =>
-              String(
-                (l as any).transfer_movement_item_id ??
-                  (l as any).transfer_item_id ??
-                  "",
-              ).trim(),
-            )
-            .filter(Boolean),
-        );
-
-        targetRows = targetRows.filter((r) =>
-          allowedIds.has(r.transfer_movement_item_id),
-        );
-      }
-
       if (targetRows.length === 0) {
-        throw badRequest("ไม่พบรายการที่สแกนไว้สำหรับ location นี้");
+        throw badRequest("ไม่พบรายการที่สแกน put ไว้สำหรับ confirm");
       }
 
       let stockUpserted = 0;
@@ -2005,12 +2360,17 @@ export const confirmTransferMovementPut = asyncHandler(
 
       for (const row of targetRows) {
         const it = row.transfer_movement_item;
-        if (!it) {
+        const targetLoc = row.location;
+
+        if (!it || it.deleted_at || !targetLoc) {
           skipped++;
           continue;
         }
 
-        const st = (it.status ?? "pick") as "pick" | "put" | "completed";
+        const st = (it.status ?? "pick") as
+          | "pick"
+          | "put"
+          | "completed";
 
         if (st === "completed") {
           skipped++;
@@ -2027,63 +2387,115 @@ export const confirmTransferMovementPut = asyncHandler(
           continue;
         }
 
-        const putQty = Math.max(0, Math.floor(Number(row.confirmed_put ?? 0)));
+        const putQty = Math.max(
+          0,
+          Math.floor(Number(row.confirmed_put ?? 0)),
+        );
+
         if (putQty <= 0) {
           skipped++;
           continue;
         }
 
-        const bucket_key = buildStockBucketKey({
-          source: "wms",
+        // ✅ resolve lot_id จาก wms
+        const resolvedLot = await resolveMovementLotFromWmsTx(tx, {
           product_id: it.product_id,
-          product_code: it.code ?? null,
-          lot_id: null,
-          lot_name: it.lot_serial ?? null,
-          location_id: loc.id,
-          expiration_date: it.exp ?? null,
+          lot_serial: it.lot_serial ?? null,
+          exp: it.exp ?? null,
         });
 
-        const existingStock = await tx.stock.findFirst({
-          where: { bucket_key },
-          select: { id: true },
+        const stockExp = resolvedLot.expiration_date;
+
+        // ✅ หา stock เดิม
+        let existingStock = await tx.stock.findFirst({
+          where: {
+            source: "wms",
+            product_id: it.product_id,
+            location_id: targetLoc.id,
+            lot_id: resolvedLot.lot_id ?? null,
+            lot_name: resolvedLot.lot_name ?? null,
+            expiration_date: stockExp,
+          } as any,
+          select: {
+            id: true,
+            quantity: true,
+          },
+          orderBy: { id: "desc" },
         });
+
+        // fallback เผื่อ lot_id ไม่ตรง
+        if (!existingStock) {
+          existingStock = await tx.stock.findFirst({
+            where: {
+              source: "wms",
+              product_id: it.product_id,
+              location_id: targetLoc.id,
+              lot_name: resolvedLot.lot_name ?? it.lot_serial ?? null,
+            } as any,
+            select: {
+              id: true,
+              quantity: true,
+            },
+            orderBy: { id: "desc" },
+          });
+        }
 
         if (existingStock) {
           await tx.stock.update({
             where: { id: existingStock.id },
             data: {
-              location_id: loc.id,
-              location_name: loc.full_name,
-              quantity: { increment: new Prisma.Decimal(putQty) },
+              quantity: {
+                increment: new Prisma.Decimal(putQty),
+              },
+              location_id: targetLoc.id,
+              location_name: targetLoc.full_name,
+              lot_id: resolvedLot.lot_id ?? undefined,
+              lot_name: resolvedLot.lot_name ?? undefined,
+              expiration_date: stockExp ?? undefined,
               updated_at: new Date(),
-            },
+            } as any,
           });
         } else {
           await tx.stock.create({
             data: {
-              bucket_key,
               product_id: it.product_id,
               product_code: it.code ?? undefined,
               product_name: it.name ?? undefined,
               unit: it.unit ?? undefined,
-              location_id: loc.id,
-              location_name: loc.full_name,
-              lot_name: it.lot_serial ?? undefined,
-              expiration_date: it.exp ?? undefined,
+
+              location_id: targetLoc.id,
+              location_name: targetLoc.full_name,
+
+              lot_id: resolvedLot.lot_id ?? undefined,
+              lot_name: resolvedLot.lot_name ?? undefined,
+              expiration_date: stockExp ?? undefined,
+
               source: "wms",
               quantity: new Prisma.Decimal(putQty),
-              count: 0,
-            },
+              active: true,
+
+              bucket_key: buildStockBucketKey({
+                source: "wms",
+                product_id: it.product_id,
+                product_code: it.code ?? null,
+                lot_id: resolvedLot.lot_id ?? null,
+                lot_name: resolvedLot.lot_name ?? null,
+                location_id: targetLoc.id,
+                expiration_date: stockExp,
+              }),
+            } as any,
           });
         }
 
         stockUpserted++;
 
-        // คำนวณยอดรวมทุก location ของ item
         const putSummary = await buildMovementPutSummaryTx(tx, it.id);
         const maxQty = Math.max(0, Math.floor(Number(it.qty ?? 0)));
+
         const nextStatus =
-          maxQty > 0 && putSummary.totalPut >= maxQty ? "completed" : "put";
+          maxQty > 0 && putSummary.totalPut >= maxQty
+            ? "completed"
+            : "put";
 
         await tx.transfer_movement_item.update({
           where: { id: it.id },
@@ -2123,9 +2535,9 @@ export const confirmTransferMovementPut = asyncHandler(
     });
 
     return res.json({
-      message: "confirmPut สำเร็จ: รองรับหลายปลายทางต่อ 1 item แล้ว",
+      message:
+        "confirmPut สำเร็จ: เพิ่ม stock ตาม location ที่ scan จริงแล้ว",
       transfer_movement_no: no,
-      location: { id: loc.id, full_name: loc.full_name },
       ...result,
     });
   },

@@ -10,24 +10,27 @@ function normalizeLotSerialForMatch(v: unknown): string {
     .toUpperCase();
 }
 
-
-export function buildOutboundLotAdjustmentOdooItem(row: {
-  qty?: number | null;
-  code?: string | null;
-  name?: string | null;
-  unit?: string | null;
-  lot_id?: number | null;
-  lot_serial?: string | null;
-  product_id?: number | null;
-  tracking?: string | null;
-  sequence?: number | null;
-  barcode_text?: string | null;
-}, outbound: {
-  location?: string | null;
-  location_id?: number | null;
-  location_dest?: string | null;
-  location_dest_id?: number | null;
-}, reference: string | null) {
+export function buildOutboundLotAdjustmentOdooItem(
+  row: {
+    qty?: number | null;
+    code?: string | null;
+    name?: string | null;
+    unit?: string | null;
+    lot_id?: number | null;
+    lot_serial?: string | null;
+    product_id?: number | null;
+    tracking?: string | null;
+    sequence?: number | null;
+    barcode_text?: string | null;
+  },
+  outbound: {
+    location?: string | null;
+    location_id?: number | null;
+    location_dest?: string | null;
+    location_dest_id?: number | null;
+  },
+  reference: string | null,
+) {
   return {
     qty: Math.max(0, Math.floor(Number(row.qty ?? 0))),
     code: row.code,
@@ -167,6 +170,57 @@ function sha256(value?: string | null) {
   if (!raw) return null;
 
   return crypto.createHash("sha256").update(raw).digest("hex");
+}
+
+function extractOdooErrorFromResponseBody(body: any): {
+  isError: boolean;
+  status: number | null;
+  message: string | null;
+  rawError: any;
+} {
+  if (!body) {
+    return { isError: false, status: null, message: null, rawError: null };
+  }
+
+  if (body.error) {
+    const message =
+      body.error?.data?.message ??
+      body.error?.message ??
+      body.error?.data?.name ??
+      JSON.stringify(body.error);
+
+    return {
+      isError: true,
+      status: Number(body.error?.code) || null,
+      message,
+      rawError: body.error,
+    };
+  }
+
+  const resultStatus = Number(body.result?.status);
+
+  if (resultStatus >= 400) {
+    const message =
+      typeof body.result?.data === "string"
+        ? body.result.data
+        : (body.result?.data?.message ??
+          body.result?.message ??
+          JSON.stringify(body.result?.data ?? body.result));
+
+    return {
+      isError: true,
+      status: resultStatus,
+      message,
+      rawError: body.result,
+    };
+  }
+
+  return {
+    isError: false,
+    status: resultStatus || null,
+    message: null,
+    rawError: null,
+  };
 }
 
 export async function sendQueuedOutboundLotAdjustmentsToOdoo(params: {
@@ -325,10 +379,21 @@ export async function sendQueuedOutboundLotAdjustmentsToOdoo(params: {
     "api-key": maskSecret(ODOO_API_KEY),
   };
 
+  const uniqueGoodsOutItemIds = Array.from(
+    new Set(
+      pendingAdjustments
+        .map((x) => x.goods_out_item_id)
+        .filter((x): x is number => x != null),
+    ),
+  );
+
+  const logGoodsOutItemId =
+    uniqueGoodsOutItemIds.length === 1 ? uniqueGoodsOutItemIds[0] : null;
+
   const createdLog = await prisma.adjust_lot_log.create({
     data: {
       outbound_id: outbound.id,
-      goods_out_item_id: null,
+      goods_out_item_id: logGoodsOutItemId,
       outbound_no: outbound.no,
       event_name: "confirm_pick_send_full_outbound_lot_adjustment",
       request_path: params.reqOriginalUrl,
@@ -392,16 +457,16 @@ export async function sendQueuedOutboundLotAdjustmentsToOdoo(params: {
       timeout: 30000,
     });
 
-    if (resp.data?.error) {
-      const err = resp.data.error;
+    const odooError = extractOdooErrorFromResponseBody(resp.data);
 
+    if (odooError.isError) {
       await prisma.outbound_lot_adjustment.updateMany({
         where: {
           id: { in: pendingAdjustments.map((x) => x.id) },
         },
         data: {
           status: "failed",
-          send_error: err?.message ?? JSON.stringify(err ?? null),
+          send_error: odooError.message ?? "Unknown Odoo error",
         },
       });
 
@@ -409,9 +474,9 @@ export async function sendQueuedOutboundLotAdjustmentsToOdoo(params: {
         where: { id: createdLog.id },
         data: {
           response_body: resp.data,
-          response_status: resp.status ?? 200,
+          response_status: odooError.status ?? resp.status ?? 200,
           success: false,
-          error_message: err?.message ?? JSON.stringify(err ?? null),
+          error_message: odooError.message ?? "Unknown Odoo error",
           completed_at: new Date(),
           updated_at: new Date(),
         },
@@ -424,7 +489,11 @@ export async function sendQueuedOutboundLotAdjustmentsToOdoo(params: {
         reason: "odoo_error_response",
         payload: finalPayload,
         response: resp.data,
-        error: err,
+        error: {
+          message: odooError.message,
+          status: odooError.status,
+          data: odooError.rawError,
+        },
         log_id: logId,
       };
     }
@@ -463,9 +532,24 @@ export async function sendQueuedOutboundLotAdjustmentsToOdoo(params: {
       log_id: logId,
     };
   } catch (error: any) {
+    const caughtOdooError = extractOdooErrorFromResponseBody(
+      error?.response?.data,
+    );
+
+    const caughtMessage =
+      caughtOdooError.message ??
+      error?.response?.data?.error?.data?.message ??
+      error?.response?.data?.error?.message ??
+      error?.response?.data?.message ??
+      error?.message ??
+      "Unknown Odoo error";
+
+    const caughtStatus =
+      caughtOdooError.status ?? error?.response?.status ?? null;
+
     const err = {
-      message: error?.message ?? "Unknown Odoo error",
-      status: error?.response?.status ?? null,
+      message: caughtMessage,
+      status: caughtStatus,
       data: error?.response?.data ?? null,
     };
 
@@ -475,11 +559,7 @@ export async function sendQueuedOutboundLotAdjustmentsToOdoo(params: {
       },
       data: {
         status: "failed",
-        send_error:
-          error?.response?.data?.error?.message ??
-          error?.response?.data?.message ??
-          error?.message ??
-          "Unknown Odoo error",
+        send_error: caughtMessage,
       },
     });
 
@@ -487,13 +567,9 @@ export async function sendQueuedOutboundLotAdjustmentsToOdoo(params: {
       where: { id: createdLog.id },
       data: {
         response_body: error?.response?.data ?? Prisma.DbNull,
-        response_status: error?.response?.status ?? null,
+        response_status: caughtStatus,
         success: false,
-        error_message:
-          error?.response?.data?.error?.message ??
-          error?.response?.data?.message ??
-          error?.message ??
-          "Unknown Odoo error",
+        error_message: caughtMessage,
         completed_at: new Date(),
         updated_at: new Date(),
       },
@@ -505,13 +581,12 @@ export async function sendQueuedOutboundLotAdjustmentsToOdoo(params: {
       skipped: false,
       reason: "request_failed",
       payload: finalPayload,
-      response: null,
+      response: error?.response?.data ?? null,
       error: err,
       log_id: logId,
     };
   }
 }
-
 
 export function buildLotAdjustmentSignature(
   lines: Array<{

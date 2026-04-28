@@ -342,12 +342,28 @@ export const scanTransferDocLocation = asyncHandler(
 
     const doc = await prisma.transfer_doc.findUnique({
       where: { no },
-      select: { id: true, no: true, deleted_at: true },
+      select: {
+        id: true,
+        no: true,
+        deleted_at: true,
+        location_dest: true, // 👈 เพิ่มตรงนี้
+      },
     });
+
     if (!doc) throw notFound(`ไม่พบ transfer_doc: ${no}`);
     if (doc.deleted_at) throw badRequest("TransferDoc นี้ถูกลบไปแล้ว");
 
     const loc = await resolveLocationByFullName(location_full_name);
+
+    // ✅ เงื่อนไขสำคัญ
+    if (String(doc.location_dest ?? "").trim() === "WH/MDT") {
+      if (!loc.ncr_check) {
+        throw badRequest(
+          "ปลายทางเป็น WH/MDT ต้อง scan ได้เฉพาะ location ประเภท EXP/NCR เท่านั้น",
+        );
+      }
+    }
+
     const detail = await buildTransferDocDetail(doc.id, no);
 
     const responseData = {

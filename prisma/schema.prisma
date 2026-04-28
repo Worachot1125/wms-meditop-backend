@@ -147,14 +147,15 @@ model location {
   swapsFrom swap[] @relation("SwapLocation")
   swapsTo   swap[] @relation("SwapLocationDest")
 
-  goods_in_location_confirms              goods_in_location_confirm[]                   @relation("LocationToGoodsInConfirm")
-  goods_out_item_location_confirms        goods_out_item_location_confirm[]             @relation("LocationToGoodsOutItemConfirm")
-  transfer_doc_item_location_confirms     transfer_doc_item_location_confirm[]          @relation("LocationToTFConfirm")
-  transfer_doc_item_ncr_locations         transfer_doc_item_ncr_location[]              @relation("LocationToTFItemNcrLoc")
-  transfer_doc_item_location_put_confirms transfer_doc_item_location_put_confirm[]      @relation("LocationToTFPutConfirm")
-  transferMovementItemLocationPutConfirms transfer_movement_item_location_put_confirm[]
-  goodsOutItemLocationPicks               goods_out_item_location_pick[]
-  goodsOutItemLocationReturns             goods_out_item_location_return[]              @relation("LocationToGoodsOutItemReturn")
+  goods_in_location_confirms               goods_in_location_confirm[]                    @relation("LocationToGoodsInConfirm")
+  goods_out_item_location_confirms         goods_out_item_location_confirm[]              @relation("LocationToGoodsOutItemConfirm")
+  transfer_doc_item_location_confirms      transfer_doc_item_location_confirm[]           @relation("LocationToTFConfirm")
+  transfer_doc_item_ncr_locations          transfer_doc_item_ncr_location[]               @relation("LocationToTFItemNcrLoc")
+  transfer_doc_item_location_put_confirms  transfer_doc_item_location_put_confirm[]       @relation("LocationToTFPutConfirm")
+  transferMovementItemLocationPutConfirms  transfer_movement_item_location_put_confirm[]
+  transferMovementItemLocationPickConfirms transfer_movement_item_location_pick_confirm[]
+  goodsOutItemLocationPicks                goods_out_item_location_pick[]
+  goodsOutItemLocationReturns              goods_out_item_location_return[]               @relation("LocationToGoodsOutItemReturn")
 
   @@map("locations")
 }
@@ -1213,9 +1214,10 @@ model transfer_movement_item {
   updated_at DateTime?
   deleted_at DateTime?
 
-  transfer_movement_id                    Int?
-  transfer_movement                       transfer_movement?                            @relation(fields: [transfer_movement_id], references: [id])
-  transferMovementItemLocationPutConfirms transfer_movement_item_location_put_confirm[]
+  transfer_movement_id                     Int?
+  transfer_movement                        transfer_movement?                             @relation(fields: [transfer_movement_id], references: [id])
+  transferMovementItemLocationPutConfirms  transfer_movement_item_location_put_confirm[]
+  transferMovementItemLocationPickConfirms transfer_movement_item_location_pick_confirm[]
 
   @@index([transfer_movement_id, product_id])
   @@map("transfer_movement_items")
@@ -1253,6 +1255,23 @@ model transfer_movement_user_work {
   @@index([user_id])
   @@index([transfer_movement_id])
   @@map("transfer_movement_user_works")
+}
+
+model transfer_movement_item_location_pick_confirm {
+  id                        Int      @id @default(autoincrement())
+  transfer_movement_item_id String
+  location_id               Int
+  confirmed_pick            Int      @default(0)
+  updated_at                DateTime @updatedAt
+  created_at                DateTime @default(now())
+
+  transfer_movement_item transfer_movement_item @relation(fields: [transfer_movement_item_id], references: [id])
+  location               location               @relation(fields: [location_id], references: [id])
+
+  @@unique([transfer_movement_item_id, location_id], name: "uniq_mm_pick_location")
+  @@index([transfer_movement_item_id])
+  @@index([location_id])
+  @@map("transfer_movement_item_location_pick_confirms")
 }
 
 model transfer_movement_item_location_put_confirm {
