@@ -14,7 +14,7 @@ const httpServer = http.createServer(app);
 export const io = new Server(httpServer, {
   path: "/socket.io",
   cors: {
-    origin: ["http://localhost:5173", "http://192.168.0.135:5173", "http://192.168.1.139:5173"],
+    origin: ["http://localhost:5173"],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
   },
