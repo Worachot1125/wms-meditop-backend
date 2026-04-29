@@ -44,7 +44,6 @@ model department {
   last_synced_at              DateTime?
   odoo_id                     Int?                           @unique
   id                          Int                            @id @default(autoincrement())
-  goods                       goods[]
   users                       user_department[]
   transferMovements           transfer_movement[]
   borrowStocks                borrow_stock[]
@@ -101,7 +100,6 @@ model zone_type {
   temp_min       Float?
   zone_type_code String?
   id             Int       @id @default(autoincrement())
-  goods          goods[]
   zones          zone[]
 
   @@map("zone_types")
@@ -158,26 +156,6 @@ model location {
   goodsOutItemLocationReturns              goods_out_item_location_return[]               @relation("LocationToGoodsOutItemReturn")
 
   @@map("locations")
-}
-
-model goods {
-  id             String     @id
-  sku            String
-  name           String
-  lot            String
-  exp_date_start DateTime
-  exp_date_end   DateTime
-  unit           String
-  remark         String?
-  created_at     DateTime   @default(now())
-  updated_at     DateTime?
-  deleted_at     DateTime?
-  department_id  Int
-  zone_type_id   Int
-  department     department @relation(fields: [department_id], references: [id])
-  zone_type      zone_type  @relation(fields: [zone_type_id], references: [id])
-
-  @@map("goods")
 }
 
 model barcode {
