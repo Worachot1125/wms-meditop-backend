@@ -4,6 +4,17 @@ import { asyncHandler } from "../utils/asyncHandler";
 import { badRequest } from "../utils/appError";
 import { Prisma } from "@prisma/client";
 import { formatOdooOutbound } from "../utils/formatters/odoo_outbound.formatter";
+import {
+  resolveBarcodeScan,
+  normalizeScanText,
+  sameExpDateOnly,
+} from "../utils/helper_scan/barcode";
+
+import {
+  resolveLocationByFullNameWithZone,
+  handleScanLocationCommon,
+} from "../utils/helper_scan/location";
+import { io } from "../index";
 
 type AutoStockTarget = "bor" | "ser";
 type DeptShortMap = Map<number, string>;
@@ -32,6 +43,9 @@ type AdjustmentBorLine = {
 
   qty: number;
   exp: Date | null;
+
+  barcode_id: number | null;
+  barcode_text: string | null;
   barcode_payload: string | null;
 
   location_owner: string | null;
@@ -1355,6 +1369,206 @@ async function applySystemGeneratedLotReplacementBorOnly(
   }
 }
 
+function isInventoryAdjustment(v: unknown) {
+  return normalizeText(v).toLowerCase() === "inventory adjustment";
+}
+
+// Helper socket scan
+function emitAdjustmentRealtime(
+  no: string,
+  event: string,
+  payload: any,
+  adjustmentId?: number | null,
+) {
+  try {
+    const adjNo = String(no ?? "").trim();
+
+    if (adjNo) io.to(`adjustment:${adjNo}`).emit(event, payload);
+
+    const id = Number(adjustmentId ?? NaN);
+    if (Number.isFinite(id) && id > 0) {
+      io.to(`adjustment-id:${id}`).emit(event, payload);
+    }
+  } catch {}
+}
+
+function matchAdjustmentBarcodePayload(
+  storedPayload: unknown,
+  scanned: string,
+) {
+  const raw = normalizeLot(scanned);
+  const stored = String(storedPayload ?? "").trim();
+
+  if (!raw || !stored) return false;
+
+  if (normalizeLot(stored) === raw) return true;
+
+  try {
+    const arr = JSON.parse(stored);
+    if (Array.isArray(arr)) {
+      return arr.some((x) => normalizeLot(x) === raw);
+    }
+  } catch {}
+
+  return false;
+}
+
+async function buildAdjustmentDetail(adjustmentId: number, no: string) {
+  const adj = await prisma.adjustment.findFirst({
+    where: { id: adjustmentId, deleted_at: null },
+    include: {
+      items: {
+        where: { deleted_at: null },
+        orderBy: [{ sequence: "asc" }, { id: "asc" }],
+      },
+      adjustLocationConfirms: {
+        where: { deleted_at: null },
+        orderBy: [{ location_name: "asc" }, { id: "asc" }],
+      } as any,
+    } as any,
+  });
+
+  if (!adj) return null;
+
+  const confirms = ((adj as any).adjustLocationConfirms ?? []) as any[];
+
+  const confirmMap = new Map<number, any[]>();
+  for (const c of confirms) {
+    const arr = confirmMap.get(c.adjustment_item_id) ?? [];
+    arr.push(c);
+    confirmMap.set(c.adjustment_item_id, arr);
+  }
+
+  const items = (adj.items ?? []).map((it: any) => {
+    const itemConfirms = confirmMap.get(it.id) ?? [];
+    const confirmed_qty = itemConfirms.reduce(
+      (sum, c) => sum + Number(c.confirmed_qty ?? 0),
+      0,
+    );
+    const qty = Number(it.qty ?? 0);
+    const qty_pick = Number(it.qty_pick ?? 0);
+
+    return {
+      ...it,
+      qty,
+      qty_pick,
+      confirmed_qty,
+      remaining: Math.max(0, qty - qty_pick),
+      completed: qty > 0 ? qty_pick >= qty : false,
+      location_confirms: itemConfirms.map((c) => ({
+        id: c.id,
+        location_id: c.location_id,
+        location_name: c.location_name,
+        confirmed_qty: c.confirmed_qty,
+        user_ref: c.user_ref,
+      })),
+    };
+  });
+
+  return {
+    adjustment_no: no,
+    id: adj.id,
+    no: adj.no,
+    status: adj.status,
+    type: adj.type,
+    department: adj.department,
+    department_id: adj.department_id,
+    reference: adj.reference,
+    origin: adj.origin,
+    date: adj.date,
+    total_items: items.length,
+    completed: items.length > 0 && items.every((x) => x.completed),
+    items,
+    lines: items,
+  };
+}
+
+function firstPayloadBarcodeId(barcodes: unknown): number | null {
+  if (!Array.isArray(barcodes) || !barcodes.length) return null;
+
+  const first = barcodes.find((x: any) => x?.barcode_id != null);
+  if (!first) return null;
+
+  const n = Number((first as any).barcode_id);
+  return Number.isFinite(n) ? n : null;
+}
+
+function firstPayloadBarcodeText(barcodes: unknown): string | null {
+  if (!Array.isArray(barcodes) || !barcodes.length) return null;
+
+  const first = barcodes.find((x: any) => safeString(x?.barcode));
+  return first ? safeString((first as any).barcode) : null;
+}
+
+async function hydrateAdjustmentItemsBarcodeTextFromBarcodeMaster(
+  tx: Prisma.TransactionClient,
+  items: AdjustmentBorLine[],
+) {
+  const productIds = Array.from(
+    new Set(
+      items
+        .map((x) => x.product_id)
+        .filter((x): x is number => typeof x === "number"),
+    ),
+  );
+
+  if (productIds.length === 0) return items;
+
+  const barcodeRows = await tx.barcode.findMany({
+    where: {
+      product_id: { in: productIds },
+      deleted_at: null,
+      active: true,
+    },
+    select: {
+      id: true,
+      product_id: true,
+      barcode: true,
+    },
+    orderBy: [{ id: "desc" }],
+  });
+
+  const barcodeByProductId = new Map<number, { id: number; barcode: string }>();
+
+  for (const row of barcodeRows) {
+    const pid = Number(row.product_id);
+    const bc = String(row.barcode ?? "").trim();
+
+    if (!Number.isFinite(pid) || !bc) continue;
+    if (!barcodeByProductId.has(pid)) {
+      barcodeByProductId.set(pid, {
+        id: row.id,
+        barcode: bc,
+      });
+    }
+  }
+
+  return items.map((item) => {
+    const currentText = String(item.barcode_text ?? "").trim();
+    if (currentText) return item;
+
+    const master =
+      item.product_id != null
+        ? barcodeByProductId.get(Number(item.product_id))
+        : null;
+
+    if (!master) return item;
+
+    return {
+      ...item,
+      barcode_id: master.id,
+      barcode_text: master.barcode,
+      barcode_payload:
+        item.barcode_payload ??
+        buildAdjustmentBarcodePayload({
+          barcode: master.barcode,
+          lot_serial: item.lot_serial ?? null,
+          exp: item.exp ?? null,
+        }),
+    };
+  });
+}
+
 export const receiveOdooAdjustments = asyncHandler(
   async (req: Request, res: Response) => {
     let logId: number | null = null;
@@ -1369,6 +1583,7 @@ export const receiveOdooAdjustments = asyncHandler(
           user_agent: req.headers["user-agent"] || null,
         },
       });
+
       logId = requestLog.id;
 
       const adjusts = pickAdjusts(req.body);
@@ -1393,6 +1608,7 @@ export const receiveOdooAdjustments = asyncHandler(
         const inventoryId = safeInt(adj?.inventory_id);
         const rawItems = Array.isArray(adj?.items) ? adj.items : [];
         const isSystemGenerated = adj?.is_system_generated === true;
+        const initialStatus = isSystemGenerated ? "completed" : "pending";
 
         const depSource = resolveAutoDepartmentSource(adj);
         const dep = normalizeAutoDepartments(depSource);
@@ -1424,6 +1640,7 @@ export const receiveOdooAdjustments = asyncHandler(
 
           const product_id = safeInt(item?.product_id);
           const lot_id = safeInt(item?.lot_id);
+
           const exp =
             normalizeAdjustmentExp(item?.exp) ??
             normalizeAdjustmentExp(item?.expire_date) ??
@@ -1431,10 +1648,16 @@ export const receiveOdooAdjustments = asyncHandler(
 
           const qty = safeInt(item?.qty) ?? 0;
 
+          const location = safeString(item?.location);
+
           const location_owner = normalizeOwnerOrLocationText(
             item?.location_owner,
           );
+
           const location_dest = safeString(item?.location_dest);
+
+          const payloadBarcodeId = firstPayloadBarcodeId(item?.barcodes);
+          const payloadBarcodeText = firstPayloadBarcodeText(item?.barcodes);
 
           const key = buildAdjustmentMergeKey({
             product_id,
@@ -1454,10 +1677,7 @@ export const receiveOdooAdjustments = asyncHandler(
             unit: safeString(item?.unit),
 
             location_id: safeInt(item?.location_id),
-            location:
-              normalizeOwnerOrLocationText(item?.location) ??
-              normalizeOwnerOrLocationText(item?.location_owner) ??
-              safeString(item?.location_dest),
+            location: location ?? location_owner ?? null,
 
             lot_id,
             lot_serial: safeString(item?.lot_serial),
@@ -1465,6 +1685,9 @@ export const receiveOdooAdjustments = asyncHandler(
 
             qty,
             exp,
+
+            barcode_id: payloadBarcodeId,
+            barcode_text: payloadBarcodeText,
             barcode_payload: buildBarcodePayload(item?.barcodes),
 
             location_owner,
@@ -1473,7 +1696,7 @@ export const receiveOdooAdjustments = asyncHandler(
             ),
 
             location_dest_id: safeInt(item?.location_dest_id),
-            location_dest: safeString(item?.location_dest),
+            location_dest,
             location_dest_owner: stringifyIfNeeded(item?.location_dest_owner),
             location_dest_owner_display: stringifyIfNeeded(
               item?.location_dest_owner_display,
@@ -1486,8 +1709,12 @@ export const receiveOdooAdjustments = asyncHandler(
             existed.name = payload.name ?? existed.name;
             existed.unit = payload.unit ?? existed.unit;
             existed.lot_serial = payload.lot_serial ?? existed.lot_serial;
+
+            existed.barcode_id = payload.barcode_id ?? existed.barcode_id;
+            existed.barcode_text = payload.barcode_text ?? existed.barcode_text;
             existed.barcode_payload =
               payload.barcode_payload ?? existed.barcode_payload;
+
             existed.location_owner =
               payload.location_owner ?? existed.location_owner;
             existed.location_owner_display =
@@ -1533,7 +1760,7 @@ export const receiveOdooAdjustments = asyncHandler(
                 description: headerDescription,
                 level: "post-process",
                 type: adjustmentType,
-                status: "completed",
+                status: initialStatus,
                 is_system_generated: isSystemGenerated,
                 date: new Date(),
                 updated_at: new Date(),
@@ -1567,7 +1794,7 @@ export const receiveOdooAdjustments = asyncHandler(
                 description: headerDescription,
                 level: "post-process",
                 type: adjustmentType,
-                status: "completed",
+                status: initialStatus,
                 is_system_generated: isSystemGenerated,
                 date: new Date(),
               },
@@ -1577,17 +1804,24 @@ export const receiveOdooAdjustments = asyncHandler(
             adjustmentId = created.id;
           }
 
-          if (mergedItems.length > 0) {
+          const hydratedItems =
+            await hydrateAdjustmentItemsBarcodeTextFromBarcodeMaster(
+              tx,
+              mergedItems,
+            );
+
+          if (hydratedItems.length > 0) {
             await tx.adjustment_item.createMany({
-              data: mergedItems.map((item) => ({
+              data: hydratedItems.map((item) => ({
                 adjustment_id: adjustmentId,
                 sequence: item.sequence,
                 product_id: item.product_id,
                 code: item.code,
                 name: item.name ?? "",
                 unit: item.unit ?? "",
-                location_id: null,
-                location: item.location_owner ?? item.location_dest ?? null,
+
+                location_id: item.location_id ?? null,
+                location: item.location ?? item.location_owner ?? null,
 
                 location_owner: item.location_owner ?? null,
                 location_owner_display: item.location_owner_display ?? null,
@@ -1599,12 +1833,24 @@ export const receiveOdooAdjustments = asyncHandler(
                 location_dest_owner_display:
                   item.location_dest_owner_display ?? null,
 
-                tracking: null,
+                tracking: item.tracking ?? null,
                 lot_id: item.lot_id ?? null,
                 lot_serial: item.lot_serial ?? null,
                 qty: item.qty,
                 exp: item.exp ?? null,
-                barcode_payload: item.barcode_payload ?? null,
+
+                barcode_id: item.barcode_id ?? null,
+                barcode_text: item.barcode_text ?? null,
+                barcode_payload:
+                  item.barcode_payload ??
+                  (item.barcode_text
+                    ? buildAdjustmentBarcodePayload({
+                        barcode: item.barcode_text,
+                        lot_serial: item.lot_serial ?? null,
+                        exp: item.exp ?? null,
+                      })
+                    : null),
+
                 qty_pick: 0,
               })),
             });
@@ -1615,14 +1861,14 @@ export const receiveOdooAdjustments = asyncHandler(
               no,
               department_id: dep.department_id,
               department: dep.department || "",
-              items: mergedItems,
+              items: hydratedItems,
             });
           } else if (adjustmentType === "BOA") {
             await applyBoaAdjustmentToBorStock(tx, {
               no,
               department_id: dep.department_id,
               department: dep.department || "",
-              items: mergedItems,
+              items: hydratedItems,
             });
           }
 
@@ -1645,7 +1891,7 @@ export const receiveOdooAdjustments = asyncHandler(
           created: true,
           item_count: saved?.items?.length ?? mergedItems.length,
           type: saved?.type ?? adjustmentType,
-          status: saved?.status ?? "completed",
+          status: saved?.status ?? initialStatus,
           is_system_generated: isSystemGenerated,
         });
       }
@@ -1684,6 +1930,7 @@ export const receiveOdooAdjustments = asyncHandler(
           },
         });
       }
+
       throw err;
     }
   },
@@ -2019,9 +2266,7 @@ export const listCombinedAdjustments = asyncHandler(
     let mergedAll = [...formattedAdjustments, ...formattedOutbounds];
 
     if (mode) {
-      mergedAll = mergedAll.filter(
-        (row: any) => getCombinedMode(row) === mode,
-      );
+      mergedAll = mergedAll.filter((row: any) => getCombinedMode(row) === mode);
     }
 
     const statusCounts = {
@@ -2435,66 +2680,176 @@ function decodeNoParam(v: unknown): string {
   return decodeURIComponent(s);
 }
 
+function normalizeForCompare(v: unknown): string {
+  return String(v ?? "")
+    .trim()
+    .replace(/\s+/g, "")
+    .toUpperCase();
+}
+
+function isSameNullableLot(a: unknown, b: unknown): boolean {
+  const aa = normalizeForCompare(a);
+  const bb = normalizeForCompare(b);
+
+  if (!aa && !bb) return true;
+  if (aa === "XXXXXX" && !bb) return true;
+  if (!aa && bb === "XXXXXX") return true;
+
+  return aa === bb;
+}
+
+function itemMatchesResolvedScan(item: any, resolved: any): boolean {
+  const itemBarcodeCandidates = [
+    item.barcode_text,
+    item.barcode,
+    item.barcode_code,
+    item.code,
+  ]
+    .map(normalizeScanText)
+    .filter(Boolean);
+
+  const resolvedBarcode = normalizeScanText(resolved.barcode_text);
+
+  const barcodeOk =
+    !!resolvedBarcode &&
+    itemBarcodeCandidates.some(
+      (x) => x === resolvedBarcode || resolvedBarcode.includes(x),
+    );
+
+  if (!barcodeOk) return false;
+
+  const itemLot = item.lot_serial ?? item.lot ?? item.serial ?? null;
+  const scanLot = resolved.lot_serial ?? null;
+
+  if (!isSameNullableLot(itemLot, scanLot)) return false;
+
+  const itemExp =
+    item.exp ??
+    item.expire_date ??
+    item.exp_date ??
+    item.expiration ??
+    item.expire ??
+    null;
+
+  if (!sameExpDateOnly(itemExp, resolved.exp)) return false;
+
+  return true;
+}
+
 export const scanAdjustmentLocation = asyncHandler(
   async (req: Request, res: Response) => {
     const no = decodeNoParam((req.params as any).no);
-
-    // ✅ location_full_name จาก body
     const location_full_name = normalizeText(req.body?.location_full_name);
 
     if (!no) throw badRequest("Invalid no");
-    if (!location_full_name) throw badRequest("กรุณาส่ง location_full_name");
 
-    // ✅ ตรวจเอกสาร
-    const adj = await prisma.adjustment.findFirst({
-      where: { no, deleted_at: null },
-      select: { id: true, no: true, status: true },
-    });
-    if (!adj) throw badRequest(`Adjustment not found: ${no}`);
+    const payload = await handleScanLocationCommon({
+      docNo: no,
+      locationFullName: location_full_name,
 
-    // ✅ (optional) จำกัดสถานะ: ให้ scan ได้เฉพาะ in-progress
-    if (adj.status !== "in-progress") {
-      throw badRequest(
-        `Scan allowed only when status is in-progress (current: ${adj.status})`,
-      );
-    }
+      loadDocument: () =>
+        prisma.adjustment.findFirst({
+          where: { no, deleted_at: null },
+          select: {
+            id: true,
+            no: true,
+            deleted_at: true,
+          },
+        }) as any,
 
-    // ✅ ดึง items ที่ location ตรง
-    const items = await prisma.adjustment_item.findMany({
-      where: {
-        adjustment_id: adj.id,
-        deleted_at: null,
-        location: location_full_name,
+      resolveLocation: resolveLocationByFullNameWithZone,
+
+      beforeBuildDetail: async ({ doc, location }) => {
+        const adj = await prisma.adjustment.findFirst({
+          where: { id: doc.id, deleted_at: null },
+          select: { id: true, status: true },
+        });
+
+        if (!adj) throw badRequest(`Adjustment not found: ${no}`);
+
+        if (adj.status !== "pending" && adj.status !== "in-progress") {
+          throw badRequest(
+            `Scan allowed only when status is pending/in-progress (current: ${adj.status})`,
+          );
+        }
+
+        await prisma.$transaction(async (tx) => {
+          await tx.adjustment.update({
+            where: { id: doc.id },
+            data: {
+              status: adj.status === "pending" ? "in-progress" : adj.status,
+              updated_at: new Date(),
+            },
+          });
+
+          const items = await tx.adjustment_item.findMany({
+            where: {
+              adjustment_id: doc.id,
+              deleted_at: null,
+            },
+            select: {
+              id: true,
+            },
+          });
+
+          for (const it of items) {
+            const existed = await tx.adjust_location_confirm.findFirst({
+              where: {
+                adjustment_id: doc.id,
+                adjustment_item_id: it.id,
+                location_name: location.full_name,
+                deleted_at: null,
+              },
+              select: { id: true },
+            });
+
+            if (!existed) {
+              await tx.adjust_location_confirm.create({
+                data: {
+                  adjustment_id: doc.id,
+                  adjustment_item_id: it.id,
+                  location_id: location.id,
+                  location_name: location.full_name,
+                  confirmed_qty: 0,
+                  created_at: new Date(),
+                  updated_at: new Date(),
+                },
+              });
+            }
+          }
+        });
       },
-      orderBy: [{ sequence: "asc" }, { id: "asc" }],
+
+      buildDetail: async ({ doc }) => {
+        return buildAdjustmentDetail(doc.id, no);
+      },
+
+      buildPayload: ({ doc, location, detail }) => {
+        return {
+          ...(detail as any),
+          scanned: {
+            location_full_name: location.full_name,
+          },
+          impact: (detail as any)?.items ?? [],
+          location: {
+            location_id: location.id,
+            location_name: location.full_name,
+            ignore: Boolean((location as any).ignore),
+            zone_short_name: (location as any).zone?.short_name ?? null,
+            zone_type_short_name:
+              (location as any).zone?.zone_type?.short_name ?? null,
+          },
+        };
+      },
+
+      emitRealtime: (payload, doc) => {
+        emitAdjustmentRealtime(no, "adjustment:scan_location", payload, doc.id);
+      },
+
+      notFoundMessage: `Adjustment not found: ${no}`,
     });
 
-    // ✅ ถ้าไม่เจอให้แจ้งชัด ๆ (FE จะได้ toast)
-    if (items.length === 0) {
-      throw badRequest(
-        `ไม่พบรายการในเอกสาร ${no} ที่ location = ${location_full_name}`,
-      );
-    }
-
-    // ✅ map เป็น impact สำหรับ FE
-    const impact = items.map((it) => ({
-      key: String(it.id), // ✅ ใช้ id ของ adjustment_item
-      code: it.code ?? "",
-      name: it.name ?? "",
-      // ให้ editable default เป็น location_dest ถ้ามี ไม่งั้นใช้ location ที่ scan
-      location_full_name: it.location_dest ?? it.location ?? location_full_name,
-      lot_serial: it.lot_serial ?? "",
-      qty: it.qty ?? 0,
-      qty_pick: it.qty_pick ?? 0,
-      unit: it.unit ?? null,
-    }));
-
-    return res.json({
-      no,
-      location_full_name,
-      impact,
-      total: impact.length,
-    });
+    return res.json(payload);
   },
 );
 
@@ -2564,80 +2919,358 @@ export const saveAdjustmentDraft = asyncHandler(
 // POST /api/Adjust/:no/scan/barcode
 export const scanAdjustmentBarcode = asyncHandler(
   async (req: Request, res: Response) => {
-    const no = decodeURIComponent((req.params as any).no);
-    const barcode_payload = normalizeLot(
-      req.body?.barcode_payload ?? req.body?.barcode,
-    );
+    const no = decodeNoParam((req.params as any).no);
+
+    const barcodeRaw = String(
+      req.body?.barcode_payload ?? req.body?.barcode ?? "",
+    ).trim();
+
+    const location_full_name = normalizeText(req.body?.location_full_name);
+    const user_ref = normalizeText(req.body?.user_ref) || null;
 
     if (!no) throw badRequest("Invalid no");
-    if (!barcode_payload) throw badRequest("กรุณาส่ง barcode_payload");
+    if (!barcodeRaw) throw badRequest("กรุณาส่ง barcode");
+    if (!location_full_name) throw badRequest("กรุณาส่ง location_full_name");
 
     const adj = await prisma.adjustment.findFirst({
       where: { no, deleted_at: null },
-      select: { id: true, status: true },
+      select: { id: true, no: true, status: true },
     });
+
     if (!adj) throw badRequest(`Adjustment not found: ${no}`);
 
-    if (adj.status !== "in-progress") {
+    if (adj.status !== "pending" && adj.status !== "in-progress") {
       throw badRequest(
-        `Scan allowed only when status is in-progress (current: ${adj.status})`,
+        `Scan allowed only when status is pending/in-progress (current: ${adj.status})`,
       );
     }
 
-    const result = await prisma.$transaction(async (tx) => {
-      // 1) หา candidates ทั้งหมดที่ payload ตรง
+    const loc = await resolveLocationByFullNameWithZone(location_full_name);
+    const resolved = await resolveBarcodeScan(barcodeRaw);
+
+    let updatedItem: any = null;
+    let beforePick = 0;
+    let afterPick = 0;
+    let beforeLoc = 0;
+    let afterLoc = 0;
+
+    await prisma.$transaction(async (tx) => {
       const candidates = await tx.adjustment_item.findMany({
         where: {
           adjustment_id: adj.id,
           deleted_at: null,
-          barcode_payload: barcode_payload,
         },
         orderBy: [{ sequence: "asc" }, { id: "asc" }],
       });
 
-      if (candidates.length === 0) {
+      const matched = candidates.filter((it) =>
+        itemMatchesResolvedScan(it, resolved),
+      );
+
+      if (matched.length === 0) {
         throw badRequest(
-          `ไม่พบ item ที่ตรงกับ barcode_payload นี้ในเอกสาร ${no}`,
+          `ไม่พบ barcode นี้ในเอกสาร (barcode=${resolved.barcode_text ?? "-"}, lot=${resolved.lot_serial ?? "-"}, exp=${resolved.exp_text ?? "-"})`,
         );
       }
 
-      // 2) กันซ้ำ: เลือกตัวที่ยัง pick ไม่ครบก่อน
-      const pickable =
-        candidates.find((it) => (it.qty_pick ?? 0) < (it.qty ?? 0)) ??
-        candidates[0];
+      const target =
+        matched.find((it) => Number(it.qty_pick ?? 0) < Number(it.qty ?? 0)) ??
+        matched[0];
 
-      // 3) ถ้า pick ครบแล้วทั้งคู่ ก็ไม่ควรให้สแกนเพิ่ม
-      const maxQty = pickable.qty ?? 0;
-      const currentPick = pickable.qty_pick ?? 0;
-      if (maxQty > 0 && currentPick >= maxQty) {
+      const maxQty = Number(target.qty ?? 0);
+      beforePick = Number(target.qty_pick ?? 0);
+
+      if (beforePick >= maxQty) {
         throw badRequest("รายการนี้สแกนครบจำนวนแล้ว");
       }
 
-      // 4) increment qty_pick แบบ atomic
-      const updated = await tx.adjustment_item.update({
-        where: { id: pickable.id },
-        data: { qty_pick: { increment: 1 }, updated_at: new Date() },
+      afterPick = beforePick + 1;
+
+      if (afterPick > maxQty) {
+        throw badRequest(
+          `จำนวนสแกนเกิน qty (qty=${maxQty}, current=${beforePick}, add=1)`,
+        );
+      }
+
+      const existingConfirm = await tx.adjust_location_confirm.findFirst({
+        where: {
+          adjustment_id: adj.id,
+          adjustment_item_id: target.id,
+          location_name: location_full_name,
+          deleted_at: null,
+        },
+        select: {
+          id: true,
+          confirmed_qty: true,
+        },
       });
 
-      return updated;
+      beforeLoc = Number(existingConfirm?.confirmed_qty ?? 0);
+      afterLoc = beforeLoc + 1;
+
+      updatedItem = await tx.adjustment_item.update({
+        where: { id: target.id },
+        data: {
+          qty_pick: { increment: 1 },
+          updated_at: new Date(),
+        },
+      });
+
+      if (existingConfirm) {
+        await tx.adjust_location_confirm.update({
+          where: { id: existingConfirm.id },
+          data: {
+            confirmed_qty: { increment: 1 },
+            user_ref,
+            updated_at: new Date(),
+          },
+        });
+      } else {
+        await tx.adjust_location_confirm.create({
+          data: {
+            adjustment_id: adj.id,
+            adjustment_item_id: target.id,
+            location_id: loc.id,
+            location_name: location_full_name,
+            confirmed_qty: 1,
+            user_ref,
+            created_at: new Date(),
+            updated_at: new Date(),
+          },
+        });
+      }
+
+      await tx.adjustment.update({
+        where: { id: adj.id },
+        data: {
+          status: adj.status === "pending" ? "in-progress" : adj.status,
+          updated_at: new Date(),
+        },
+      });
     });
+
+    const detail = await buildAdjustmentDetail(adj.id, no);
+
+    const matchedLine =
+      detail?.items?.find?.(
+        (x: any) => Number(x.id) === Number(updatedItem?.id),
+      ) ?? null;
+
+    const payload = {
+      ...detail,
+      location: {
+        location_id: loc.id,
+        location_name: loc.full_name,
+        ignore: Boolean((loc as any).ignore),
+        zone_short_name: (loc as any).zone?.short_name ?? null,
+        zone_type_short_name: (loc as any).zone?.zone_type?.short_name ?? null,
+      },
+      scanned: {
+        barcode: barcodeRaw,
+        normalized_input: resolved.normalized_input,
+        matched_by: resolved.matched_by,
+        barcode_text: resolved.barcode_text,
+        lot_serial: resolved.lot_serial,
+        exp_text: resolved.exp_text,
+        exp: resolved.exp,
+        location_full_name,
+      },
+      addQty: 1,
+      matchedLine,
+      qty_before: beforePick,
+      qty_after: afterPick,
+      loc_qty_before: beforeLoc,
+      loc_qty_after: afterLoc,
+    };
+
+    emitAdjustmentRealtime(no, "adjustment:scan_barcode", payload, adj.id);
+
+    return res.json(payload);
+  },
+);
+
+function buildAdjustmentStockBucketKey(input: {
+  source: string;
+  product_id: number | null;
+  product_code?: string | null;
+  lot_id?: number | null;
+  location_id?: number | null;
+}) {
+  return [
+    input.source,
+    `p:${input.product_id ?? 0}`,
+    `code:${input.product_code ?? ""}`,
+    `lot:${input.lot_id ?? 0}`,
+    `loc:${input.location_id ?? 0}`,
+  ].join("|");
+}
+
+export const confirmAdjustmentByLocation = asyncHandler(
+  async (req: Request, res: Response) => {
+    const no = decodeNoParam((req.params as any).no);
+
+    const adj = await prisma.adjustment.findFirst({
+      where: { no, deleted_at: null },
+    });
+
+    if (!adj) throw badRequest("ไม่พบเอกสาร");
+
+    const result = await prisma.$transaction(async (tx) => {
+      const confirms = await tx.adjust_location_confirm.findMany({
+        where: {
+          adjustment_id: adj.id,
+          deleted_at: null,
+          confirmed_qty: { gt: 0 },
+        },
+        include: {
+          adjustment_item: true,
+        },
+        orderBy: [{ id: "asc" }],
+      });
+
+      if (confirms.length === 0) {
+        throw badRequest("ยังไม่มีรายการ scan สำหรับ confirm");
+      }
+
+      let increase = 0;
+      let decrease = 0;
+
+      for (const c of confirms as any[]) {
+        const item = c.adjustment_item;
+        if (!item || item.deleted_at) continue;
+
+        const qty = Math.max(0, Math.floor(Number(c.confirmed_qty ?? 0)));
+        if (qty <= 0) continue;
+
+        const fromInv = isInventoryAdjustment(item.location);
+        const toInv = isInventoryAdjustment(item.location_dest);
+
+        const locationName = normalizeText(c.location_name);
+        const locationId =
+          c.location_id == null || Number.isNaN(Number(c.location_id))
+            ? null
+            : Number(c.location_id);
+
+        const existing = await tx.stock.findFirst({
+          where: {
+            product_id: item.product_id,
+            lot_name: item.lot_serial ?? null,
+            location_name: locationName,
+            source: "wms",
+          } as any,
+          orderBy: { id: "desc" },
+        });
+
+        if (fromInv && !toInv) {
+          if (existing) {
+            await tx.stock.update({
+              where: { id: existing.id },
+              data: {
+                quantity: { increment: new Prisma.Decimal(qty) },
+                count: { increment: qty },
+                updated_at: new Date(),
+              } as any,
+            });
+          } else {
+            await tx.stock.create({
+              data: {
+                bucket_key: buildAdjustmentStockBucketKey({
+                  source: "wms",
+                  product_id: item.product_id,
+                  product_code: item.code ?? null,
+                  lot_id: item.lot_id ?? null,
+                  location_id: locationId,
+                }),
+
+                snapshot_date: new Date(),
+                no,
+
+                product_id: item.product_id,
+                product_code: item.code ?? null,
+                product_name: item.name ?? null,
+                unit: item.unit ?? null,
+
+                location_id: locationId,
+                location_name: locationName,
+
+                lot_id: item.lot_id ?? null,
+                lot_name: item.lot_serial ?? null,
+                expiration_date: item.exp ?? null,
+
+                source: "wms",
+                quantity: new Prisma.Decimal(qty),
+                count: qty,
+              } as any,
+            });
+          }
+
+          increase += qty;
+          continue;
+        }
+
+        if (!fromInv && toInv) {
+          if (!existing) {
+            throw badRequest(
+              `stock ไม่มี product=${item.product_id ?? "-"} lot=${item.lot_serial ?? "-"} location=${locationName}`,
+            );
+          }
+
+          const remain = Number(existing.quantity ?? 0) - qty;
+
+          if (remain < 0) {
+            throw badRequest(
+              `stock ไม่พอ product=${item.product_id ?? "-"} lot=${item.lot_serial ?? "-"} location=${locationName} need=${qty} have=${Number(existing.quantity ?? 0)}`,
+            );
+          }
+
+          await tx.stock.update({
+            where: { id: existing.id },
+            data: {
+              quantity: new Prisma.Decimal(remain),
+              count: Math.max(0, Math.floor(remain)),
+              updated_at: new Date(),
+            } as any,
+          });
+
+          decrease += qty;
+          continue;
+        }
+
+        throw badRequest(
+          `ไม่รองรับ adjustment flow location=${item.location ?? "-"} location_dest=${item.location_dest ?? "-"}`,
+        );
+      }
+
+      await tx.adjustment.update({
+        where: { id: adj.id },
+        data: {
+          status: "completed",
+          updated_at: new Date(),
+        },
+      });
+
+      return { increase, decrease };
+    });
+
+    const detail = await buildAdjustmentDetail(adj.id, no);
+
+    emitAdjustmentRealtime(
+      no,
+      "adjustment:confirm",
+      {
+        ...detail,
+        confirmed: result,
+      },
+      adj.id,
+    );
 
     return res.json({
       success: true,
       no,
-      barcode_payload,
-      matched: {
-        key: String(result.id),
-        code: result.code ?? "",
-        name: result.name ?? "",
-        lot_serial: result.lot_serial ?? "",
-        exp: (result as any).exp ?? null,
-        location_dest: result.location_dest ?? "",
-        qty: result.qty ?? 0,
-        qty_pick: result.qty_pick ?? 0,
-        unit: result.unit ?? null,
+      data: {
+        ...detail,
+        confirmed: result,
       },
-      message: "scan ok (+1 qty_pick)",
     });
   },
 );
@@ -2653,288 +3286,121 @@ export const confirmAdjustmentCompleteByNo = asyncHandler(
     const no = decodeNoParam((req.params as any).no);
     if (!no) throw badRequest("Invalid no");
 
-    // ✅ payload FE: { transfers: [...] } (ตามรูป)
-    const lines = normalizeTransfersPayload(req.body);
-
-    if (!Array.isArray(lines) || lines.length === 0) {
-      throw badRequest("transfers.items ต้องมีอย่างน้อย 1 รายการ");
-    }
-
     const adj = await prisma.adjustment.findFirst({
       where: { no, deleted_at: null },
-      select: {
-        id: true,
-        no: true,
-        status: true,
-        department: true,
-        department_id: true,
-        reference: true,
-        origin: true,
-        date: true,
-      },
     });
-    if (!adj) throw badRequest(`Adjustment not found: ${no}`);
 
-    if (adj.status !== "pending" && adj.status !== "in-progress") {
-      throw badRequest(`Transition not allowed: ${adj.status} -> completed`);
+    if (!adj) throw badRequest("ไม่พบเอกสาร");
+
+    if (adj.status !== "in-progress") {
+      throw badRequest("ต้องเป็น in-progress");
     }
 
-    const inboundNo = no;
-
     const result = await prisma.$transaction(async (tx) => {
-      // preload items เพื่อ resolve id กรณี FE ไม่ส่ง adjustment_item.id
-      const adjItems = await tx.adjustment_item.findMany({
-        where: { adjustment_id: adj.id, deleted_at: null },
-        select: {
-          id: true,
-          product_id: true,
-          lot_serial: true,
-          sequence: true,
-          qty: true,
-          qty_pick: true,
-          name: true,
-          unit: true,
-          code: true,
-          lot_id: true,
-          tracking: true,
-        } as any,
-        orderBy: [{ sequence: "asc" }, { id: "asc" }],
-      });
-
-      // 1) update adjustment_item ตาม lines
-      const updatedItemIds: number[] = [];
-
-      for (const line of lines) {
-        const qtyPick = Math.max(0, parseIntSafe(line.qty_pick, 0));
-        if (qtyPick <= 0) throw badRequest("qty_pick ต้องมากกว่า 0");
-
-        const location_dest = normalizeText(line.location_dest);
-        if (!location_dest) throw badRequest("location_dest ห้ามว่าง");
-
-        // lot_serial: optional ถ้าไม่ส่งมา ใช้ของเดิมได้
-        const lotIncoming = normalizeLotOptional(line.lot_serial);
-
-        // ✅ resolve adjustment_item.id
-        const itemId = resolveAdjustmentItemId({
-          line,
-          adjItems,
-        });
-        if (!itemId)
-          throw badRequest(
-            "หา adjustment_item ไม่เจอ (product/lot/sequence ไม่ตรง)",
-          );
-
-        const updated = await tx.adjustment_item.updateMany({
-          where: { id: itemId, adjustment_id: adj.id, deleted_at: null },
-          data: {
-            location_dest,
-
-            ...(lotIncoming !== undefined ? { lot_serial: lotIncoming } : {}),
-
-            // ✅ requirement: บวกทั้ง qty และ qty_pick,
-            qty_pick: { increment: qtyPick },
-
-            updated_at: new Date(),
-          } as any,
-        });
-
-        if (updated.count === 0) {
-          throw badRequest(`ไม่พบ item id=${itemId} ใน adjustment ${no}`);
-        }
-
-        updatedItemIds.push(itemId);
-      }
-
-      // 2) upsert inbound (no unique)
-      const inbound =
-        (await tx.inbound.findFirst({
-          where: { no: inboundNo, deleted_at: null },
-          select: { id: true, no: true },
-        })) ??
-        (await tx.inbound.create({
-          data: {
-            no: inboundNo,
-            date: adj.date ?? new Date(),
-            in_type: "ADJ",
-            department: adj.department ?? "",
-            department_id: adj.department_id ?? null,
-            reference: adj.reference ?? null,
-            origin: adj.origin ?? null,
-          } as any,
-          select: { id: true, no: true },
-        }));
-
-      // 3) โหลด item ล่าสุด
-      const items = await tx.adjustment_item.findMany({
+      const confirms = await tx.adjust_location_confirm.findMany({
         where: {
           adjustment_id: adj.id,
           deleted_at: null,
-          id: { in: updatedItemIds },
+          confirmed_qty: { gt: 0 },
         },
-        orderBy: [{ sequence: "asc" }, { id: "asc" }],
+        include: {
+          adjustment_item: true,
+        },
       });
 
-      const totalPick = items.reduce(
-        (sum: number, it: any) => sum + Number(it.qty_pick ?? 0),
-        0,
-      );
-      if (totalPick <= 0) {
-        throw badRequest(
-          "ยังไม่มีการสแกนสินค้า (qty_pick = 0) ไม่สามารถ Complete ได้",
-        );
+      if (confirms.length === 0) {
+        throw badRequest("ยังไม่ได้ scan");
       }
 
-      // 4) preload barcode by product_id จาก DB (เอาตัวล่าสุด)
-      const productIds = Array.from(
-        new Set(items.map((it: any) => it.product_id).filter(Boolean)),
-      ) as number[];
+      let increase = 0;
+      let decrease = 0;
 
-      const barcodeRows =
-        productIds.length > 0
-          ? await tx.barcode.findMany({
-              where: { deleted_at: null, product_id: { in: productIds } },
-              select: { id: true, product_id: true, barcode: true } as any,
-              orderBy: [{ id: "desc" }],
-            })
-          : [];
+      for (const c of confirms) {
+        const item = c.adjustment_item;
+        if (!item) continue;
 
-      const barcodeByProductId = new Map<number, any>();
-      for (const b of barcodeRows as any[]) {
-        const pid = Number(b.product_id);
-        if (!barcodeByProductId.has(pid)) barcodeByProductId.set(pid, b);
-      }
+        const qty = Number(c.confirmed_qty ?? 0);
+        if (qty <= 0) continue;
 
-      // map exp/location_dest/barcode ที่มาจาก FE ต่อ itemId
-      const extraByItemId = new Map<
-        number,
-        {
-          exp: Date | null;
-          location_dest: string | null;
-          barcode_id: number | null;
-          barcode_text: string | null;
-        }
-      >();
+        const fromInv = isInventoryAdjustment(item.location);
+        const toInv = isInventoryAdjustment(item.location_dest);
 
-      for (const line of lines) {
-        const itemId = resolveAdjustmentItemId({ line, adjItems });
-        if (!itemId) continue;
+        const locationName = normalizeText(c.location_name);
 
-        const expDate = parseExpireDateOptional(line.expire_date);
-        const locDest = normalizeText(line.location_dest) || null;
-
-        const feBarcode0 = Array.isArray(line?.barcodes)
-          ? line.barcodes[0]
-          : null;
-        const feBarcodeId =
-          feBarcode0?.barcode_id != null ? Number(feBarcode0.barcode_id) : null;
-        const feBarcodeText =
-          feBarcode0?.barcode != null
-            ? String(feBarcode0.barcode).trim()
-            : null;
-
-        extraByItemId.set(itemId, {
-          exp: expDate,
-          location_dest: locDest,
-          barcode_id: feBarcodeId,
-          barcode_text: feBarcodeText,
-        });
-      }
-
-      let created = 0;
-      let skippedExists = 0;
-
-      for (const it of items as any[]) {
-        const qtyPick = Math.max(0, parseIntSafe(it.qty_pick, 0));
-        if (qtyPick <= 0) continue;
-
-        const odoo_line_key = `ADJ:${no}:${it.id}`;
-
-        const exists = await tx.goods_in.findFirst({
-          where: { odoo_line_key, deleted_at: null },
-          select: { id: true },
-        });
-        if (exists) {
-          skippedExists++;
-          continue;
-        }
-
-        const pid = it.product_id != null ? Number(it.product_id) : null;
-
-        const extra = extraByItemId.get(Number(it.id)) ?? {
-          exp: null,
-          location_dest: null,
-          barcode_id: null,
-          barcode_text: null,
-        };
-
-        // ✅ barcode ใช้ DB เป็นหลัก แต่ fallback ใช้ FE ถ้า DB ไม่มี
-        const dbRow = pid != null ? barcodeByProductId.get(pid) : null;
-        const dbBarcodeText = String(dbRow?.barcode ?? "").trim() || null;
-
-        const finalBarcodeText = dbBarcodeText ?? extra.barcode_text ?? null;
-        const finalBarcodeId = dbRow?.id ?? extra.barcode_id ?? null;
-
-        const barcode_payload =
-          finalBarcodeText != null
-            ? buildAdjustmentBarcodePayload({
-                barcode: finalBarcodeText,
-                lot_serial: it.lot_serial ?? null,
-                exp: extra.exp,
-              })
-            : null;
-
-        await tx.goods_in.create({
-          data: {
-            inbound_id: inbound.id,
-
-            sequence: it.sequence ?? null,
-            product_id: pid,
-            code: it.code ?? null,
-            name: String(it.name ?? "").trim() || "-",
-            unit: String(it.unit ?? "").trim() || "-",
-
-            quantity_receive: qtyPick,
-            quantity_count: 0,
-            qty: qtyPick,
-
-            lot_serial: it.lot_serial ?? null,
-            lot: it.lot_serial ?? it.lot ?? null,
-            lot_id: it.lot_id ?? null,
-            tracking: it.tracking ?? null,
-
-            exp: extra.exp,
-
-            barcode_id: finalBarcodeId,
-            barcode_text: finalBarcodeText,
-            barcode_payload,
-
-            // ✅ ตาม schema ที่คุณเพิ่ม
-            location_dest: extra.location_dest ?? it.location_dest ?? null,
-
-            in_process: false,
-
-            odoo_line_key,
-            odoo_sequence: it.sequence ?? null,
+        const existing = await tx.stock.findFirst({
+          where: {
+            product_id: item.product_id,
+            lot_name: item.lot_serial ?? null,
+            location_name: locationName,
           } as any,
         });
 
-        created++;
+        // ➕ เพิ่ม stock
+        if (fromInv && !toInv) {
+          if (existing) {
+            await tx.stock.update({
+              where: { id: existing.id },
+              data: {
+                quantity: { increment: new Prisma.Decimal(qty) },
+                count: { increment: qty },
+              } as any,
+            });
+          } else {
+            await tx.stock.create({
+              data: {
+                product_id: item.product_id,
+                location_name: locationName,
+                lot_name: item.lot_serial ?? null,
+                quantity: new Prisma.Decimal(qty),
+                count: qty,
+                source: "wms",
+              } as any,
+            });
+          }
+
+          increase += qty;
+        }
+
+        // ➖ ลด stock
+        if (!fromInv && toInv) {
+          if (!existing) throw badRequest("stock ไม่มี");
+
+          const remain = Number(existing.quantity) - qty;
+          if (remain < 0) throw badRequest("stock ไม่พอ");
+
+          await tx.stock.update({
+            where: { id: existing.id },
+            data: {
+              quantity: new Prisma.Decimal(remain),
+              count: remain,
+            } as any,
+          });
+
+          decrease += qty;
+        }
       }
 
       await tx.adjustment.update({
         where: { id: adj.id },
-        data: { status: "completed", updated_at: new Date() },
+        data: { status: "completed" },
       });
 
-      return { inbound_no: inbound.no, created, skippedExists };
+      return { increase, decrease };
     });
+
+    const detail = await buildAdjustmentDetail(adj.id, no);
+
+    const payload = {
+      ...detail,
+      confirmed: result,
+    };
+
+    emitAdjustmentRealtime(no, "adjustment:confirm", payload, adj.id);
 
     return res.json({
       success: true,
       no,
-      inbound_no: result.inbound_no,
-      goods_in_created: result.created,
-      goods_in_skipped_exists: result.skippedExists,
+      data: payload,
     });
   },
 );

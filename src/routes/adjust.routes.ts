@@ -11,6 +11,7 @@ import {
 	scanAdjustmentLocation,
 	scanAdjustmentBarcode,
 	deleteAdjustmentItem,
+	confirmAdjustmentByLocation,
 } from "../controllers/adjust.controller";
 
 const router = Router();
@@ -26,6 +27,7 @@ router.delete(":id/items/:itemId", deleteAdjustmentItem);
 router.post("/odoo", receiveOdooAdjustments);
 router.post("/:no/scan/location", scanAdjustmentLocation);
 router.post("/:no/scan/barcode", scanAdjustmentBarcode);
+router.post("/:no/scan/confirm", confirmAdjustmentByLocation);
 router.post("/:no/draft", saveAdjustmentDraft);
 router.post("/:no/complete", confirmAdjustmentCompleteByNo);
 

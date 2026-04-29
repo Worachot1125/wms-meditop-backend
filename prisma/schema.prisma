@@ -791,31 +791,32 @@ model stock_balance {
 }
 
 model adjustment {
-  id                  Int               @id @default(autoincrement())
-  no                  String?
-  inventory_id        Int?
-  picking_id          Int?
-  picking_no          String?
-  department_id       String?
-  department          String
-  reference           String?
-  origin              String?
-  description         String?
-  level               String? // post-process / in-process
-  type                String? // จากเลขเอกสาร 2-3 ตัวแรก
-  status              String            @default("pending") // pending, in-progress, completed, cancelled
-  is_system_generated Boolean           @default(false)
-  date                DateTime          @default(now())
-  created_at          DateTime          @default(now())
-  updated_at          DateTime?
-  deleted_at          DateTime?
-  items               adjustment_item[]
+  id                     Int                       @id @default(autoincrement())
+  no                     String?
+  inventory_id           Int?
+  picking_id             Int?
+  picking_no             String?
+  department_id          String?
+  department             String
+  reference              String?
+  origin                 String?
+  description            String?
+  level                  String? // post-process / in-process
+  type                   String? // จากเลขเอกสาร 2-3 ตัวแรก
+  status                 String                    @default("pending") // pending, in-progress, completed, cancelled
+  is_system_generated    Boolean                   @default(false)
+  date                   DateTime                  @default(now())
+  created_at             DateTime                  @default(now())
+  updated_at             DateTime?
+  deleted_at             DateTime?
+  items                  adjustment_item[]
+  adjustLocationConfirms adjust_location_confirm[]
 
   @@map("adjustments")
 }
 
 model adjustment_item {
-  id                          Int        @id @default(autoincrement())
+  id                          Int                       @id @default(autoincrement())
   adjustment_id               Int
   sequence                    Int?
   product_id                  Int?
@@ -835,14 +836,39 @@ model adjustment_item {
   lot_serial                  String?
   qty                         Int?
   exp                         DateTime?
+  barcode_id                  Int?
+  barcode_text                String?
   barcode_payload             String?
-  qty_pick                    Int        @default(0)
-  created_at                  DateTime   @default(now())
+  qty_pick                    Int                       @default(0)
+  created_at                  DateTime                  @default(now())
   updated_at                  DateTime?
   deleted_at                  DateTime?
-  adjustment                  adjustment @relation(fields: [adjustment_id], references: [id])
+  adjustment                  adjustment                @relation(fields: [adjustment_id], references: [id])
+  adjustLocationConfirms      adjust_location_confirm[]
 
   @@map("adjustment_items")
+}
+
+model adjust_location_confirm {
+  id                 Int       @id @default(autoincrement())
+  adjustment_id      Int
+  adjustment_item_id Int
+  location_id        Int?
+  location_name      String
+  confirmed_qty      Int       @default(0)
+  user_ref           String?
+  created_at         DateTime  @default(now())
+  updated_at         DateTime?
+  deleted_at         DateTime?
+
+  adjustment      adjustment      @relation(fields: [adjustment_id], references: [id])
+  adjustment_item adjustment_item @relation(fields: [adjustment_item_id], references: [id])
+
+  @@index([adjustment_id])
+  @@index([adjustment_item_id])
+  @@index([location_id])
+  @@index([location_name])
+  @@map("adjust_location_confirms")
 }
 
 model wms_stock_daily {
