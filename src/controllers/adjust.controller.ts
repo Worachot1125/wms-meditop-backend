@@ -2073,10 +2073,6 @@ export const listCombinedAdjustments = asyncHandler(
             where: { deleted_at: null },
             include: {
               barcode_ref: { where: { deleted_at: null } },
-              boxes: {
-                where: { deleted_at: null },
-                include: { box: true },
-              },
             },
             orderBy: { sequence: "asc" },
           },
@@ -2203,15 +2199,6 @@ export const listCombinedAdjustments = asyncHandler(
                   barcode_length: gi.barcode_ref.barcode_length,
                 }
               : null,
-            boxes:
-              gi.boxes
-                ?.filter((ib: any) => !ib.deleted_at)
-                .map((ib: any) => ({
-                  id: ib.box.id,
-                  box_code: ib.box.box_code,
-                  box_name: ib.box.box_name,
-                  quantity: ib.quantity ?? null,
-                })) ?? [],
           };
         });
 

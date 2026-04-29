@@ -5,7 +5,6 @@ import type {
   outbound,
   goods_out_item,
   barcode,
-  box,
 } from "@prisma/client";
 import {
   formatOdooOutbound,
@@ -341,7 +340,6 @@ function buildPackSummary(input: {
         goods_outs?: (goods_out_item & {
           barcode_ref?: barcode | null;
           boxes?: Array<{
-            box: box;
             quantity: number | null;
             deleted_at?: Date | null;
           }>;

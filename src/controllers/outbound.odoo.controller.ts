@@ -1222,7 +1222,6 @@ export const getOdooOutbounds = asyncHandler(
           where: { deleted_at: null },
           include: {
             barcode_ref: { where: { deleted_at: null } },
-            boxes: { where: { deleted_at: null }, include: { box: true } },
           },
           orderBy: { sequence: "asc" },
         },
@@ -1426,7 +1425,6 @@ export const getSpecialOutbounds = asyncHandler(
           where: { deleted_at: null },
           include: {
             barcode_ref: { where: { deleted_at: null } },
-            boxes: { where: { deleted_at: null }, include: { box: true } },
           },
           orderBy: { sequence: "asc" },
         },
@@ -1552,7 +1550,6 @@ export const getSpecialOutboundById = asyncHandler(
           where: { deleted_at: null },
           include: {
             barcode_ref: { where: { deleted_at: null } },
-            boxes: { where: { deleted_at: null }, include: { box: true } },
           },
           orderBy: { sequence: "asc" },
         },
@@ -1699,7 +1696,6 @@ export const getSpecialOutboundById = asyncHandler(
     return res.json(formatted);
   },
 );
-
 
 export const getOdooOutboundsAvailable = asyncHandler(
   async (req: AuthRequest, res: Response) => {
@@ -2012,7 +2008,6 @@ export const getOdooOutboundByNo = asyncHandler(
           where: { deleted_at: null },
           include: {
             barcode_ref: { where: { deleted_at: null } },
-            boxes: { where: { deleted_at: null }, include: { box: true } },
           },
           orderBy: { sequence: "asc" },
         },
@@ -2041,7 +2036,10 @@ export const getOdooOutboundByNo = asyncHandler(
     const inputMap = await buildInputNumberMapFromItems(itemsKey);
 
     const lockNoMap = await buildLockNoMapFromItems(
-      itemsKey.map((x: any) => ({ product_id: x.product_id, lot_name: x.lot_name })),
+      itemsKey.map((x: any) => ({
+        product_id: x.product_id,
+        lot_name: x.lot_name,
+      })),
     );
 
     formatted.items = (outbound.goods_outs || []).map((gi: any) => {
@@ -2120,7 +2118,6 @@ const outboundInclude = Prisma.validator<Prisma.outboundInclude>()({
     where: { deleted_at: null },
     include: {
       barcode_ref: { where: { deleted_at: null } },
-      boxes: { where: { deleted_at: null }, include: { box: true } },
     },
     orderBy: { sequence: "asc" },
   },
@@ -2183,7 +2180,6 @@ export const getOdooOutboundsByMyBatch = asyncHandler(
             where: { deleted_at: null },
             include: {
               barcode_ref: { where: { deleted_at: null } },
-              boxes: { where: { deleted_at: null }, include: { box: true } },
 
               // ✅ NEW: pick แยก location
               goodsOutItemLocationPicks: {
@@ -2483,7 +2479,6 @@ export const getOdooOutboundsByBatchName = asyncHandler(
             where: itemFilterEnabled ? goodsOutItemWhere : { deleted_at: null },
             include: {
               barcode_ref: { where: { deleted_at: null } },
-              boxes: { where: { deleted_at: null }, include: { box: true } },
 
               goodsOutItemLocationPicks: {
                 include: {
@@ -2683,9 +2678,7 @@ export const getOdooOutboundsByBatchName = asyncHandler(
             : [];
 
           // ✅ NEW: return by location
-          const return_locations = Array.isArray(
-            gi.goodsOutItemLocationReturns,
-          )
+          const return_locations = Array.isArray(gi.goodsOutItemLocationReturns)
             ? gi.goodsOutItemLocationReturns.map((lr: any) => ({
                 location_id: Number(lr.location_id ?? lr.location?.id ?? 0),
                 location_name: String(lr.location?.full_name ?? ""),
@@ -2937,7 +2930,6 @@ export const createOrUpdateOutboundItemBarcode = asyncHandler(
       data: { barcode_id, updated_at: new Date() },
       include: {
         barcode_ref: true,
-        boxes: { where: { deleted_at: null }, include: { box: true } },
       },
     });
 
@@ -3031,7 +3023,6 @@ export const createOrUpdateOutboundBarcode = asyncHandler(
           where: { deleted_at: null },
           include: {
             barcode_ref: { where: { deleted_at: null } },
-            boxes: { where: { deleted_at: null }, include: { box: true } },
           },
           orderBy: { sequence: "asc" },
         },
@@ -3044,8 +3035,6 @@ export const createOrUpdateOutboundBarcode = asyncHandler(
     });
   },
 );
-
-
 
 /**
  * GET /api/outbounds/odoo/barcode/:barcode
@@ -3065,7 +3054,6 @@ export const getOutboundByBarcode = asyncHandler(
           where: { deleted_at: null },
           include: {
             barcode_ref: { where: { deleted_at: null } },
-            boxes: { where: { deleted_at: null }, include: { box: true } },
           },
           orderBy: { sequence: "asc" },
         },
@@ -3286,19 +3274,8 @@ export const addItemToOutbound = asyncHandler(
       },
       include: {
         barcode_ref: { where: { deleted_at: null } },
-        boxes: { where: { deleted_at: null }, include: { box: true } },
       },
     });
-
-    const formattedBoxes =
-      newItem.boxes
-        ?.filter((ib) => !ib.deleted_at)
-        .map((ib) => ({
-          id: ib.box.id,
-          box_code: ib.box.box_code,
-          box_name: ib.box.box_name,
-          quantity: ib.quantity ?? null,
-        })) ?? [];
 
     return res.status(201).json({
       message: "เพิ่ม item สำเร็จ",
@@ -3314,7 +3291,6 @@ export const addItemToOutbound = asyncHandler(
         pick: newItem.pick,
         pack: newItem.pack,
         status: newItem.status,
-        boxes: formattedBoxes,
         barcode_id: newItem.barcode_id,
         barcode: newItem.barcode_ref
           ? {
@@ -3330,7 +3306,6 @@ export const addItemToOutbound = asyncHandler(
     });
   },
 );
-
 
 /**
  * PATCH /api/outbounds/:no/items/:itemId
@@ -3377,7 +3352,6 @@ export const updateOutboundItem = asyncHandler(
       where: { id: itemId },
       include: {
         barcode_ref: { where: { deleted_at: null } },
-        boxes: { where: { deleted_at: null }, include: { box: true } },
       },
     });
 
@@ -3476,7 +3450,6 @@ export const updateOutboundItem = asyncHandler(
       data,
       include: {
         barcode_ref: { where: { deleted_at: null } },
-        boxes: { where: { deleted_at: null }, include: { box: true } },
       },
     });
 
@@ -3736,7 +3709,6 @@ export const updateOutboundItem = asyncHandler(
     });
   },
 );
-
 
 export const scanOutboundItemCheckBarcode = asyncHandler(
   async (
@@ -4867,7 +4839,6 @@ export const getOutboundItem = asyncHandler(
       where: { id: itemId },
       include: {
         barcode_ref: { where: { deleted_at: null } },
-        boxes: { where: { deleted_at: null }, include: { box: true } },
         outbound: {
           select: { id: true, no: true, outbound_barcode: true, invoice: true },
         },
@@ -4893,16 +4864,6 @@ export const getOutboundItem = asyncHandler(
       item.lot_serial,
     );
 
-    const formattedBoxes =
-      item.boxes
-        ?.filter((ib) => !ib.deleted_at)
-        .map((ib) => ({
-          id: ib.box.id,
-          box_code: ib.box.box_code,
-          box_name: ib.box.box_name,
-          quantity: ib.quantity ?? null,
-        })) ?? [];
-
     return res.json({
       id: item.id,
       outbound_id: item.outbound_id,
@@ -4922,7 +4883,6 @@ export const getOutboundItem = asyncHandler(
       pack: item.pack,
       status: item.status,
       input_number,
-      boxes: formattedBoxes,
       barcode_text: item.barcode_text ?? null,
       barcode_id: item.barcode_id,
       barcode: item.barcode_ref
@@ -4980,10 +4940,6 @@ export const searchOutboundsByItem = asyncHandler(
               where: goodsOutWhere,
               include: {
                 barcode_ref: { where: { deleted_at: null } },
-                boxes: {
-                  where: { deleted_at: null },
-                  include: { box: true },
-                },
               },
               orderBy: { sequence: "asc" },
             },
@@ -5080,10 +5036,6 @@ export const getPackedOutboundItems = asyncHandler(
               department: true,
               invoice: true,
             },
-          },
-          boxes: {
-            where: { deleted_at: null },
-            include: { box: true },
           },
         },
         orderBy: [{ outbound: { date: "desc" } }, { sequence: "asc" }],

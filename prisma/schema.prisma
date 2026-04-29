@@ -369,119 +369,6 @@ model goods_in_scan_history {
   @@map("goods_in_scan_histories")
 }
 
-model doc_invoice {
-  id          String    @id
-  doc_invoice String    @unique
-  out_type    String
-  created_at  DateTime  @default(now())
-  updated_at  DateTime?
-  deleted_at  DateTime?
-  doc_barcode String?   @unique
-  invoices    invoice[]
-
-  @@map("doc_invoices")
-}
-
-model invoice {
-  id              String         @id
-  no              String         @unique
-  doc_invoice_id  String?
-  created_at      DateTime       @default(now())
-  updated_at      DateTime?
-  deleted_at      DateTime?
-  invoice_barcode String?        @unique
-  items           invoice_item[]
-  doc_invoice     doc_invoice?   @relation(fields: [doc_invoice_id], references: [id])
-
-  @@map("invoices")
-}
-
-model goods_out {
-  id         String          @id
-  sku        String
-  name       String
-  lock_no    String
-  lock_name  String
-  box_id     String?
-  created_at DateTime        @default(now())
-  deleted_at DateTime?
-  updated_at DateTime?
-  lot_no     String
-  barcode    String
-  boxes      goods_out_box[]
-  lot        lot             @relation(fields: [lot_no], references: [no])
-  invoices   invoice_item[]
-
-  @@map("goods_outs")
-}
-
-model invoice_item {
-  invoice_id   String
-  goods_out_id String
-  created_at   DateTime  @default(now())
-  id           Int       @id @default(autoincrement())
-  pack         Int       @default(0)
-  pick         Int       @default(0)
-  quantity     Int       @default(0)
-  updated_at   DateTime?
-  goods_out    goods_out @relation(fields: [goods_out_id], references: [id])
-  invoice      invoice   @relation(fields: [invoice_id], references: [id])
-
-  @@unique([invoice_id, goods_out_id])
-  @@map("invoice_items")
-}
-
-model box {
-  box_code        String?              @unique
-  box_name        String?
-  created_at      DateTime             @default(now())
-  deleted_at      DateTime?
-  updated_at      DateTime?
-  id              Int                  @id @default(autoincrement())
-  goods_outs      goods_out_box[]
-  goods_out_items goods_out_item_box[]
-
-  @@map("boxes")
-}
-
-model goods_out_box {
-  goods_out_id String
-  quantity     Int?
-  created_at   DateTime  @default(now())
-  id           Int       @id @default(autoincrement())
-  box_id       Int
-  box          box       @relation(fields: [box_id], references: [id])
-  goods_out    goods_out @relation(fields: [goods_out_id], references: [id])
-
-  @@unique([goods_out_id, box_id])
-  @@map("goods_out_boxes")
-}
-
-model goods_out_item_box {
-  id         Int            @id @default(autoincrement())
-  item_id    Int
-  quantity   Int?
-  created_at DateTime       @default(now())
-  updated_at DateTime?
-  deleted_at DateTime?
-  box_id     Int
-  box        box            @relation(fields: [box_id], references: [id])
-  item       goods_out_item @relation(fields: [item_id], references: [id])
-
-  @@unique([item_id, box_id])
-  @@map("goods_out_item_boxes")
-}
-
-model lot {
-  no         String      @id
-  name       String?
-  created_at DateTime    @default(now())
-  updated_at DateTime?
-  deleted_at DateTime?
-  goods_outs goods_out[]
-
-  @@map("lots")
-}
 
 model odoo_request_log {
   id              Int      @id @default(autoincrement())
@@ -644,7 +531,6 @@ model goods_out_item {
 
   lot_adjustment              outbound_lot_adjustment?          @relation(fields: [lot_adjustment_id], references: [id])
   adjustments                 outbound_lot_adjustment[]         @relation("goodsOutItemAdjustments")
-  boxes                       goods_out_item_box[]
   location_confirms           goods_out_item_location_confirm[] @relation("GoodsOutItemToLocConfirm")
   barcode_ref                 barcode?                          @relation(fields: [barcode_id], references: [id])
   outbound                    outbound                          @relation(fields: [outbound_id], references: [id])

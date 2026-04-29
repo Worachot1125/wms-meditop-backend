@@ -256,9 +256,6 @@ export const getTransactionReportDetail = asyncHandler(
             where: { deleted_at: null },
             include: {
               barcode_ref: true,
-              boxes: {
-                include: { box: true },
-              },
               goodsOutItemLocationPicks: {
                 include: {
                   location: {

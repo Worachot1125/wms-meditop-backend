@@ -1168,12 +1168,6 @@ export const getTransactionReportPaginated = asyncHandler(
             where: { deleted_at: null },
             include: {
               barcode_ref: true,
-              boxes: {
-                where: { deleted_at: null },
-                include: {
-                  box: true,
-                },
-              },
             },
             orderBy: { id: "asc" },
           },

@@ -74,14 +74,6 @@ function normalizeStatus(value: unknown) {
     .toLowerCase();
 }
 
-/**
- * รองรับ:
- * - 07/04/2026
- * - 07/04/2026, 13:22
- * - 07/04/2026 13:22
- * - 2026-04-07
- * - 2026-04-07 13:22
- */
 function parseFlexibleDateSearch(search: string): {
   exact?: {
     gte: Date;
@@ -100,7 +92,6 @@ function parseFlexibleDateSearch(search: string): {
     .replace(/\s+/g, " ")
     .trim();
 
-  // dd/MM/yyyy [HH:mm[:ss]]
   const thaiLike = normalized.match(
     /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/,
   );
@@ -125,7 +116,7 @@ function parseFlexibleDateSearch(search: string): {
     ) {
       if (hh != null && mi != null) {
         const start = new Date(Date.UTC(yyyy, mm - 1, dd, hh, mi, ss, 0));
-        const end = new Date(start.getTime() + 60 * 1000); // 1 minute window
+        const end = new Date(start.getTime() + 60 * 1000);
         return { exact: { gte: start, lt: end } };
       }
 
@@ -138,7 +129,6 @@ function parseFlexibleDateSearch(search: string): {
     }
   }
 
-  // yyyy-MM-dd [HH:mm[:ss]]
   const isoLike = normalized.match(
     /^(\d{4})-(\d{2})-(\d{2})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/,
   );
@@ -165,7 +155,6 @@ function parseFlexibleDateSearch(search: string): {
     };
   }
 
-  // fallback เดิม
   const fallbackDay = buildDayRangeFromSearch(raw);
   if (fallbackDay) {
     return { day: fallbackDay };
@@ -185,7 +174,6 @@ function buildPackProductSearchWhere(
 
   const orConditions: Prisma.pack_productWhereInput[] = [];
 
-  // search text หลัก
   orConditions.push(
     { name: { contains: trimmed, mode: "insensitive" } },
     { scan_prefix: { contains: trimmed, mode: "insensitive" } },
@@ -194,13 +182,11 @@ function buildPackProductSearchWhere(
     { remark: { contains: trimmed, mode: "insensitive" } },
   );
 
-  // search เลข id / max_box
   const num = toSearchNumber(trimmed);
   if (num !== null) {
     orConditions.push({ id: num }, { max_box: num });
   }
 
-  // search date/time
   const parsedDate = parseFlexibleDateSearch(trimmed);
   if (parsedDate?.exact) {
     orConditions.push(
@@ -214,7 +200,6 @@ function buildPackProductSearchWhere(
     );
   }
 
-  // search ข้างใน relation แบบให้ใกล้ outbound มากขึ้น
   orConditions.push(
     {
       outbounds: {
@@ -540,10 +525,6 @@ async function findOutboundsByDocKeys(docKeys: string[]) {
           barcode_ref: {
             where: { deleted_at: null },
           },
-          boxes: {
-            where: { deleted_at: null },
-            include: { box: true },
-          },
         },
         orderBy: [{ sequence: "asc" }, { id: "asc" }],
       },
@@ -604,10 +585,6 @@ async function loadPackProductFull(packProductId: number) {
                 include: {
                   barcode_ref: {
                     where: { deleted_at: null },
-                  },
-                  boxes: {
-                    where: { deleted_at: null },
-                    include: { box: true },
                   },
                 },
                 orderBy: [{ sequence: "asc" }, { id: "asc" }],
@@ -861,58 +838,6 @@ function pickSingleMatchedItem(
   parsedBarcodeText: string,
   parsedLotSerial: string,
 ) {
-  const matchDebugRows = allItems.map((item: any) => {
-    const rawNorm = normalizeScanText(rawBarcode);
-    const parsedBarcodeNorm = normalizeScanText(parsedBarcodeText);
-    const parsedLotNorm = normalizeScanText(parsedLotSerial);
-
-    const itemCodeNorm = normalizeScanText(item.code ?? "");
-    const itemBarcodeTextNorm = normalizeScanText(item.barcode_text ?? "");
-    const itemBarcodeMasterNorm = normalizeScanText(
-      item.barcode_ref?.barcode ?? "",
-    );
-    const itemLotNorm = normalizeScanText(item.lot_serial ?? "");
-
-    const barcodeMatched =
-      (!!itemBarcodeTextNorm && itemBarcodeTextNorm === parsedBarcodeNorm) ||
-      (!!itemBarcodeMasterNorm &&
-        itemBarcodeMasterNorm === parsedBarcodeNorm) ||
-      (!!itemCodeNorm && itemCodeNorm === parsedBarcodeNorm) ||
-      (!!itemBarcodeTextNorm && itemBarcodeTextNorm === rawNorm) ||
-      (!!itemBarcodeMasterNorm && itemBarcodeMasterNorm === rawNorm) ||
-      (!!itemCodeNorm && itemCodeNorm === rawNorm);
-
-    const lotMatched = !parsedLotNorm || parsedLotNorm === itemLotNorm;
-
-    return {
-      id: item.id,
-      outbound_no: item.outbound_no,
-      code: item.code,
-      barcode_text: item.barcode_text,
-      barcode_ref: item.barcode_ref?.barcode ?? null,
-      lot_serial: item.lot_serial,
-
-      rawNorm,
-      parsedBarcodeNorm,
-      parsedLotNorm,
-      itemCodeNorm,
-      itemBarcodeTextNorm,
-      itemBarcodeMasterNorm,
-      itemLotNorm,
-
-      barcodeMatched,
-      lotMatched,
-      finalMatched: barcodeMatched && lotMatched,
-
-      original_qty: item.original_qty,
-      return_qty: item.return_qty,
-      qty_after_return: item.qty,
-      pack: item.pack,
-      remaining: Math.max(0, Number(item.qty ?? 0) - Number(item.pack ?? 0)),
-    };
-  });
-
-
   const matchedItems = allItems.filter((item: any) =>
     goodsOutItemBarcodeMatched({
       rawBarcode,
@@ -921,7 +846,7 @@ function pickSingleMatchedItem(
       item,
     }),
   );
-  
+
   if (matchedItems.length === 0) {
     throw notFound("ไม่พบสินค้าใน pack_product นี้ที่ตรงกับ barcode ที่สแกน");
   }
@@ -962,12 +887,8 @@ function applyReturnToPackProduct(row: any) {
 
                       return {
                         ...item,
-
-                        // ✅ แสดงยอดหลังหัก return
                         qty: Math.max(0, Number(item.qty ?? 0) - returnQty),
                         pick: Math.max(0, Number(item.pick ?? 0) - returnQty),
-
-                        // ✅ เก็บค่าเดิมไว้ เผื่อ FE อยากใช้
                         original_qty: Number(item.qty ?? 0),
                         original_pick: Number(item.pick ?? 0),
                         return_qty: returnQty,
@@ -983,9 +904,6 @@ function applyReturnToPackProduct(row: any) {
   return cloned;
 }
 
-/**
- * GET /api/outbounds/pack-products
- */
 export const getPackProducts = asyncHandler(
   async (req: Request, res: Response) => {
     const page = parsePositiveInt(req.query.page, 1);
@@ -1004,7 +922,6 @@ export const getPackProducts = asyncHandler(
       throw badRequest("status ต้องเป็น completed หรือ process");
     }
 
-    // 🔹 where สำหรับ list
     const where: Prisma.pack_productWhereInput =
       buildPackProductSearchWhere(search);
 
@@ -1012,7 +929,6 @@ export const getPackProducts = asyncHandler(
       where.status = rawStatus;
     }
 
-    // 🔹 where สำหรับ statusCounts (ห้ามติด status filter)
     const whereForCount: Prisma.pack_productWhereInput =
       buildPackProductSearchWhere(search);
 
@@ -1029,10 +945,6 @@ export const getPackProducts = asyncHandler(
                     include: {
                       barcode_ref: {
                         where: { deleted_at: null },
-                      },
-                      boxes: {
-                        where: { deleted_at: null },
-                        include: { box: true },
                       },
                     },
                     orderBy: [{ sequence: "asc" }, { id: "asc" }],
@@ -1062,7 +974,6 @@ export const getPackProducts = asyncHandler(
 
       prisma.pack_product.count({ where }),
 
-      // 🔥 statusCounts
       prisma.pack_product.count({
         where: {
           ...whereForCount,
@@ -1095,9 +1006,6 @@ export const getPackProducts = asyncHandler(
   },
 );
 
-/**
- * GET /api/outbounds/pack-products/:id
- */
 export const getPackProductById = asyncHandler(
   async (req: Request<{ id: string }>, res: Response) => {
     const id = Number(req.params.id);
@@ -1115,9 +1023,6 @@ export const getPackProductById = asyncHandler(
   },
 );
 
-/**
- * GET /api/outbounds/pack-products/by-prefix/:prefix
- */
 export const getPackProductByPrefix = asyncHandler(
   async (req: Request<{ prefix: string }>, res: Response) => {
     const prefix = decodeURIComponent(String(req.params.prefix ?? "")).trim();
@@ -1138,10 +1043,6 @@ export const getPackProductByPrefix = asyncHandler(
                   include: {
                     barcode_ref: {
                       where: { deleted_at: null },
-                    },
-                    boxes: {
-                      where: { deleted_at: null },
-                      include: { box: true },
                     },
                   },
                   orderBy: [{ sequence: "asc" }, { id: "asc" }],
@@ -1176,9 +1077,6 @@ export const getPackProductByPrefix = asyncHandler(
   },
 );
 
-/**
- * GET /api/outbounds/pack-products/:packProductId/summary
- */
 export const getPackProductSummary = asyncHandler(
   async (req: Request<{ packProductId: string }>, res: Response) => {
     const packProductId = Number(req.params.packProductId);
@@ -1235,10 +1133,6 @@ export const getPackProductSummary = asyncHandler(
   },
 );
 
-/**
- * POST /api/outbounds/pack-products/scan
- * body: { barcode: string, user_ref?: string }
- */
 export const scanPackProductBarcode = asyncHandler(
   async (
     req: Request<{}, {}, { barcode: string; user_ref?: string | null }>,
@@ -1258,7 +1152,6 @@ export const scanPackProductBarcode = asyncHandler(
       );
     }
 
-    // ต้องหาให้ครบทุก key ก่อน _
     const missingDocKeys = parsed.docKeys.filter((docKey) => {
       const normalized = normalizePrefixForCompare(docKey);
 
@@ -1310,9 +1203,6 @@ export const scanPackProductBarcode = asyncHandler(
         },
       });
 
-      // =========================
-      // VALIDATE PACK เดิมก่อน reuse
-      // =========================
       if (packProduct) {
         if (String(packProduct.status ?? "").toLowerCase() !== "process") {
           throw badRequest(
@@ -1398,9 +1288,6 @@ export const scanPackProductBarcode = asyncHandler(
         }
       }
 
-      // =========================
-      // CREATE PACK ใหม่
-      // =========================
       if (!packProduct) {
         packProduct = await tx.pack_product.create({
           data: {
@@ -1425,9 +1312,6 @@ export const scanPackProductBarcode = asyncHandler(
         });
       }
 
-      // =========================
-      // SYNC outbound relations
-      // =========================
       const existingOutboundIds = new Set(
         (packProduct.outbounds ?? []).map((row: any) =>
           Number(row.outbound_id),
@@ -1445,9 +1329,6 @@ export const scanPackProductBarcode = asyncHandler(
         }
       }
 
-      // =========================
-      // UPDATE max_box ถ้าขยายขึ้น
-      // =========================
       if (parsed.boxMax > Number(packProduct.max_box ?? 0)) {
         await tx.pack_product.update({
           where: { id: packProduct.id },
@@ -1466,9 +1347,6 @@ export const scanPackProductBarcode = asyncHandler(
         packProduct.max_box = parsed.boxMax;
       }
 
-      // =========================
-      // BOX LOGIC
-      // =========================
       const currentBox = await tx.pack_product_box.findFirst({
         where: {
           pack_product_id: packProduct.id,
@@ -1581,10 +1459,6 @@ export const scanPackProductBarcode = asyncHandler(
   },
 );
 
-
-/**
- * POST /api/outbounds/pack-products/:packProductId/boxes/:boxId/scan-item
- */
 export const scanPackProductItem = asyncHandler(
   async (
     req: Request<
@@ -1942,9 +1816,6 @@ export const scanPackProductItem = asyncHandler(
   },
 );
 
-/**
- * DELETE /api/outbounds/pack-products/:packProductId/boxes/:boxId/items/:packBoxItemId
- */
 export const removePackProductBoxItem = asyncHandler(
   async (
     req: Request<
@@ -2110,9 +1981,6 @@ export const removePackProductBoxItem = asyncHandler(
   },
 );
 
-/**
- * POST /api/outbounds/pack-products/:packProductId/boxes/:boxId/scan-return
- */
 export const scanPackProductItemReturn = asyncHandler(
   async (
     req: Request<
@@ -2339,9 +2207,6 @@ export const scanPackProductItemReturn = asyncHandler(
   },
 );
 
-/**
- * POST /api/outbounds/pack-products/:packProductId/finalize
- */
 export const finalizePackProduct = asyncHandler(
   async (
     req: Request<
@@ -2404,6 +2269,7 @@ export const finalizePackProduct = asyncHandler(
         },
       });
     }
+
     const adjustedPackProduct = applyReturnToPackProduct(packProduct as any);
     const maxBox = Number(packProduct.max_box ?? 0);
     const boxes = Array.isArray(packProduct.boxes) ? packProduct.boxes : [];

@@ -26,12 +26,6 @@ import {
   updateGoodsOutItemRtc,
   scanOutboundItemCheckBarcode,
 } from "../controllers/outbound.odoo.controller";
-import {
-  addBoxToItem,
-  updateBoxItem,
-  removeBoxFromItem,
-  getItemBoxes,
-} from "../controllers/outbound.box.controller";
 
 import {
   scanOutboundLocation,
@@ -131,14 +125,6 @@ router.delete(
   removeOutboundItemBarcode,
 );
 
-// Box Management for Items
-router.post("/:no/items/:itemId/boxes", addBoxToItem);
-router.get("/:no/items/:itemId/boxes", getItemBoxes);
-
-
-
-router.patch("/:no/items/:itemId/boxes/:boxId", updateBoxItem);
-router.delete("/:no/items/:itemId/boxes/:boxId", removeBoxFromItem);
 router.post(
   "/pack-products/:packProductId/finalize",
   finalizePackProduct,
