@@ -414,6 +414,210 @@ async function softDeleteOldStock(
   );
 }
 
+async function decreaseOldStockQty(
+  tx: Prisma.TransactionClient,
+  target: AutoStockTarget,
+  item: AdjustmentBorLine,
+  adjustmentNo: string,
+  departmentId?: string | null,
+  departmentName?: string | null,
+) {
+  const locationName = getOldBusinessLocationName(item);
+  const qty = Math.max(0, Math.floor(Number(item.qty ?? 0)));
+
+  if (qty <= 0) {
+    throw badRequest(`qty สำหรับลด stock ต้องมากกว่า 0`);
+  }
+
+  if (!locationName) {
+    throw badRequest(
+      `ไม่พบ business location สำหรับลด stock เดิม product=${item.product_id ?? "null"} lot=${item.lot_serial ?? "-"}`,
+    );
+  }
+
+  const activeWhere = {
+    product_id: item.product_id ?? undefined,
+    location_name: locationName,
+    deleted_at: null,
+    active: true,
+  } as any;
+
+  const rows =
+    target === "bor"
+      ? await tx.bor_stock.findMany({
+          where: activeWhere,
+          orderBy: { id: "desc" },
+        })
+      : await tx.ser_stock.findMany({
+          where: activeWhere,
+          orderBy: { id: "desc" },
+        });
+
+  const matched =
+    rows.find((r: any) => {
+      const sameLot =
+        String(r.lot_name ?? "").trim() ===
+        String(item.lot_serial ?? "").trim();
+
+      const sameLotId =
+        item.lot_id != null
+          ? Number(r.lot_id ?? 0) === Number(item.lot_id)
+          : true;
+
+      const sameExp = sameAdjustmentExpDate(r.expiration_date, item.exp);
+
+      return sameLot && sameLotId && sameExp;
+    }) ??
+    rows.find((r: any) => {
+      const sameLot =
+        String(r.lot_name ?? "").trim() ===
+        String(item.lot_serial ?? "").trim();
+
+      const sameLotId =
+        item.lot_id != null
+          ? Number(r.lot_id ?? 0) === Number(item.lot_id)
+          : true;
+
+      return sameLot && sameLotId;
+    }) ??
+    null;
+
+  if (!matched) {
+    throw badRequest(
+      `ไม่พบ stock เดิมสำหรับลดจำนวน product=${item.product_id ?? "null"} lot=${item.lot_serial ?? "-"} location=${locationName}`,
+    );
+  }
+
+  const currentQty = Number(matched.quantity ?? 0);
+
+  if (currentQty < qty) {
+    throw badRequest(
+      `stock เดิมไม่พอสำหรับลดจำนวน product=${item.product_id ?? "null"} lot=${item.lot_serial ?? "-"} location=${locationName} need=${qty} have=${currentQty}`,
+    );
+  }
+
+  const remain = currentQty - qty;
+
+  const updateData = {
+    no: adjustmentNo,
+    quantity: new Prisma.Decimal(remain),
+    count: Math.max(0, Math.floor(remain)),
+    department_id: departmentId ?? matched.department_id ?? null,
+    department_name: departmentName ?? matched.department_name ?? null,
+    updated_at: new Date(),
+  } as any;
+
+  if (target === "bor") {
+    return tx.bor_stock.update({
+      where: { id: matched.id },
+      data: updateData,
+    });
+  }
+
+  return tx.ser_stock.update({
+    where: { id: matched.id },
+    data: updateData,
+  });
+}
+
+async function increaseNewLotStockFromOldLocation(
+  tx: Prisma.TransactionClient,
+  target: AutoStockTarget,
+  oldRow: any,
+  newItem: AdjustmentBorLine,
+  args: {
+    no: string;
+    department_id?: string | null;
+    department?: string | null;
+  },
+) {
+  const qty = Math.max(0, Math.floor(Number(newItem.qty ?? 0)));
+
+  if (qty <= 0) {
+    throw badRequest(`qty สำหรับเพิ่ม lot ใหม่ต้องมากกว่า 0`);
+  }
+
+  const existingWhere = {
+    product_id: oldRow.product_id,
+    location_name: oldRow.location_name,
+    lot_name: newItem.lot_serial ?? undefined,
+    deleted_at: null,
+    active: true,
+  } as any;
+
+  const existing =
+    target === "bor"
+      ? await tx.bor_stock.findFirst({ where: existingWhere })
+      : await tx.ser_stock.findFirst({ where: existingWhere });
+
+  if (existing) {
+    const updateData = {
+      no: args.no,
+      lot_id: newItem.lot_id ?? existing.lot_id ?? null,
+      lot_name: newItem.lot_serial ?? existing.lot_name ?? null,
+      expiration_date: newItem.exp ?? existing.expiration_date ?? null,
+      department_id: args.department_id ?? existing.department_id ?? null,
+      department_name: args.department ?? existing.department_name ?? null,
+      quantity: { increment: new Prisma.Decimal(qty) },
+      count: { increment: qty },
+      active: true,
+      deleted_at: null,
+      updated_at: new Date(),
+    } as any;
+
+    if (target === "bor") {
+      return tx.bor_stock.update({
+        where: { id: existing.id },
+        data: updateData,
+      });
+    }
+
+    return tx.ser_stock.update({
+      where: { id: existing.id },
+      data: updateData,
+    });
+  }
+
+  const createData = {
+    snapshot_date: new Date(),
+    no: args.no,
+
+    product_id: oldRow.product_id,
+    product_code: oldRow.product_code ?? newItem.code ?? null,
+    product_name: oldRow.product_name ?? newItem.name ?? null,
+    unit: oldRow.unit ?? newItem.unit ?? null,
+
+    location_id: oldRow.location_id ?? null,
+    location_name: oldRow.location_name ?? null,
+
+    location_owner: oldRow.location_owner ?? null,
+    location_owner_display: oldRow.location_owner_display ?? null,
+    location_dest_owner: oldRow.location_dest_owner ?? null,
+    location_dest_owner_dispalay: oldRow.location_dest_owner_dispalay ?? null,
+
+    lot_id: newItem.lot_id ?? null,
+    lot_name: newItem.lot_serial ?? null,
+    expiration_date: newItem.exp ?? oldRow.expiration_date ?? null,
+
+    department_id: args.department_id ?? oldRow.department_id ?? null,
+    department_name: args.department ?? oldRow.department_name ?? null,
+
+    product_last_modified_date: oldRow.product_last_modified_date ?? null,
+    source: oldRow.source ?? "wms",
+    quantity: new Prisma.Decimal(qty),
+    count: qty,
+    active: true,
+    deleted_at: null,
+    user_pick: null,
+  } as any;
+
+  if (target === "bor") {
+    return tx.bor_stock.create({ data: createData });
+  }
+
+  return tx.ser_stock.create({ data: createData });
+}
+
 async function createNewStockFromOld(
   tx: Prisma.TransactionClient,
   target: AutoStockTarget,
@@ -1316,52 +1520,48 @@ async function applySystemGeneratedLotReplacementBorOnly(
   const oldItems = args.items.filter((it) => !isNewLotSerial(it.lot_serial));
   const newItems = args.items.filter((it) => isNewLotSerial(it.lot_serial));
 
-  if (oldItems.length === 0 && newItems.length === 0) {
-    return;
-  }
+  if (oldItems.length === 0 && newItems.length === 0) return;
 
   if (oldItems.length === 0) {
-    throw badRequest("auto adjust นี้ไม่มี old lot สำหรับลบออก");
+    throw badRequest("auto adjust นี้ไม่มี old lot สำหรับลดจำนวน");
   }
 
   if (newItems.length === 0) {
-    throw badRequest(
-      "auto adjust นี้ไม่มี new lot (#) สำหรับสร้าง placeholder",
-    );
+    throw badRequest("auto adjust นี้ไม่มี new lot (#) สำหรับเพิ่มจำนวน");
   }
 
-  const removedMap = new Map<string, any[]>();
+  const decreasedMap = new Map<string, any[]>();
 
-  for (const item of oldItems) {
-    const removed = await softDeleteOldStock(
+  for (const oldItem of oldItems) {
+    const oldRowAfterDecrease = await decreaseOldStockQty(
       tx,
       stockTarget,
-      item,
+      oldItem,
       args.no,
       args.department_id,
       args.department,
     );
 
-    const key = buildAutoReplaceOldPairKey(item);
-    const arr = removedMap.get(key) ?? [];
-    arr.push(removed);
-    removedMap.set(key, arr);
+    const key = buildAutoReplaceOldPairKey(oldItem);
+    const arr = decreasedMap.get(key) ?? [];
+    arr.push(oldRowAfterDecrease);
+    decreasedMap.set(key, arr);
   }
 
-  for (const item of newItems) {
-    const key = buildAutoReplaceNewPairKey(item);
-    const arr = removedMap.get(key) ?? [];
+  for (const newItem of newItems) {
+    const key = buildAutoReplaceNewPairKey(newItem);
+    const arr = decreasedMap.get(key) ?? [];
 
     if (arr.length === 0) {
       throw badRequest(
-        `ไม่พบ old lot ที่ match กับ new lot ${item.lot_serial ?? "-"} (product_id=${item.product_id ?? "null"})`,
+        `ไม่พบ old lot ที่ match กับ new lot ${newItem.lot_serial ?? "-"} (product_id=${newItem.product_id ?? "null"})`,
       );
     }
 
     const oldRow = arr.shift();
-    removedMap.set(key, arr);
+    decreasedMap.set(key, arr);
 
-    await createNewStockFromOld(tx, stockTarget, oldRow, item, {
+    await increaseNewLotStockFromOldLocation(tx, stockTarget, oldRow, newItem, {
       no: args.no,
       department_id: args.department_id,
       department: args.department,
@@ -2686,41 +2886,20 @@ function isSameNullableLot(a: unknown, b: unknown): boolean {
 }
 
 function itemMatchesResolvedScan(item: any, resolved: any): boolean {
-  const itemBarcodeCandidates = [
-    item.barcode_text,
-    item.barcode,
-    item.barcode_code,
-    item.code,
-  ]
-    .map(normalizeScanText)
-    .filter(Boolean);
+  const itemBarcode = normalizeScanText(item.barcode_text);
+  const scanBarcode = normalizeScanText(resolved.barcode_text);
 
-  const resolvedBarcode = normalizeScanText(resolved.barcode_text);
+  if (!itemBarcode || itemBarcode !== scanBarcode) return false;
 
-  const barcodeOk =
-    !!resolvedBarcode &&
-    itemBarcodeCandidates.some(
-      (x) => x === resolvedBarcode || resolvedBarcode.includes(x),
-    );
+  const itemLot = normalizeScanText(item.lot_serial);
+  const scanLot = normalizeScanText(resolved.lot_serial);
 
-  if (!barcodeOk) return false;
+  if (scanLot && itemLot !== scanLot) return false;
 
-  const itemLot = item.lot_serial ?? item.lot ?? item.serial ?? null;
-  const scanLot = resolved.lot_serial ?? null;
+  // ✅ 999999 คือไม่ต้องเช็ค exp
+  if (!resolved.exp || resolved.exp_text === "999999") return true;
 
-  if (!isSameNullableLot(itemLot, scanLot)) return false;
-
-  const itemExp =
-    item.exp ??
-    item.expire_date ??
-    item.exp_date ??
-    item.expiration ??
-    item.expire ??
-    null;
-
-  if (!sameExpDateOnly(itemExp, resolved.exp)) return false;
-
-  return true;
+  return sameExpDateOnly(item.exp, resolved.exp);
 }
 
 export const scanAdjustmentLocation = asyncHandler(
@@ -2946,6 +3125,16 @@ export const scanAdjustmentBarcode = asyncHandler(
         where: {
           adjustment_id: adj.id,
           deleted_at: null,
+        },
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          qty: true,
+          qty_pick: true,
+          lot_serial: true,
+          exp: true,
+          barcode_text: true,
         },
         orderBy: [{ sequence: "asc" }, { id: "asc" }],
       });
