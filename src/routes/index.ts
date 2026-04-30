@@ -29,6 +29,7 @@ import borrowStockRoutes from "./borrow_stocks.routes"
 import stockDairyRoutes from "./stockdairy.routes"
 import swapRoutes from "./swap.routes"
 import reportAllRoutes from "./reportall.route"
+import goodsRoutes from "./goods.routes";
 import {
   cancelAdjustment,
   confirmAdjustment,
@@ -86,5 +87,6 @@ router.use("/borrow-stocks", borrowStockRoutes);
 router.use("/reports", stockDairyRoutes);
 router.use("/swaps", swapRoutes);
 router.use("/all", reportAllRoutes);
+router.use("/goods", goodsRoutes);
 
 export default router;
