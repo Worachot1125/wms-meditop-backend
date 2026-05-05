@@ -1,6 +1,6 @@
-## นี่คือ Backend ของระบบ WMS ของทาง Meditop
+# นี่คือ Backend ของระบบ WMS ของทาง Meditop
 ประกอบด้วย
-## Master
+# Master
 1. user
 2. building
 3. zone
@@ -11,7 +11,7 @@
 8. barcode
 9. stock
 
-## function
+# function
 1. inbound
 2. outbound
 3. borrow stock
@@ -20,12 +20,12 @@
 6. swap
 7. report
 
-## function เสริม
+# function เสริม
 1.  print barcode
 2.  เปลี่ยน lot
 3.  แก้ไข user
 
-## วิธี run server Backend
+# วิธี run server Backend
 ```
 # install dependencies
 $ npm install
@@ -34,10 +34,10 @@ $ npm install
 $ npm run dev
 ```
 
-# inbound
+## inbound
 รับเอกสารจาก odoo
 scan location -> scan barcode สินค้า -> ยืนยัน -> สินค้าเข้า stock ตาม location
 
-# outbound
+## outbound
 รับเอกสารจาก odoo
 scan location -> scan barcode สินค้า -> ยืนยัน -> สินค้าออก stock ตาม location
