@@ -32,3 +32,12 @@ $ npm install
 
 # run server
 $ npm run dev
+```
+
+# inbound
+รับเอกสารจาก odoo
+scan location -> scan barcode สินค้า -> ยืนยัน -> สินค้าเข้า stock ตาม location
+
+# outbound
+รับเอกสารจาก odoo
+scan location -> scan barcode สินค้า -> ยืนยัน -> สินค้าออก stock ตาม location
