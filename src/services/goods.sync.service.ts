@@ -271,7 +271,9 @@ export class GoodsSyncService {
       const hasErrors = result.errors && result.errors.length > 0;
 
       logger.info(
-        `${hasErrors ? "⚠️ PARTIAL SUCCESS" : "✅ SUCCESS"} Goods sync completed in ${duration}ms`,
+        `${hasErrors ? "⚠️ PARTIAL SUCCESS" : "✅ SUCCESS"} Goods sync completed in ${duration}ms (${
+          duration / 60000
+        } minutes)`,
       );
       logger.info(
         `📊 Summary: Created=${result.created}, Updated=${result.updated}, Disabled=${result.disabled}, Errors=${result.errors?.length || 0}`,

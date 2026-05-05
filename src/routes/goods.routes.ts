@@ -6,9 +6,11 @@ import {
   getAllProduct,
   updateWmsMdtGoods,
 } from "../controllers/goods.controller";
+import { manualSyncGoods } from "../controllers/event_goods.controller";
 
 const router = Router();
 
+router.post("/sync", manualSyncGoods);
 router.get("/wms-mdt-goods/getAll", getWmsMdtGoods);
 router.get("/wms-mdt-goods/getAllProducts", getAllProduct);
 router.get("/wms-mdt-goods/get", getWmsMdtGoodsPaginated);

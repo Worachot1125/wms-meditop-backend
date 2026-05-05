@@ -10,11 +10,19 @@ const PORT = Number(process.env.PORT || 7000);
 // ✅ สร้าง http server เพื่อให้ socket.io attach ได้
 const httpServer = http.createServer(app);
 
+// ✅ กัน request sync นาน ๆ โดน Node ตัด
+const TWENTY_MINUTES = 20 * 60 * 1000;
+
+httpServer.setTimeout(TWENTY_MINUTES);
+httpServer.keepAliveTimeout = TWENTY_MINUTES;
+httpServer.headersTimeout = TWENTY_MINUTES + 5000;
+httpServer.requestTimeout = TWENTY_MINUTES;
+
 // ✅ สร้าง io และกำหนด CORS ให้ตรง FE ของคุณ
 export const io = new Server(httpServer, {
   path: "/socket.io",
   cors: {
-    origin: ["http://localhost:5173"],
+    origin: ["http://localhost:5173", "http://192.168.1.110:5173"],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
   },
