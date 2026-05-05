@@ -990,6 +990,31 @@ function normalizeProductCode(v: unknown): string {
     .replace(/[\s\-_./]+/g, "");
 }
 
+function getGoodsInReturnQty(item: any): number {
+  return Math.max(
+    0,
+    Math.floor(
+      Number(
+        item?.return ??
+          item?.return_qty ??
+          item?.qty_return ??
+          item?.quantity_return ??
+          0,
+      ),
+    ),
+  );
+}
+
+function getGoodsOutReturnQty(item: any): number {
+  const rows = Array.isArray(item?.goodsOutItemLocationReturns)
+    ? item.goodsOutItemLocationReturns
+    : [];
+
+  return rows.reduce((sum: number, r: any) => {
+    return sum + Math.max(0, Math.floor(Number(r?.return ?? 0)));
+  }, 0);
+}
+
 export const getTransactionReportPaginated = asyncHandler(
   async (req: Request, res: Response) => {
     const page = Number(req.query.page) || 1;
@@ -1168,6 +1193,12 @@ export const getTransactionReportPaginated = asyncHandler(
             where: { deleted_at: null },
             include: {
               barcode_ref: true,
+
+              goodsOutItemLocationReturns: {
+                include: {
+                  location: true,
+                },
+              },
             },
             orderBy: { id: "asc" },
           },
@@ -1480,7 +1511,7 @@ export const getTransactionReportPaginated = asyncHandler(
         ];
       }
 
-      return items.map((item: any, index: number) => ({
+      const normalRows: ReportRow[] = items.map((item: any, index: number) => ({
         source: "inbound",
         id: makeRowId("inbound", formatted.id, item, index),
         no: formatted.no,
@@ -1499,6 +1530,59 @@ export const getTransactionReportPaginated = asyncHandler(
           item,
         ),
       }));
+
+      const returnRows: ReportRow[] = items
+        .map((item: any, index: number) => {
+          const returnQty = getGoodsInReturnQty(item);
+          if (returnQty <= 0) return null;
+
+          const returnItem = {
+            ...item,
+
+            // ✅ ให้ FE คำนวณช่อง In จากจำนวน return
+            qty: returnQty,
+            quantity_receive: returnQty,
+            quantity_count: returnQty,
+            confirmed_qty: returnQty,
+
+            // ✅ กัน formatter/FE บางจุดที่อ่าน field return
+            return: returnQty,
+            return_qty: returnQty,
+            qty_return: returnQty,
+            quantity_return: returnQty,
+          };
+
+          return {
+            source: "inbound_return",
+            id: makeRowId("inbound-return", formatted.id, returnItem, index),
+            no: formatted.no,
+            created_at: formatted.created_at,
+
+            // ✅ แยก type ใหม่ให้เห็นใน report
+            type: "RETURN",
+
+            // ✅ return คือของกลับเข้า stock
+            location: formatted.location ?? null,
+            location_dest: formatted.location_dest ?? null,
+
+            user_ref: null,
+            code: getItemCode(returnItem),
+            name: getItemName(returnItem),
+
+            document: withSingleItemDocument(
+              {
+                ...formatted,
+                department,
+                in_type: "RETURN",
+                type: "RETURN",
+              },
+              returnItem,
+            ),
+          } as ReportRow;
+        })
+        .filter((x): x is ReportRow => x !== null);
+
+      return [...normalRows, ...returnRows];
     });
 
     const outboundRows: ReportRow[] = outbounds.flatMap((doc: any) => {
@@ -1520,30 +1604,10 @@ export const getTransactionReportPaginated = asyncHandler(
         formatted.department,
       );
 
-      if (items.length === 0) {
-        return [
-          {
-            source: "outbound",
-            id: `outbound-${formatted.id}-empty`,
-            no: formatted.no,
-            created_at: formatted.created_at,
-            type: resolvedType,
-            location: formatted.location ?? null,
-            location_dest: formatted.location_dest ?? null,
-            user_ref: null,
-            code: null,
-            name: null,
-            document: {
-              ...formatted,
-              out_type: resolvedType,
-              department,
-              items: [],
-            },
-          },
-        ];
-      }
-
-      return items.map((item: any, index: number) => ({
+      // =========================
+      // ✅ NORMAL OUTBOUND
+      // =========================
+      const normalRows: ReportRow[] = items.map((item: any, index: number) => ({
         source: "outbound",
         id: makeRowId("outbound", formatted.id, item, index),
         no: formatted.no,
@@ -1563,6 +1627,113 @@ export const getTransactionReportPaginated = asyncHandler(
           item,
         ),
       }));
+
+      // =========================
+      // ✅ RETURN (FIXED)
+      // =========================
+      const returnRows: ReportRow[] = (doc.goods_outs ?? [])
+        .map((goi: any, index: number) => {
+          const rows = Array.isArray(goi?.goodsOutItemLocationReturns)
+            ? goi.goodsOutItemLocationReturns
+            : [];
+
+          const returnQty = rows.reduce(
+            (sum: number, r: any) => sum + Math.max(0, Number(r?.return ?? 0)),
+            0,
+          );
+
+          if (returnQty <= 0) return null;
+
+          // ✅ หา item ที่ format แล้ว เพื่อให้ field ครบเหมือน row ปกติ
+          const formattedItem =
+            items.find((x: any) => Number(x.id) === Number(goi.id)) ??
+            items.find(
+              (x: any) =>
+                Number(x.product_id) === Number(goi.product_id) &&
+                Number(x.lot_id ?? 0) === Number(goi.lot_id ?? 0) &&
+                String(x.lot_serial ?? "") === String(goi.lot_serial ?? ""),
+            ) ??
+            {};
+
+          const returnLocation = rows[0]?.location ?? null;
+
+          const returnItem = {
+            ...formattedItem,
+            ...goi,
+
+            // ✅ เอาข้อมูล display จาก formatted กลับมาทับ raw goi
+            barcode: formattedItem?.barcode ?? goi?.barcode_ref ?? null,
+            barcode_ref: formattedItem?.barcode_ref ?? goi?.barcode_ref ?? null,
+            barcode_text:
+              formattedItem?.barcode_text ?? goi?.barcode_text ?? null,
+
+            exp:
+              getExp(goi.product_id, goi.lot_id) ??
+              formattedItem?.exp ??
+              goi?.exp ??
+              null,
+
+            zone_type:
+              getZoneType(goi.code) ??
+              formattedItem?.zone_type ??
+              goi?.zone_type ??
+              null,
+
+            unit: formattedItem?.unit ?? goi?.unit ?? null,
+            code: formattedItem?.code ?? goi?.code ?? null,
+            name: formattedItem?.name ?? goi?.name ?? null,
+
+            // ✅ return qty ต้อง override
+            qty: returnQty,
+            quantity: returnQty,
+            quantity_receive: returnQty,
+            quantity_count: returnQty,
+            confirmed_qty: returnQty,
+
+            // ✅ field ให้ FE อ่านเป็น IN
+            in: returnQty,
+            out: 0,
+
+            return: returnQty,
+            return_qty: returnQty,
+            qty_return: returnQty,
+            quantity_return: returnQty,
+
+            // ✅ location return จริง ถ้ามี
+            return_locations: rows,
+            return_location: returnLocation,
+            location_return: returnLocation?.full_name ?? null,
+          };
+
+          return {
+            source: "outbound_return",
+            id: makeRowId("outbound-return", doc.id, returnItem, index),
+            no: formatted.no,
+            created_at: formatted.created_at,
+            type: "RETURN",
+
+            // ✅ ให้เห็นเป็นของไหลกลับเข้า
+            location: formatted.location_dest ?? null,
+            location_dest: formatted.location ?? null,
+
+            user_ref: null,
+            code: getItemCode(returnItem),
+            name: getItemName(returnItem),
+
+            document: withSingleItemDocument(
+              {
+                ...formatted,
+                out_type: "RETURN",
+                type: "RETURN",
+                department,
+              },
+              returnItem,
+            ),
+          } as ReportRow;
+        })
+        .filter((x: ReportRow | null): x is ReportRow => x !== null);
+
+      return [...normalRows, ...returnRows];
     });
 
     const transferDocRows: ReportRow[] = transferDocs.flatMap((doc: any) => {
