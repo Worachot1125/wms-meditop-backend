@@ -14,16 +14,18 @@ export const login = async (req: Request, res: Response) => {
     throw badRequest("usernameOrEmail และ password ห้ามว่าง");
   }
 
-  // หา user จาก username หรือ email
   const user = await prisma.user.findFirst({
     where: {
-      deleted_at: null,
       OR: [{ username: usernameOrEmail }, { email: usernameOrEmail }],
     },
   });
 
   if (!user) {
     throw notFound("ไม่พบผู้ใช้");
+  }
+
+  if (user.deleted_at) {
+    throw badRequest("ผู้ใช้ถูกลบไปแล้ว");
   }
 
   const isMatch = await bcrypt.compare(password, user.password);
@@ -48,20 +50,27 @@ export const login = async (req: Request, res: Response) => {
 export const loginByQuery = async (req: Request, res: Response) => {
   const { username, password } = req.query;
 
-  if (!username || !password || typeof username !== 'string' || typeof password !== 'string') {
+  if (
+    !username ||
+    !password ||
+    typeof username !== "string" ||
+    typeof password !== "string"
+  ) {
     throw badRequest("username และ password ห้ามว่าง");
   }
 
-  // หา user จาก username
   const user = await prisma.user.findFirst({
     where: {
-      deleted_at: null,
-      username: username,
+      username,
     },
   });
 
   if (!user) {
     throw notFound("ไม่พบผู้ใช้");
+  }
+
+  if (user.deleted_at) {
+    throw badRequest("ผู้ใช้ถูกลบไปแล้ว");
   }
 
   const isMatch = await bcrypt.compare(password, user.password);
@@ -89,7 +98,7 @@ export const logout = async (_req: Request, res: Response) => {
 // POST /api/auth/forgot-password/verify-user
 export const verifyUserForForgotPassword = async (
   req: Request,
-  res: Response
+  res: Response,
 ) => {
   const { usernameOrEmail } = req.body;
 
@@ -106,7 +115,7 @@ export const verifyUserForForgotPassword = async (
 
   if (!user) {
     logger.warn(
-      `[POST /auth/forgot-password/verify-user] ไม่พบผู้ใช้: ${usernameOrEmail}`
+      `[POST /auth/forgot-password/verify-user] ไม่พบผู้ใช้: ${usernameOrEmail}`,
     );
     return res.status(404).json({ message: "ไม่พบผู้ใช้" });
   }
@@ -121,14 +130,14 @@ export const verifyUserForForgotPassword = async (
   };
 
   logger.info(
-    `[POST /auth/forgot-password/verify-user] verified user ${user.username} (${user.id})`
+    `[POST /auth/forgot-password/verify-user] verified user ${user.username} (${user.id})`,
   );
   return res.status(200).json(responseBody);
 };
 
 export const updatePasswordByForgotFlow = async (
   req: Request,
-  res: Response
+  res: Response,
 ) => {
   const { userId, newPassword } = req.body;
 
@@ -138,13 +147,16 @@ export const updatePasswordByForgotFlow = async (
 
   const user = await prisma.user.findUnique({
     where: {
-      deleted_at: null,
       id: Number(userId),
     },
   });
 
   if (!user) {
     throw notFound("ไม่พบผู้ใช้");
+  }
+
+  if (user.deleted_at) {
+    throw badRequest("ผู้ใช้ถูกลบไปแล้ว");
   }
 
   const hashed = await bcrypt.hash(newPassword, 10);
