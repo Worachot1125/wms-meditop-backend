@@ -1,5 +1,5 @@
 ## นี่คือ Backend ของระบบ WMS ของทาง Meditop
-## ประกอบด้วย
+ประกอบด้วย
 ## Master
 1. user
 2. building
@@ -24,3 +24,11 @@
 1.  print barcode
 2.  เปลี่ยน lot
 3.  แก้ไข user
+
+## วิธี run server Backend
+```
+# install dependencies
+$ npm install
+
+# run server
+$ npm run dev
