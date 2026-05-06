@@ -11,10 +11,7 @@ import {
 import { formatOdooInbound } from "../utils/formatters/odoo_inbound.formatter";
 import { formatOdooOutbound } from "../utils/formatters/odoo_outbound.formatter";
 import { formatTransferDocItem } from "../utils/formatters/transfer_item.formatter";
-import {
-  formatTransferMovement,
-  // buildInputNumberMap, // ถ้าจะ enrich barcode/input_number ค่อยเปิดใช้
-} from "../utils/formatters/transfer_movement.formatter";
+import { formatTransferMovement } from "../utils/formatters/transfer_movement.formatter";
 import { formatOdooAdjustment } from "../utils/formatters/adjustment.formatter";
 
 async function buildLocationMap(locationIds: number[]) {
@@ -80,7 +77,6 @@ function buildWhere(req: Request) {
   return where;
 }
 
-// GET ALL wms_stock_daily
 export const getWmsStockDailyAll = asyncHandler(
   async (req: Request, res: Response) => {
     const where = buildWhere(req);
@@ -136,9 +132,12 @@ function parseWmsStockDailySearchColumns(raw: unknown) {
 function buildWmsStockDailySearchWhere(search: string, columns: string[]): any {
   if (!search) return {};
 
+  const useAll = columns.length === 0;
+  const has = (col: string) => useAll || columns.includes(col);
+
   const orConditions: any[] = [];
 
-  if (columns.includes("snapshot_date")) {
+  if (has("snapshot_date")) {
     const maybeDate = new Date(search);
     if (!Number.isNaN(maybeDate.getTime())) {
       const yyyy = maybeDate.getUTCFullYear();
@@ -154,55 +153,55 @@ function buildWmsStockDailySearchWhere(search: string, columns: string[]): any {
     }
   }
 
-  if (columns.includes("product_code")) {
+  if (has("product_code")) {
     orConditions.push({
       product_code: { contains: search, mode: "insensitive" },
     });
   }
 
-  if (columns.includes("product_name")) {
+  if (has("product_name")) {
     orConditions.push({
       product_name: { contains: search, mode: "insensitive" },
     });
   }
 
-  if (columns.includes("unit")) {
+  if (has("unit")) {
     orConditions.push({
       unit: { contains: search, mode: "insensitive" },
     });
   }
 
-  if (columns.includes("location_name")) {
+  if (has("location_name")) {
     orConditions.push({
       location_name: { contains: search, mode: "insensitive" },
     });
   }
 
-  if (columns.includes("building")) {
+  if (has("building")) {
     orConditions.push({
       building: { contains: search, mode: "insensitive" },
     });
   }
 
-  if (columns.includes("zone")) {
+  if (has("zone")) {
     orConditions.push({
       zone: { contains: search, mode: "insensitive" },
     });
   }
 
-  if (columns.includes("zone_type")) {
+  if (has("zone_type")) {
     orConditions.push({
       zone_type: { contains: search, mode: "insensitive" },
     });
   }
 
-  if (columns.includes("lot_name")) {
+  if (has("lot_name")) {
     orConditions.push({
       lot_name: { contains: search, mode: "insensitive" },
     });
   }
 
-  if (columns.includes("expiration_date")) {
+  if (has("expiration_date")) {
     const maybeDate = new Date(search);
     if (!Number.isNaN(maybeDate.getTime())) {
       const yyyy = maybeDate.getUTCFullYear();
@@ -218,7 +217,7 @@ function buildWmsStockDailySearchWhere(search: string, columns: string[]): any {
     }
   }
 
-  if (columns.includes("quantity")) {
+  if (has("quantity")) {
     const qty = Number(search);
     if (!Number.isNaN(qty)) {
       orConditions.push({
@@ -227,16 +226,13 @@ function buildWmsStockDailySearchWhere(search: string, columns: string[]): any {
     }
   }
 
-  if (orConditions.length === 0) {
-    return { id: -1 };
-  }
+  if (orConditions.length === 0) return { id: -1 };
 
   return {
     OR: orConditions,
   };
 }
 
-// GET wms_stock_daily WITH PAGINATION
 export const getWmsStockDailyPaginated = asyncHandler(
   async (req: Request, res: Response) => {
     const page = Number(req.query.page) || 1;
@@ -291,7 +287,6 @@ export const getWmsStockDailyPaginated = asyncHandler(
   },
 );
 
-// GET wms_stock_daily BY id
 export const getWmsStockDailyById = asyncHandler(
   async (req: Request<{ id: string }>, res: Response) => {
     const id = Number(req.params.id);
@@ -321,7 +316,7 @@ export const getWmsStockDailyById = asyncHandler(
   },
 );
 
-type ReportRow = {
+type SimpleReportRow = {
   source:
     | "inbound"
     | "outbound"
@@ -558,9 +553,9 @@ export const getTransactionReport = asyncHandler(
         }),
       ]);
 
-    const rows: ReportRow[] = [
+    const rows: SimpleReportRow[] = [
       ...inbounds.map(
-        (x): ReportRow => ({
+        (x): SimpleReportRow => ({
           source: "inbound",
           id: x.id,
           no: x.no ?? null,
@@ -573,7 +568,7 @@ export const getTransactionReport = asyncHandler(
       ),
 
       ...outbounds.map(
-        (x): ReportRow => ({
+        (x): SimpleReportRow => ({
           source: "outbound",
           id: x.id,
           no: x.no ?? null,
@@ -586,7 +581,7 @@ export const getTransactionReport = asyncHandler(
       ),
 
       ...transferDocs.map(
-        (x): ReportRow => ({
+        (x): SimpleReportRow => ({
           source: "transfer_doc",
           id: x.id,
           no: x.no ?? null,
@@ -599,7 +594,7 @@ export const getTransactionReport = asyncHandler(
       ),
 
       ...transferMovements.map(
-        (x): ReportRow => ({
+        (x): SimpleReportRow => ({
           source: "transfer_movement",
           id: x.id,
           no: x.no ?? null,
@@ -614,7 +609,7 @@ export const getTransactionReport = asyncHandler(
       ...adjustments
         .filter((x) => !hasSVInNo(x.no))
         .map(
-          (x): ReportRow => ({
+          (x): SimpleReportRow => ({
             source: "adjustment",
             id: x.id,
             no: x.no ?? null,
@@ -662,6 +657,19 @@ function parseTransactionReportSearchColumns(raw: unknown) {
     "status",
     "reference",
     "origin",
+
+    // ✅ เพิ่ม search item/product
+    "department",
+    "product",
+    "product_code",
+    "code",
+    "product_name",
+    "name",
+    "unit",
+    "lot",
+    "lot_serial",
+    "exp",
+    "zone_type",
   ]);
 
   return raw
@@ -685,6 +693,11 @@ function buildDateRangeFromSearch(search: string) {
   };
 }
 
+function searchColumnHelper(columns: string[]) {
+  const useAll = columns.length === 0;
+  return (col: string) => useAll || columns.includes(col);
+}
+
 function buildInboundReportWhere(
   createdAtFilter: any,
   search: string,
@@ -698,34 +711,48 @@ function buildInboundReportWhere(
 
   const orConditions: any[] = [];
 
-  if (columns.includes("no")) {
-    orConditions.push({ no: { contains: search, mode: "insensitive" } });
-  }
+  orConditions.push({ no: { contains: search, mode: "insensitive" } });
+  orConditions.push({ location: { contains: search, mode: "insensitive" } });
+  orConditions.push({
+    location_dest: { contains: search, mode: "insensitive" },
+  });
+  orConditions.push({ in_type: { contains: search, mode: "insensitive" } });
 
-  if (columns.includes("location")) {
-    orConditions.push({ location: { contains: search, mode: "insensitive" } });
-  }
+  // ✅ search item code/name/lot/barcode ผ่าน relation goods_ins
+  orConditions.push({
+    goods_ins: {
+      some: {
+        deleted_at: null,
+        OR: [
+          { code: { contains: search, mode: "insensitive" } },
+          { name: { contains: search, mode: "insensitive" } },
+          { lot: { contains: search, mode: "insensitive" } },
+          { lot_serial: { contains: search, mode: "insensitive" } },
+          { barcode_text: { contains: search, mode: "insensitive" } },
+        ],
+      },
+    },
+  });
 
-  if (columns.includes("location_dest")) {
+  const numeric = Number(search);
+  if (Number.isFinite(numeric)) {
     orConditions.push({
-      location_dest: { contains: search, mode: "insensitive" },
+      goods_ins: {
+        some: {
+          deleted_at: null,
+          OR: [
+            { product_id: numeric },
+            { lot_id: numeric },
+            { qty: numeric },
+            { quantity_receive: numeric },
+            { quantity_count: numeric },
+          ],
+        },
+      },
     });
   }
 
-  if (columns.includes("type")) {
-    orConditions.push({ in_type: { contains: search, mode: "insensitive" } });
-  }
-
-  if (columns.includes("created_at")) {
-    const dateRange = buildDateRangeFromSearch(search);
-    if (dateRange) {
-      orConditions.push({ created_at: dateRange });
-    }
-  }
-
-  if (orConditions.length > 0) where.OR = orConditions;
-  else where.id = -1;
-
+  where.OR = orConditions;
   return where;
 }
 
@@ -740,31 +767,90 @@ function buildOutboundReportWhere(
 
   if (!search) return where;
 
+  const has = searchColumnHelper(columns);
   const orConditions: any[] = [];
 
-  if (columns.includes("no")) {
+  if (has("no")) {
     orConditions.push({ no: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("location")) {
+  if (has("location")) {
     orConditions.push({ location: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("location_dest")) {
+  if (has("location_dest")) {
     orConditions.push({
       location_dest: { contains: search, mode: "insensitive" },
     });
   }
 
-  if (columns.includes("type")) {
+  if (has("type")) {
     orConditions.push({ out_type: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("created_at")) {
+  if (has("department")) {
+    orConditions.push({
+      department: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (has("origin")) {
+    orConditions.push({ origin: { contains: search, mode: "insensitive" } });
+  }
+
+  if (has("reference")) {
+    orConditions.push({
+      reference: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (has("created_at")) {
     const dateRange = buildDateRangeFromSearch(search);
-    if (dateRange) {
-      orConditions.push({ created_at: dateRange });
-    }
+    if (dateRange) orConditions.push({ created_at: dateRange });
+  }
+
+  if (has("code") || has("product_code") || has("product")) {
+    orConditions.push({
+      goods_outs: {
+        some: {
+          deleted_at: null,
+          code: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
+  }
+
+  if (has("name") || has("product_name") || has("product")) {
+    orConditions.push({
+      goods_outs: {
+        some: {
+          deleted_at: null,
+          name: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
+  }
+
+  if (has("unit")) {
+    orConditions.push({
+      goods_outs: {
+        some: {
+          deleted_at: null,
+          unit: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
+  }
+
+  if (has("lot") || has("lot_serial")) {
+    orConditions.push({
+      goods_outs: {
+        some: {
+          deleted_at: null,
+          lot_serial: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
   }
 
   if (orConditions.length > 0) where.OR = orConditions;
@@ -784,31 +870,93 @@ function buildTransferDocReportWhere(
 
   if (!search) return where;
 
+  const has = searchColumnHelper(columns);
   const orConditions: any[] = [];
 
-  if (columns.includes("no")) {
+  if (has("no")) {
     orConditions.push({ no: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("location")) {
+  if (has("location")) {
     orConditions.push({ location: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("location_dest")) {
+  if (has("location_dest")) {
     orConditions.push({
       location_dest: { contains: search, mode: "insensitive" },
     });
   }
 
-  if (columns.includes("type")) {
+  if (has("type")) {
     orConditions.push({ in_type: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("created_at")) {
+  if (has("department")) {
+    orConditions.push({
+      department: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (has("origin")) {
+    orConditions.push({ origin: { contains: search, mode: "insensitive" } });
+  }
+
+  if (has("reference")) {
+    orConditions.push({
+      reference: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (has("created_at")) {
     const dateRange = buildDateRangeFromSearch(search);
-    if (dateRange) {
-      orConditions.push({ created_at: dateRange });
-    }
+    if (dateRange) orConditions.push({ created_at: dateRange });
+  }
+
+  if (has("code") || has("product_code") || has("product")) {
+    orConditions.push({
+      transfer_doc_items: {
+        some: {
+          deleted_at: null,
+          code: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
+  }
+
+  if (has("name") || has("product_name") || has("product")) {
+    orConditions.push({
+      transfer_doc_items: {
+        some: {
+          deleted_at: null,
+          name: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
+  }
+
+  if (has("unit")) {
+    orConditions.push({
+      transfer_doc_items: {
+        some: {
+          deleted_at: null,
+          unit: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
+  }
+
+  if (has("lot") || has("lot_serial")) {
+    orConditions.push({
+      transfer_doc_items: {
+        some: {
+          deleted_at: null,
+          OR: [
+            { lot: { contains: search, mode: "insensitive" } },
+            { lot_serial: { contains: search, mode: "insensitive" } },
+          ],
+        },
+      },
+    });
   }
 
   if (orConditions.length > 0) where.OR = orConditions;
@@ -830,35 +978,96 @@ function buildTransferMovementReportWhere(
 
   const orConditions: any[] = [];
 
-  if (columns.includes("no")) {
-    orConditions.push({ no: { contains: search, mode: "insensitive" } });
-  }
+  // =========================
+  // document
+  // =========================
+  orConditions.push({
+    no: { contains: search, mode: "insensitive" },
+  });
 
-  if (columns.includes("status")) {
-    orConditions.push({ status: { contains: search, mode: "insensitive" } });
-  }
+  orConditions.push({
+    status: { contains: search, mode: "insensitive" },
+  });
 
-  if (columns.includes("user_ref")) {
+  // =========================
+  // user
+  // =========================
+  orConditions.push({
+    user: {
+      username: { contains: search, mode: "insensitive" },
+    },
+  });
+
+  orConditions.push({
+    user: {
+      first_name: { contains: search, mode: "insensitive" },
+    },
+  });
+
+  orConditions.push({
+    user: {
+      last_name: { contains: search, mode: "insensitive" },
+    },
+  });
+
+  // =========================
+  // items
+  // =========================
+  orConditions.push({
+    items: {
+      some: {
+        deleted_at: null,
+        OR: [
+          {
+            code: {
+              contains: search,
+              mode: "insensitive",
+            },
+          },
+          {
+            name: {
+              contains: search,
+              mode: "insensitive",
+            },
+          },
+          {
+            lot_serial: {
+              contains: search,
+              mode: "insensitive",
+            },
+          },
+
+          // ✅ location source
+          {
+            lock_no: {
+              contains: search,
+              mode: "insensitive",
+            },
+          },
+
+          // ✅ location dest
+          {
+            lock_no_dest: {
+              contains: search,
+              mode: "insensitive",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  // =========================
+  // date
+  // =========================
+  const dateRange = buildDateRangeFromSearch(search);
+  if (dateRange) {
     orConditions.push({
-      user: { username: { contains: search, mode: "insensitive" } },
-    });
-    orConditions.push({
-      user: { first_name: { contains: search, mode: "insensitive" } },
-    });
-    orConditions.push({
-      user: { last_name: { contains: search, mode: "insensitive" } },
+      created_at: dateRange,
     });
   }
 
-  if (columns.includes("created_at")) {
-    const dateRange = buildDateRangeFromSearch(search);
-    if (dateRange) {
-      orConditions.push({ created_at: dateRange });
-    }
-  }
-
-  if (orConditions.length > 0) where.OR = orConditions;
-  else where.id = -1;
+  where.OR = orConditions;
 
   return where;
 }
@@ -874,33 +1083,82 @@ function buildAdjustmentReportWhere(
 
   if (!search) return where;
 
+  const has = searchColumnHelper(columns);
   const orConditions: any[] = [];
 
-  if (columns.includes("no")) {
+  if (has("no")) {
     orConditions.push({ no: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("type")) {
+  if (has("type")) {
     orConditions.push({ type: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("status")) {
+  if (has("status")) {
     orConditions.push({ status: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("origin")) {
+  if (has("origin")) {
     orConditions.push({ origin: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("reference")) {
+  if (has("reference")) {
     orConditions.push({ reference: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("created_at")) {
+  if (has("department")) {
+    orConditions.push({
+      department: { contains: search, mode: "insensitive" },
+    });
+  }
+
+  if (has("created_at")) {
     const dateRange = buildDateRangeFromSearch(search);
-    if (dateRange) {
-      orConditions.push({ created_at: dateRange });
-    }
+    if (dateRange) orConditions.push({ created_at: dateRange });
+  }
+
+  if (has("code") || has("product_code") || has("product")) {
+    orConditions.push({
+      items: {
+        some: {
+          deleted_at: null,
+          code: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
+  }
+
+  if (has("name") || has("product_name") || has("product")) {
+    orConditions.push({
+      items: {
+        some: {
+          deleted_at: null,
+          name: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
+  }
+
+  if (has("unit")) {
+    orConditions.push({
+      items: {
+        some: {
+          deleted_at: null,
+          unit: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
+  }
+
+  if (has("lot") || has("lot_serial")) {
+    orConditions.push({
+      items: {
+        some: {
+          deleted_at: null,
+          lot_serial: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
   }
 
   if (orConditions.length > 0) where.OR = orConditions;
@@ -920,14 +1178,15 @@ function buildSwapReportWhere(
 
   if (!search) return where;
 
+  const has = searchColumnHelper(columns);
   const orConditions: any[] = [];
 
-  if (columns.includes("no")) {
+  if (has("no")) {
     orConditions.push({ no: { contains: search, mode: "insensitive" } });
     orConditions.push({ name: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("location")) {
+  if (has("location")) {
     orConditions.push({
       source_location: { contains: search, mode: "insensitive" },
     });
@@ -936,7 +1195,7 @@ function buildSwapReportWhere(
     });
   }
 
-  if (columns.includes("location_dest")) {
+  if (has("location_dest")) {
     orConditions.push({
       dest_location: { contains: search, mode: "insensitive" },
     });
@@ -945,27 +1204,69 @@ function buildSwapReportWhere(
     });
   }
 
-  if (columns.includes("status")) {
+  if (has("status")) {
     orConditions.push({ status: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("origin")) {
+  if (has("origin")) {
     orConditions.push({ origin: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("reference")) {
+  if (has("reference")) {
     orConditions.push({ reference: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("user_ref")) {
+  if (has("user_ref")) {
     orConditions.push({ user_ref: { contains: search, mode: "insensitive" } });
   }
 
-  if (columns.includes("created_at")) {
+  if (has("created_at")) {
     const dateRange = buildDateRangeFromSearch(search);
-    if (dateRange) {
-      orConditions.push({ created_at: dateRange });
-    }
+    if (dateRange) orConditions.push({ created_at: dateRange });
+  }
+
+  if (has("code") || has("product_code") || has("product")) {
+    orConditions.push({
+      swapItems: {
+        some: {
+          deleted_at: null,
+          code: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
+  }
+
+  if (has("name") || has("product_name") || has("product")) {
+    orConditions.push({
+      swapItems: {
+        some: {
+          deleted_at: null,
+          name: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
+  }
+
+  if (has("unit")) {
+    orConditions.push({
+      swapItems: {
+        some: {
+          deleted_at: null,
+          unit: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
+  }
+
+  if (has("lot") || has("lot_serial")) {
+    orConditions.push({
+      swapItems: {
+        some: {
+          deleted_at: null,
+          lot_serial: { contains: search, mode: "insensitive" },
+        },
+      },
+    });
   }
 
   if (orConditions.length > 0) where.OR = orConditions;
@@ -1005,16 +1306,6 @@ function getGoodsInReturnQty(item: any): number {
   );
 }
 
-function getGoodsOutReturnQty(item: any): number {
-  const rows = Array.isArray(item?.goodsOutItemLocationReturns)
-    ? item.goodsOutItemLocationReturns
-    : [];
-
-  return rows.reduce((sum: number, r: any) => {
-    return sum + Math.max(0, Math.floor(Number(r?.return ?? 0)));
-  }, 0);
-}
-
 export const getTransactionReportPaginated = asyncHandler(
   async (req: Request, res: Response) => {
     const page = Number(req.query.page) || 1;
@@ -1032,21 +1323,19 @@ export const getTransactionReportPaginated = asyncHandler(
     const rawSearch = req.query.search;
     const search = typeof rawSearch === "string" ? rawSearch.trim() : "";
 
-    const rawType = req.query.type;
     const type =
-      typeof rawType === "string" ? rawType.trim().toUpperCase() : "";
-
-    const rawDateFrom = req.query.date_from;
-    const rawDateTo = req.query.date_to;
+      typeof req.query.type === "string"
+        ? req.query.type.trim().toUpperCase()
+        : "";
 
     const dateFrom =
-      typeof rawDateFrom === "string" && rawDateFrom.trim()
-        ? new Date(rawDateFrom)
+      typeof req.query.date_from === "string" && req.query.date_from.trim()
+        ? new Date(req.query.date_from)
         : null;
 
     const dateTo =
-      typeof rawDateTo === "string" && rawDateTo.trim()
-        ? new Date(rawDateTo)
+      typeof req.query.date_to === "string" && req.query.date_to.trim()
+        ? new Date(req.query.date_to)
         : null;
 
     if (dateFrom && Number.isNaN(dateFrom.getTime())) {
@@ -1120,7 +1409,7 @@ export const getTransactionReportPaginated = asyncHandler(
       return null;
     }
 
-    function goodsInExpKey(productId: unknown, lotId: unknown): string {
+    function goodsExpKey(productId: unknown, lotId: unknown): string {
       return `p:${Number(productId ?? 0)}|lot:${Number(lotId ?? 0)}`;
     }
 
@@ -1176,9 +1465,7 @@ export const getTransactionReportPaginated = asyncHandler(
         include: {
           goods_ins: {
             where: { deleted_at: null },
-            include: {
-              barcode: true,
-            },
+            include: { barcode: true },
             orderBy: { id: "asc" },
           },
         },
@@ -1193,11 +1480,8 @@ export const getTransactionReportPaginated = asyncHandler(
             where: { deleted_at: null },
             include: {
               barcode_ref: true,
-
               goodsOutItemLocationReturns: {
-                include: {
-                  location: true,
-                },
+                include: { location: true },
               },
             },
             orderBy: { id: "asc" },
@@ -1233,14 +1517,10 @@ export const getTransactionReportPaginated = asyncHandler(
             orderBy: { id: "asc" },
           },
           movement_departments: {
-            include: {
-              department: true,
-            },
+            include: { department: true },
           },
           movement_user_works: {
-            include: {
-              user: true,
-            },
+            include: { user: true },
           },
         },
       }),
@@ -1256,6 +1536,7 @@ export const getTransactionReportPaginated = asyncHandler(
           },
         },
       }),
+
       prisma.swap.findMany({
         where: withDeletedAtNull(
           buildSwapReportWhere(createdAtFilter, search, selectedColumns),
@@ -1270,8 +1551,6 @@ export const getTransactionReportPaginated = asyncHandler(
       }),
     ]);
 
-    // ✅ doc.department_id คือ department id จาก Odoo
-    // ✅ ต้องเอาไปเทียบกับ department.odoo_id แล้วใช้ short_name มาแสดง
     const departmentOdooIds = Array.from(
       new Set(
         [
@@ -1306,7 +1585,6 @@ export const getTransactionReportPaginated = asyncHandler(
 
     for (const d of departments) {
       if (d.odoo_id === null || d.odoo_id === undefined) continue;
-
       const odooId = Number(d.odoo_id);
       if (!Number.isFinite(odooId) || odooId <= 0) continue;
 
@@ -1323,7 +1601,7 @@ export const getTransactionReportPaginated = asyncHandler(
       const l = Number(lotId ?? 0);
       if (!Number.isFinite(p) || p <= 0) return;
       if (!Number.isFinite(l) || l <= 0) return;
-      expPairs.set(goodsInExpKey(p, l), { product_id: p, lot_id: l });
+      expPairs.set(goodsExpKey(p, l), { product_id: p, lot_id: l });
     };
 
     for (const doc of inbounds as any[]) {
@@ -1363,9 +1641,8 @@ export const getTransactionReportPaginated = asyncHandler(
     }
 
     const expRows = expPairs.size
-      ? await prisma.goods_in.findMany({
+      ? await prisma.wms_mdt_goods.findMany({
           where: {
-            deleted_at: null,
             OR: Array.from(expPairs.values()).map((x) => ({
               product_id: x.product_id,
               lot_id: x.lot_id,
@@ -1374,7 +1651,7 @@ export const getTransactionReportPaginated = asyncHandler(
           select: {
             product_id: true,
             lot_id: true,
-            exp: true,
+            expiration_date: true,
             id: true,
           },
           orderBy: { id: "desc" },
@@ -1384,41 +1661,13 @@ export const getTransactionReportPaginated = asyncHandler(
     const expMap = new Map<string, string | null>();
 
     for (const row of expRows) {
-      const key = goodsInExpKey(row.product_id, row.lot_id);
+      const key = goodsExpKey(row.product_id, row.lot_id);
       if (!expMap.has(key)) {
-        expMap.set(key, row.exp ? row.exp.toISOString() : null);
+        expMap.set(
+          key,
+          row.expiration_date ? row.expiration_date.toISOString() : null,
+        );
       }
-    }
-
-    const codeSet = new Set<string>();
-
-    const collectCode = (code: unknown) => {
-      const c = normalizeProductCode(code);
-      if (c) codeSet.add(c);
-    };
-
-    for (const doc of inbounds as any[]) {
-      for (const item of doc.goods_ins ?? []) collectCode(item.code);
-    }
-
-    for (const doc of outbounds as any[]) {
-      for (const item of doc.goods_outs ?? []) collectCode(item.code);
-    }
-
-    for (const doc of transferDocs as any[]) {
-      for (const item of doc.transfer_doc_items ?? []) collectCode(item.code);
-    }
-
-    for (const doc of transferMovements as any[]) {
-      for (const item of doc.items ?? []) collectCode(item.code);
-    }
-
-    for (const doc of adjustments as any[]) {
-      for (const item of doc.items ?? []) collectCode(item.code);
-    }
-
-    for (const doc of swaps as any[]) {
-      for (const item of doc.swapItems ?? []) collectCode(item.code);
     }
 
     const mdtRows = await prisma.wms_mdt_goods.findMany({
@@ -1454,7 +1703,7 @@ export const getTransactionReportPaginated = asyncHandler(
       const l = Number(lotId ?? 0);
       if (!Number.isFinite(p) || p <= 0) return null;
       if (!Number.isFinite(l) || l <= 0) return null;
-      return expMap.get(goodsInExpKey(p, l)) ?? null;
+      return expMap.get(goodsExpKey(p, l)) ?? null;
     };
 
     const getZoneType = (code: unknown): string | null => {
@@ -1502,11 +1751,7 @@ export const getTransactionReportPaginated = asyncHandler(
             user_ref: null,
             code: null,
             name: null,
-            document: {
-              ...formatted,
-              department,
-              items: [],
-            },
+            document: { ...formatted, department, items: [] },
           },
         ];
       }
@@ -1522,13 +1767,7 @@ export const getTransactionReportPaginated = asyncHandler(
         user_ref: null,
         code: getItemCode(item),
         name: getItemName(item),
-        document: withSingleItemDocument(
-          {
-            ...formatted,
-            department,
-          },
-          item,
-        ),
+        document: withSingleItemDocument({ ...formatted, department }, item),
       }));
 
       const returnRows: ReportRow[] = items
@@ -1538,14 +1777,10 @@ export const getTransactionReportPaginated = asyncHandler(
 
           const returnItem = {
             ...item,
-
-            // ✅ ให้ FE คำนวณช่อง In จากจำนวน return
             qty: returnQty,
             quantity_receive: returnQty,
             quantity_count: returnQty,
             confirmed_qty: returnQty,
-
-            // ✅ กัน formatter/FE บางจุดที่อ่าน field return
             return: returnQty,
             return_qty: returnQty,
             qty_return: returnQty,
@@ -1557,18 +1792,12 @@ export const getTransactionReportPaginated = asyncHandler(
             id: makeRowId("inbound-return", formatted.id, returnItem, index),
             no: formatted.no,
             created_at: formatted.created_at,
-
-            // ✅ แยก type ใหม่ให้เห็นใน report
             type: "RETURN",
-
-            // ✅ return คือของกลับเข้า stock
             location: formatted.location ?? null,
             location_dest: formatted.location_dest ?? null,
-
             user_ref: null,
             code: getItemCode(returnItem),
             name: getItemName(returnItem),
-
             document: withSingleItemDocument(
               {
                 ...formatted,
@@ -1604,9 +1833,6 @@ export const getTransactionReportPaginated = asyncHandler(
         formatted.department,
       );
 
-      // =========================
-      // ✅ NORMAL OUTBOUND
-      // =========================
       const normalRows: ReportRow[] = items.map((item: any, index: number) => ({
         source: "outbound",
         id: makeRowId("outbound", formatted.id, item, index),
@@ -1628,9 +1854,6 @@ export const getTransactionReportPaginated = asyncHandler(
         ),
       }));
 
-      // =========================
-      // ✅ RETURN (FIXED)
-      // =========================
       const returnRows: ReportRow[] = (doc.goods_outs ?? [])
         .map((goi: any, index: number) => {
           const rows = Array.isArray(goi?.goodsOutItemLocationReturns)
@@ -1644,7 +1867,6 @@ export const getTransactionReportPaginated = asyncHandler(
 
           if (returnQty <= 0) return null;
 
-          // ✅ หา item ที่ format แล้ว เพื่อให้ field ครบเหมือน row ปกติ
           const formattedItem =
             items.find((x: any) => Number(x.id) === Number(goi.id)) ??
             items.find(
@@ -1660,46 +1882,34 @@ export const getTransactionReportPaginated = asyncHandler(
           const returnItem = {
             ...formattedItem,
             ...goi,
-
-            // ✅ เอาข้อมูล display จาก formatted กลับมาทับ raw goi
             barcode: formattedItem?.barcode ?? goi?.barcode_ref ?? null,
             barcode_ref: formattedItem?.barcode_ref ?? goi?.barcode_ref ?? null,
             barcode_text:
               formattedItem?.barcode_text ?? goi?.barcode_text ?? null,
-
             exp:
               getExp(goi.product_id, goi.lot_id) ??
               formattedItem?.exp ??
               goi?.exp ??
               null,
-
             zone_type:
               getZoneType(goi.code) ??
               formattedItem?.zone_type ??
               goi?.zone_type ??
               null,
-
             unit: formattedItem?.unit ?? goi?.unit ?? null,
             code: formattedItem?.code ?? goi?.code ?? null,
             name: formattedItem?.name ?? goi?.name ?? null,
-
-            // ✅ return qty ต้อง override
             qty: returnQty,
             quantity: returnQty,
             quantity_receive: returnQty,
             quantity_count: returnQty,
             confirmed_qty: returnQty,
-
-            // ✅ field ให้ FE อ่านเป็น IN
             in: returnQty,
             out: 0,
-
             return: returnQty,
             return_qty: returnQty,
             qty_return: returnQty,
             quantity_return: returnQty,
-
-            // ✅ location return จริง ถ้ามี
             return_locations: rows,
             return_location: returnLocation,
             location_return: returnLocation?.full_name ?? null,
@@ -1711,15 +1921,11 @@ export const getTransactionReportPaginated = asyncHandler(
             no: formatted.no,
             created_at: formatted.created_at,
             type: "RETURN",
-
-            // ✅ ให้เห็นเป็นของไหลกลับเข้า
             location: formatted.location_dest ?? null,
             location_dest: formatted.location ?? null,
-
             user_ref: null,
             code: getItemCode(returnItem),
             name: getItemName(returnItem),
-
             document: withSingleItemDocument(
               {
                 ...formatted,
@@ -1739,25 +1945,73 @@ export const getTransactionReportPaginated = asyncHandler(
     const transferDocRows: ReportRow[] = transferDocs.flatMap((doc: any) => {
       const department = getDepartmentName(doc.department_id, doc.department);
 
-      const formattedItems = (doc.transfer_doc_items ?? []).map((item: any) => {
-        const expIso = getExp(item.product_id, item.lot_id);
+      const formattedItems = (doc.transfer_doc_items ?? []).map(
+        (rawItem: any) => {
+          const expIso = getExp(rawItem.product_id, rawItem.lot_id);
 
-        return formatTransferDocItem({
-          ...item,
-          transfer_doc: {
-            ...doc,
-            department,
-          },
-          exp: expIso ? new Date(expIso) : (item.exp ?? null),
-          zone_type: getZoneType(item.code) ?? item.zone_type ?? null,
-        } as any);
-      });
+          const formatted: any = formatTransferDocItem({
+            ...rawItem,
+            transfer_doc: {
+              ...doc,
+              department,
+            },
+            exp: expIso ? new Date(expIso) : (rawItem.exp ?? null),
+            zone_type: getZoneType(rawItem.code) ?? rawItem.zone_type ?? null,
+          } as any);
+
+          return {
+            ...formatted,
+            ...rawItem,
+            id: rawItem.id,
+            sequence: rawItem.sequence ?? null,
+            product_id: rawItem.product_id ?? null,
+            code: rawItem.code ?? formatted?.code ?? null,
+            name: rawItem.name ?? formatted?.name ?? null,
+            unit: rawItem.unit ?? formatted?.unit ?? null,
+            tracking: rawItem.tracking ?? formatted?.tracking ?? null,
+            lot_id: rawItem.lot_id ?? null,
+            lot: rawItem.lot ?? rawItem.lot_serial ?? formatted?.lot ?? null,
+            lot_serial:
+              rawItem.lot_serial ??
+              rawItem.lot ??
+              formatted?.lot_serial ??
+              null,
+            qty: rawItem.qty ?? formatted?.qty ?? null,
+            quantity:
+              rawItem.quantity ??
+              rawItem.qty ??
+              rawItem.quantity_receive ??
+              formatted?.quantity ??
+              null,
+            quantity_receive:
+              rawItem.quantity_receive ??
+              rawItem.qty ??
+              formatted?.quantity_receive ??
+              null,
+            quantity_count: rawItem.quantity_count ?? 0,
+            quantity_put: rawItem.quantity_put ?? 0,
+            barcode_id: rawItem.barcode_id ?? null,
+            barcode_text:
+              rawItem.barcode_text ?? formatted?.barcode_text ?? null,
+            exp:
+              expIso ??
+              (rawItem.exp ? rawItem.exp.toISOString() : null) ??
+              formatted?.exp ??
+              null,
+            zone_type:
+              getZoneType(rawItem.code) ??
+              rawItem.zone_type ??
+              formatted?.zone_type ??
+              null,
+          };
+        },
+      );
 
       const formattedDoc = {
         id: doc.id,
         no: doc.no ?? null,
         lot: doc.lot ?? null,
-        date: doc.date.toISOString(),
+        date: doc.date ? doc.date.toISOString() : null,
         quantity: doc.quantity ?? null,
         in_type: doc.in_type ?? "TF",
         department_id: doc.department_id ?? null,
@@ -1843,8 +2097,8 @@ export const getTransactionReportPaginated = asyncHandler(
           no: formatted.no ?? null,
           created_at: formatted.created_at,
           type: "MOVE",
-          location: null,
-          location_dest: null,
+          location: item.lock_no ?? item.location ?? null,
+          location_dest: item.lock_no_dest ?? item.location_dest ?? null,
           user_ref: userRef,
           code: getItemCode(item),
           name: getItemName(item),
@@ -1954,30 +2208,23 @@ export const getTransactionReportPaginated = asyncHandler(
         name: doc.name ?? null,
         no: doc.no ?? null,
         picking_id: doc.picking_id ?? null,
-
         odoo_location_id: doc.odoo_location_id ?? null,
         source_location_id: doc.source_location_id ?? null,
         source_location: doc.source_location ?? null,
-
         odoo_location_dest_id: doc.odoo_location_dest_id ?? null,
         dest_location_id: doc.dest_location_id ?? null,
         dest_location: doc.dest_location ?? null,
-
         location_id: doc.location_id ?? null,
         location_name: doc.location_name ?? null,
-
         location_dest_id: doc.location_dest_id ?? null,
         location_dest_name: doc.location_dest_name ?? null,
-
         department_id: doc.department_id ?? null,
         department,
-
         status: doc.status ?? null,
         user_ref: doc.user_ref ?? null,
         remark: doc.remark ?? null,
         origin: doc.origin ?? null,
         reference: doc.reference ?? null,
-
         type: "SWAP",
         created_at: doc.created_at.toISOString(),
         updated_at: doc.updated_at ? doc.updated_at.toISOString() : null,
@@ -2030,6 +2277,50 @@ export const getTransactionReportPaginated = asyncHandler(
       rows = rows.filter(
         (row) => String(row.type ?? "").toUpperCase() === type,
       );
+    }
+
+    if (search) {
+      const s = normalizeText(search);
+
+      rows = rows.filter((row) => {
+        const item = row.document?.items?.[0] ?? {};
+        const doc = row.document ?? {};
+
+        const values = [
+          row.no,
+          row.type,
+          row.source,
+          row.location,
+          row.location_dest,
+          row.user_ref,
+          row.code,
+          row.name,
+
+          doc.no,
+          doc.department,
+          doc.location,
+          doc.location_dest,
+          doc.origin,
+          doc.reference,
+          doc.in_type,
+          doc.out_type,
+          doc.type,
+          doc.status,
+
+          item.code,
+          item.product_code,
+          item.name,
+          item.product_name,
+          item.unit,
+          item.lot,
+          item.lot_serial,
+          item.zone_type,
+          item.exp,
+          item.barcode_text,
+        ];
+
+        return values.some((v) => normalizeText(v).includes(s));
+      });
     }
 
     rows.sort((a, b) => {
@@ -2085,9 +2376,7 @@ export const getTransactionReportPaginated = asyncHandler(
       if (result !== 0) return result * dir;
 
       const createdAtTie = compareDate(a.created_at, b.created_at);
-      if (createdAtTie !== 0) {
-        return createdAtTie * -1;
-      }
+      if (createdAtTie !== 0) return createdAtTie * -1;
 
       return compareText(a.no, b.no);
     });

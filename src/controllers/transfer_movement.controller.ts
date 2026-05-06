@@ -1482,60 +1482,6 @@ async function resolveMovementLocationsByFullNames(fullNames: string[]) {
   return normalized.map((name) => byName.get(name)!);
 }
 
-async function seedTransferMovementLocationDraftRowsTx(
-  tx: Prisma.TransactionClient,
-  input: {
-    transfer_movement_id: number;
-    location_ids: number[];
-  },
-) {
-  const itemRows = await tx.transfer_movement_item.findMany({
-    where: {
-      transfer_movement_id: input.transfer_movement_id,
-      deleted_at: null,
-    },
-    select: {
-      id: true,
-    },
-  });
-
-  if (itemRows.length === 0 || input.location_ids.length === 0) return;
-
-  for (const item of itemRows) {
-    for (const location_id of input.location_ids) {
-      await tx.transfer_movement_item_location_pick_confirm.upsert({
-        where: {
-          uniq_mm_pick_location: {
-            transfer_movement_item_id: item.id,
-            location_id,
-          },
-        },
-        update: {},
-        create: {
-          transfer_movement_item_id: item.id,
-          location_id,
-          confirmed_pick: 0,
-        },
-      });
-
-      await tx.transfer_movement_item_location_put_confirm.upsert({
-        where: {
-          uniq_mm_put_location: {
-            transfer_movement_item_id: item.id,
-            location_id,
-          },
-        },
-        update: {},
-        create: {
-          transfer_movement_item_id: item.id,
-          location_id,
-          confirmed_put: 0,
-        },
-      });
-    }
-  }
-}
-
 // POST /api/transfer_movements/:no/scan/location
 export const scanTransferMovementLocation = asyncHandler(
   async (req: Request, res: Response) => {

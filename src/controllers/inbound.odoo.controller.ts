@@ -631,6 +631,7 @@ async function handleTFTransfer(input: {
       0,
     );
     let nextSeq = maxSeq + 1;
+    const wmsExpMap = await buildWmsGoodsExpMap(tx, mergedItems);
 
     for (let i = 0; i < mergedItems.length; i++) {
       const item = mergedItems[i];
@@ -693,7 +694,7 @@ async function handleTFTransfer(input: {
           quantity_count: 0,
 
           barcode_text: item.barcode_text ?? undefined,
-          exp: toExpDate(item.expire_date),
+          exp: resolveInboundExp(item, wmsExpMap),
 
           updated_at: new Date(),
         },
@@ -938,6 +939,7 @@ async function handleInboundTransfer(input: {
       tx,
       hydratedItems,
     );
+    const wmsExpMap = await buildWmsGoodsExpMap(tx, hydratedItems);
 
     // 1) upsert inbound header
     const existing = await tx.inbound.findFirst({
@@ -1092,7 +1094,7 @@ async function handleInboundTransfer(input: {
           quantity_count: 0,
 
           barcode_text: item.barcode_text ?? undefined,
-          exp: toExpDate(item.expire_date),
+          exp: resolveInboundExp(item, wmsExpMap),
 
           updated_at: new Date(),
         },
@@ -1402,6 +1404,8 @@ async function handleSwapTransfer(input: {
       );
     }
 
+    const wmsExpMap = await buildWmsGoodsExpMap(tx, mergedItems);
+
     for (let i = 0; i < mergedItems.length; i++) {
       const item = mergedItems[i];
 
@@ -1431,7 +1435,7 @@ async function handleSwapTransfer(input: {
         lot_id: item.lot_id ?? null,
         lot_serial: item.lot_serial ?? "",
         barcode_text: item.barcode_text ?? null,
-        expiration_date: toExpDate(item.expire_date),
+        expiration_date: resolveInboundExp(item, wmsExpMap),
         system_qty: Number(item.qty ?? 0),
         updated_at: new Date(),
         deleted_at: null,
@@ -2246,6 +2250,69 @@ async function handlePDAutoProcess(input: {
   } catch {}
 
   return result;
+}
+
+async function buildWmsGoodsExpMap(
+  tx: Prisma.TransactionClient,
+  items: Array<{
+    product_id: number | null;
+    lot_id: number | null;
+  }>,
+) {
+  const pairs = Array.from(
+    new Map(
+      items
+        .filter((x) => x.product_id != null && x.lot_id != null)
+        .map((x) => [
+          `${x.product_id}|${x.lot_id}`,
+          {
+            product_id: x.product_id as number,
+            lot_id: x.lot_id as number,
+          },
+        ]),
+    ).values(),
+  );
+
+  const map = new Map<string, Date | null>();
+  if (pairs.length === 0) return map;
+
+  const rows = await tx.wms_mdt_goods.findMany({
+    where: {
+      OR: pairs.map((x) => ({
+        product_id: x.product_id,
+        lot_id: x.lot_id,
+      })),
+    },
+    select: {
+      product_id: true,
+      lot_id: true,
+      expiration_date: true,
+      id: true,
+    },
+    orderBy: { id: "desc" },
+  });
+
+  for (const row of rows) {
+    const key = `${row.product_id}|${row.lot_id ?? 0}`;
+    if (!map.has(key)) {
+      map.set(key, row.expiration_date ?? null);
+    }
+  }
+
+  return map;
+}
+
+function resolveInboundExp(
+  item: NormalizedInboundItem,
+  wmsExpMap: Map<string, Date | null>,
+): Date | undefined {
+  const fromOdoo = toExpDate(item.expire_date);
+  if (fromOdoo) return fromOdoo;
+
+  if (item.product_id == null || item.lot_id == null) return undefined;
+
+  const fromWms = wmsExpMap.get(`${item.product_id}|${item.lot_id}`);
+  return fromWms ?? undefined;
 }
 
 /**

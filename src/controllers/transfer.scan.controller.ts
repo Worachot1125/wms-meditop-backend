@@ -620,6 +620,16 @@ async function findWmsGoodsExpByProductLot(
   return row?.expiration_date ?? null;
 }
 
+function dateOnlyKey(v: any): string | null {
+  if (!v) return null;
+
+  const d = v instanceof Date ? v : new Date(v);
+  if (Number.isNaN(d.getTime())) return null;
+
+  const bangkok = new Date(d.getTime() + 7 * 60 * 60 * 1000);
+  return bangkok.toISOString().slice(0, 10);
+}
+
 export const scanTransferDocBarcode = asyncHandler(
   async (
     req: Request<
@@ -639,6 +649,7 @@ export const scanTransferDocBarcode = asyncHandler(
     const location_full_name = String(req.body.location_full_name ?? "").trim();
     const user_ref = String(req.body.user_ref ?? "").trim() || null;
 
+
     if (!barcodeText) throw badRequest("กรุณาส่ง barcode");
     if (!location_full_name) throw badRequest("กรุณาส่ง location_full_name");
 
@@ -652,6 +663,7 @@ export const scanTransferDocBarcode = asyncHandler(
 
     const loc = await resolveLocationByFullName(location_full_name);
 
+
     const parsed = await resolveBarcodeScan(barcodeText);
 
     const rows = await prisma.transfer_doc_item.findMany({
@@ -662,6 +674,7 @@ export const scanTransferDocBarcode = asyncHandler(
       } as any,
       select: {
         id: true,
+        sequence: true,
         product_id: true,
         lot_id: true,
         lot_serial: true,
@@ -685,12 +698,14 @@ export const scanTransferDocBarcode = asyncHandler(
       return itemBase === barcodeBase;
     });
 
+
     let matchedItem: (typeof candidates)[number] | null = null;
 
     for (const item of candidates) {
-      const lotMatched =
-        normalizeScanText(item.lot_serial ?? "") ===
-        normalizeScanText(parsed.lot_serial ?? "");
+      const itemLotKey = normalizeScanText(item.lot_serial ?? "");
+      const parsedLotKey = normalizeScanText(parsed.lot_serial ?? "");
+
+      const lotMatched = itemLotKey === parsedLotKey;
 
       const itemExpFromWms =
         item.product_id != null
@@ -702,15 +717,12 @@ export const scanTransferDocBarcode = asyncHandler(
 
       const effectiveItemExp = item.exp ?? itemExpFromWms ?? null;
 
-      const itemExpKey = effectiveItemExp
-        ? new Date(effectiveItemExp).toISOString().slice(0, 10)
-        : null;
+      const itemExpKey = dateOnlyKey(effectiveItemExp);
+      const parsedExpKey = dateOnlyKey(parsed.exp);
 
-      const parsedExpKey = parsed.exp
-        ? new Date(parsed.exp).toISOString().slice(0, 10)
-        : null;
+      const expMatched = parsedExpKey ? itemExpKey === parsedExpKey : true;
 
-      const expMatched = itemExpKey === parsedExpKey;
+
 
       if (!lotMatched) continue;
       if (!expMatched) continue;
@@ -720,10 +732,12 @@ export const scanTransferDocBarcode = asyncHandler(
     }
 
     if (!matchedItem) {
+
       throw badRequest(
         `ไม่พบ transfer_doc_item ที่ตรงกับ barcode_text + lot_serial + exp`,
       );
     }
+
 
     if (matchedItem.product_id == null) {
       throw badRequest("transfer_doc_item.product_id เป็น null");
@@ -760,6 +774,7 @@ export const scanTransferDocBarcode = asyncHandler(
           in_process: true,
         },
       });
+
 
       if (!fresh) {
         throw badRequest("ไม่พบ transfer_doc_item ที่ต้องการอัปเดต");
@@ -800,6 +815,7 @@ export const scanTransferDocBarcode = asyncHandler(
       beforeLocCount = Number(existingConfirm?.confirmed_qty ?? 0);
       afterLocCount = beforeLocCount + appliedQty;
       afterCount = nextPick;
+
 
       await tx.transfer_doc_item.update({
         where: { id: fresh.id },
@@ -854,6 +870,7 @@ export const scanTransferDocBarcode = asyncHandler(
         barcode_text: parsed.barcode_text,
         lot_serial: parsed.lot_serial,
         exp: parsed.exp ? parsed.exp.toISOString() : null,
+        exp_text: parsed.exp_text ?? null,
         matched_by: parsed.matched_by,
       },
       barcode_meta: {
@@ -973,15 +990,10 @@ export const scanTransferDocBarcodePut = asyncHandler(
 
       const effectiveItemExp = item.exp ?? itemExpFromWms ?? null;
 
-      const itemExpKey = effectiveItemExp
-        ? new Date(effectiveItemExp).toISOString().slice(0, 10)
-        : null;
+      const itemExpKey = dateOnlyKey(effectiveItemExp);
+      const parsedExpKey = dateOnlyKey(parsed.exp);
 
-      const parsedExpKey = parsed.exp
-        ? new Date(parsed.exp).toISOString().slice(0, 10)
-        : null;
-
-      const expMatched = itemExpKey === parsedExpKey;
+      const expMatched = parsedExpKey ? itemExpKey === parsedExpKey : true;
 
       if (!lotMatched) continue;
       if (!expMatched) continue;
