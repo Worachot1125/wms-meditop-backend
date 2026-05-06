@@ -11,3 +11,4 @@ dist/
 logs/
 *.log
 test.json
+/assets
