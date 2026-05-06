@@ -1,4 +1,4 @@
-# นี่คือ Backend ของระบบ WMS ของทาง Meditop
+# นี่คือ Backend ของระบบ WMS
 ประกอบด้วย
 # Master
 1. user
