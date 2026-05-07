@@ -5,10 +5,6 @@ import { asyncHandler } from "../utils/asyncHandler";
 import axios from "axios";
 import { getUserId } from "../utils/auth.util";
 import { badRequest, notFound } from "../utils/appError";
-import {
-  OdooOutboundRequest,
-  OdooOutboundRequestParams,
-} from "../types/outbound";
 import { AuthRequest, buildDepartmentAccessWhere } from "../middleware/auth";
 import { formatOdooOutbound } from "../utils/formatters/odoo_outbound.formatter";
 import { io } from "../index";
@@ -28,18 +24,14 @@ import {
   toExpDate,
   normalizeExpDate,
   toDateOnlyKey,
-  sameExpDate,
-  isNullishExp,
   normalizeOwnerText,
   normalizeLotId,
   normalizeLotSerial,
   normalizeStr,
   normalizeNullableText,
-  toNullableInt,
   normalizeBarcodeTextFromOdoo,
   resolveOutTypeFromNo,
   buildKey,
-  normalizeLot,
   firstStr,
   decodeNoParam,
   pickPositiveInt,
@@ -48,11 +40,8 @@ import {
 } from "../utils/outbound/outbound.parse";
 
 import type {
-  DeductMergedItem,
-  ReplaceMergedItem,
   BorSerInternalLine,
   TFLine,
-  LockLocRow,
 } from "../utils/outbound/outbound.type";
 
 import {
@@ -60,7 +49,6 @@ import {
   resolveInputNumberFromMap,
   buildLockNoMapFromItems,
   resolveLockLocationsFromMap,
-  resolveLockNoFromMap,
   buildExpirationMapsFromStocks,
   firstLocId,
   expKeyLocOf,
@@ -82,7 +70,6 @@ import {
 import {
   isVirtualBorrowDest,
   upsertVirtualLocationFromOdoo,
-  upsertSwapBorSerLocationByName,
 } from "../utils/outbound/outbound.virtual-location";
 
 import {
@@ -90,8 +77,6 @@ import {
   BOR_SER_REPLACE_TYPES,
   decrementBorSerStocksForGaBosSv,
   replaceBorSerStocksForExBoa,
-  resolveEffectiveExp,
-  buildBorSerWhereBase,
 } from "../utils/outbound/outbound.bor-ser-stock";
 
 import {
@@ -99,9 +84,6 @@ import {
   isSwapTransferLike,
   handleBorSerInternalTransferOutbound,
   retryPendingSwapsByDestFullName,
-  applyPendingSwapStockMove,
-  extractBorSerLockFromLocation,
-  resolveBorSerTableFromLock,
 } from "../utils/outbound/outbound.swap";
 
 import {
@@ -2106,22 +2088,6 @@ export const getOdooOutboundByNo = asyncHandler(
     return res.json(formatted);
   },
 );
-
-type LockRow = {
-  outbound_id: number;
-  name: string | null;
-  created_at: Date;
-};
-
-const outboundInclude = Prisma.validator<Prisma.outboundInclude>()({
-  goods_outs: {
-    where: { deleted_at: null },
-    include: {
-      barcode_ref: { where: { deleted_at: null } },
-    },
-    orderBy: { sequence: "asc" },
-  },
-});
 
 export const getOdooOutboundsByMyBatch = asyncHandler(
   async (req: Request, res: Response) => {
