@@ -198,23 +198,30 @@ export const getUsersPaginated = asyncHandler(
     let where: Prisma.userWhereInput = baseWhere;
 
     if (search) {
-      const searchCondition: Prisma.userWhereInput = {
-        OR: [
-          { first_name: { contains: search, mode: "insensitive" } },
-          { last_name: { contains: search, mode: "insensitive" } },
-          { tel: { contains: search, mode: "insensitive" } },
-          { username: { contains: search, mode: "insensitive" } },
-          { remark: { contains: search, mode: "insensitive" } },
+      const terms = search
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean);
+
+      const orConditions: Prisma.userWhereInput[] = [];
+
+      for (const term of terms.length > 0 ? terms : [search]) {
+        orConditions.push(
+          { first_name: { contains: term, mode: "insensitive" } },
+          { last_name: { contains: term, mode: "insensitive" } },
+          { tel: { contains: term, mode: "insensitive" } },
+          { username: { contains: term, mode: "insensitive" } },
+          { remark: { contains: term, mode: "insensitive" } },
           {
             departments: {
               some: {
                 department: {
                   OR: [
-                    { full_name: { contains: search, mode: "insensitive" } },
-                    { short_name: { contains: search, mode: "insensitive" } },
+                    { full_name: { contains: term, mode: "insensitive" } },
+                    { short_name: { contains: term, mode: "insensitive" } },
                     {
                       department_code: {
-                        contains: search,
+                        contains: term,
                         mode: "insensitive",
                       },
                     },
@@ -223,9 +230,17 @@ export const getUsersPaginated = asyncHandler(
               },
             },
           },
+        );
+      }
+
+      where = {
+        AND: [
+          baseWhere,
+          {
+            OR: orConditions,
+          },
         ],
       };
-      where = { AND: [baseWhere, searchCondition] };
     }
 
     const [users, total] = await Promise.all([
@@ -388,7 +403,6 @@ export const updateUser = asyncHandler(
     return res.json(formatUser(user));
   },
 );
-
 
 // PATCH /users/pin/:id
 export const updateUserPin = asyncHandler(async (req, res) => {
