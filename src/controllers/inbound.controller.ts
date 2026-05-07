@@ -212,7 +212,66 @@ export const getInbounds = asyncHandler(async (req: AuthRequest, res: Response) 
   return res.json(formattedInbounds);
 });
 
-// GET Inbound (WITH PAGINATION)
+const buildInboundSearchCondition = (
+  search: string,
+): Prisma.inboundWhereInput => {
+  const terms = search
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  const searchTerms = terms.length > 0 ? terms : [search];
+
+  const orConditions: Prisma.inboundWhereInput[] = [];
+
+  for (const term of searchTerms) {
+    const numericValue = Number(term);
+
+    orConditions.push(
+      { no: { contains: term, mode: "insensitive" } },
+      { lot: { contains: term, mode: "insensitive" } },
+      { in_type: { contains: term, mode: "insensitive" } },
+      { department: { contains: term, mode: "insensitive" } },
+      { reference: { contains: term, mode: "insensitive" } },
+      { origin: { contains: term, mode: "insensitive" } },
+      {
+        goods_ins: {
+          some: {
+            deleted_at: null,
+            OR: [
+              { code: { contains: term, mode: "insensitive" } },
+              { name: { contains: term, mode: "insensitive" } },
+              { lot: { contains: term, mode: "insensitive" } },
+              { lot_serial: { contains: term, mode: "insensitive" } },
+            ],
+          },
+        },
+      },
+    );
+
+    if (!Number.isNaN(numericValue)) {
+      orConditions.push({
+        quantity: {
+          equals: numericValue,
+        },
+      });
+    }
+  }
+
+  return {
+    OR: orConditions,
+  };
+};
+
+const parseDepartmentQuery = (value: unknown): string[] => {
+  if (typeof value !== "string") return [];
+
+  return value
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+};
+
 export const getInboundsPaginated = asyncHandler(
   async (req: AuthRequest, res: Response) => {
     const page = Number(req.query.page) || 1;
@@ -221,6 +280,10 @@ export const getInboundsPaginated = asyncHandler(
 
     if (isNaN(page) || page < 1) {
       throw badRequest("page ต้องเป็นตัวเลขบวกที่มีค่ามากกว่า 0");
+    }
+
+    if (isNaN(limit) || limit < 1) {
+      throw badRequest("limit ต้องเป็นตัวเลขบวกที่มีค่ามากกว่า 0");
     }
 
     const skip = (page - 1) * limit;
@@ -241,78 +304,87 @@ export const getInboundsPaginated = asyncHandler(
       throw badRequest("status ต้องเป็น pending หรือ completed");
     }
 
+    const selectedDepartments = parseDepartmentQuery(req.query.department);
+
+    let selectedDepartmentWhere: Prisma.inboundWhereInput = {};
+
+    if (selectedDepartments.length > 0) {
+      const deptRows = await prisma.department.findMany({
+        where: {
+          OR: [
+            {
+              short_name: {
+                in: selectedDepartments,
+                mode: "insensitive",
+              },
+            },
+            {
+              full_name: {
+                in: selectedDepartments,
+                mode: "insensitive",
+              },
+            },
+          ],
+        },
+        select: {
+          odoo_id: true,
+          short_name: true,
+          full_name: true,
+        },
+      });
+
+      const selectedDeptIds = deptRows
+        .map((d) => d.odoo_id)
+        .filter((id): id is number => typeof id === "number")
+        .map((id) => String(id));
+
+      selectedDepartmentWhere = {
+        OR: [
+          {
+            department: {
+              in: selectedDepartments,
+              mode: "insensitive",
+            },
+          },
+          ...(selectedDeptIds.length > 0
+            ? [
+                {
+                  department_id: {
+                    in: selectedDeptIds,
+                  },
+                },
+              ]
+            : []),
+        ],
+      };
+    }
+
     const departmentWhere = buildDepartmentAccessWhere(req);
 
-    // 🔹 baseWhere (มี status filter ถ้ามี)
     const baseWhere: Prisma.inboundWhereInput = {
       deleted_at: null,
       ...departmentWhere,
+      ...selectedDepartmentWhere,
       ...(status ? { status } : {}),
     };
 
     let where: Prisma.inboundWhereInput = baseWhere;
 
     if (search) {
-      const searchCondition: Prisma.inboundWhereInput = {
-        OR: [
-          { no: { contains: search, mode: "insensitive" } },
-          { lot: { contains: search, mode: "insensitive" } },
-          { in_type: { contains: search, mode: "insensitive" } },
-          { department: { contains: search, mode: "insensitive" } },
-          { reference: { contains: search, mode: "insensitive" } },
-          { origin: { contains: search, mode: "insensitive" } },
-          {
-            quantity: {
-              equals: isNaN(Number(search)) ? undefined : Number(search),
-            },
-          },
-          {
-            goods_ins: {
-              some: {
-                deleted_at: null,
-                OR: [{ code: { contains: search, mode: "insensitive" } }],
-              },
-            },
-          },
-        ],
-      };
-
+      const searchCondition = buildInboundSearchCondition(search);
       where = { AND: [baseWhere, searchCondition] };
     }
 
-    // 🔹 where สำหรับนับ statusCounts (ต้อง "ไม่ติด status filter")
     const baseWhereForCount: Prisma.inboundWhereInput = {
       deleted_at: null,
       ...departmentWhere,
+      ...selectedDepartmentWhere,
     };
 
     let whereForCount: Prisma.inboundWhereInput = baseWhereForCount;
 
     if (search) {
-      const searchCondition: Prisma.inboundWhereInput = {
-        OR: [
-          { no: { contains: search, mode: "insensitive" } },
-          { lot: { contains: search, mode: "insensitive" } },
-          { in_type: { contains: search, mode: "insensitive" } },
-          { department: { contains: search, mode: "insensitive" } },
-          { reference: { contains: search, mode: "insensitive" } },
-          { origin: { contains: search, mode: "insensitive" } },
-          {
-            quantity: {
-              equals: isNaN(Number(search)) ? undefined : Number(search),
-            },
-          },
-          {
-            goods_ins: {
-              some: {
-                deleted_at: null,
-                OR: [{ code: { contains: search, mode: "insensitive" } }],
-              },
-            },
-          },
-        ],
-      };
-
+      const searchCondition = buildInboundSearchCondition(search);
       whereForCount = { AND: [baseWhereForCount, searchCondition] };
     }
 
@@ -327,14 +399,15 @@ export const getInboundsPaginated = asyncHandler(
             goods_ins: true,
           },
         }),
+
         prisma.inbound.count({ where }),
 
-        // 🔥 statusCounts (ใช้ whereForCount)
         prisma.inbound.count({
           where: {
             AND: [whereForCount, { status: "pending" }],
           },
         }),
+
         prisma.inbound.count({
           where: {
             AND: [whereForCount, { status: "completed" }],
@@ -353,11 +426,13 @@ export const getInboundsPaginated = asyncHandler(
     ];
 
     const deptMap = new Map<number, string>();
+
     if (departmentIds.length > 0) {
       const departments = await prisma.department.findMany({
         where: { odoo_id: { in: departmentIds } },
         select: { odoo_id: true, short_name: true },
       });
+
       departments.forEach((dept) => {
         if (dept.odoo_id) deptMap.set(dept.odoo_id, dept.short_name);
       });
@@ -367,6 +442,7 @@ export const getInboundsPaginated = asyncHandler(
       const deptId = inbound.department_id
         ? parseInt(inbound.department_id, 10)
         : NaN;
+
       const shortName = !isNaN(deptId) ? deptMap.get(deptId) : undefined;
 
       return {
@@ -417,12 +493,12 @@ export const getInboundsPaginated = asyncHandler(
         limit,
         total,
         totalPages: Math.ceil(total / limit),
-
-        // ✅ กลับมาแล้ว
         statusCounts: {
           pending: pendingCount,
           completed: completedCount,
         },
+        department:
+          selectedDepartments.length > 0 ? selectedDepartments.join(",") : null,
       },
     });
   },

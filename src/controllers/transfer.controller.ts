@@ -437,6 +437,35 @@ function buildTransferDocSearchWhere(
   };
 }
 
+const buildTransferDocSearchWhereByTerms = (
+  search: string,
+  selectedColumns: ReturnType<typeof parseTransferDocSearchColumns>,
+): Prisma.transfer_docWhereInput => {
+  const terms = search
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  const searchTerms = terms.length > 0 ? terms : [search];
+
+  if (!search || searchTerms.length === 0) return {};
+
+  return {
+    OR: searchTerms.map((term) =>
+      buildTransferDocSearchWhere(term, selectedColumns),
+    ),
+  };
+};
+
+const parseDepartmentNames = (value: unknown): string[] => {
+  if (typeof value !== "string") return [];
+
+  return value
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+};
+
 /**
  * =========================
  * GET transfer_docs (PAGINATED)
@@ -474,60 +503,113 @@ export const getTransferDocsPaginated = asyncHandler(
       throw badRequest("status ต้องเป็น pending, process หรือ completed");
     }
 
+    const selectedDepartments = parseDepartmentNames(req.query.department);
+
+    let selectedDepartmentWhere: Prisma.transfer_docWhereInput = {};
+
+    if (selectedDepartments.length > 0) {
+      const deptRows = await prisma.department.findMany({
+        where: {
+          OR: [
+            {
+              short_name: {
+                in: selectedDepartments,
+                mode: "insensitive",
+              },
+            },
+            {
+              full_name: {
+                in: selectedDepartments,
+                mode: "insensitive",
+              },
+            },
+          ],
+        },
+        select: {
+          odoo_id: true,
+          short_name: true,
+          full_name: true,
+        },
+      });
+
+      const selectedDeptIds = deptRows
+        .map((d) => d.odoo_id)
+        .filter((id): id is number => typeof id === "number")
+        .map((id) => String(id));
+
+      selectedDepartmentWhere = {
+        OR: [
+          {
+            department: {
+              in: selectedDepartments,
+              mode: "insensitive",
+            },
+          },
+          ...(selectedDeptIds.length > 0
+            ? [
+                {
+                  department_id: {
+                    in: selectedDeptIds,
+                  },
+                },
+              ]
+            : []),
+        ],
+      };
+    }
+
     const selectedColumns = parseTransferDocSearchColumns(req.query.columns);
 
-    const searchWhere = buildTransferDocSearchWhere(search, selectedColumns);
+    const searchWhere = buildTransferDocSearchWhereByTerms(
+      search,
+      selectedColumns,
+    );
+
     const departmentWhere = buildDepartmentAccessWhere(req);
 
-    // ✅ where สำหรับ list มี status filter
     const where: Prisma.transfer_docWhereInput = {
       AND: [
         searchWhere,
         departmentWhere,
+        selectedDepartmentWhere,
         ...(status ? [{ status }] : []),
       ],
     };
 
-    // ✅ where สำหรับ statusCounts ไม่มี status filter
     const whereForCount: Prisma.transfer_docWhereInput = {
-      AND: [searchWhere, departmentWhere],
+      AND: [searchWhere, departmentWhere, selectedDepartmentWhere],
     };
 
-    const [
-      docs,
-      total,
-      pendingCount,
-      processCount,
-      completedCount,
-    ] = await Promise.all([
-      prisma.transfer_doc.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy: { created_at: "desc" },
-        include: { transfer_doc_items: true },
-      }),
+    const [docs, total, pendingCount, processCount, completedCount] =
+      await Promise.all([
+        prisma.transfer_doc.findMany({
+          where,
+          skip,
+          take: limit,
+          orderBy: { created_at: "desc" },
+          include: { transfer_doc_items: true },
+        }),
 
-      prisma.transfer_doc.count({ where }),
+        prisma.transfer_doc.count({ where }),
 
-      prisma.transfer_doc.count({
-        where: {
-          AND: [whereForCount, { status: "pending" }],
-        },
-      }),
+        prisma.transfer_doc.count({
+          where: {
+            AND: [whereForCount, { status: "pending" }],
+          },
+        }),
 
-      prisma.transfer_doc.count({
-        where: {
-          AND: [whereForCount, { status: "process" }],
-        },
-      }),
+        prisma.transfer_doc.count({
+          where: {
+            AND: [whereForCount, { status: "process" }],
+          },
+        }),
 
-      prisma.transfer_doc.count({
-        where: {
-          AND: [whereForCount, { status: "completed" }],
-        },
-      }),
-    ]);
+        prisma.transfer_doc.count({
+          where: {
+            AND: [whereForCount, { status: "completed" }],
+          },
+        }),
+      ]);
 
     const departmentIds = Array.from(
       new Set(
@@ -638,6 +720,8 @@ export const getTransferDocsPaginated = asyncHandler(
           process: processCount,
           completed: completedCount,
         },
+        department:
+          selectedDepartments.length > 0 ? selectedDepartments.join(",") : null,
       },
     });
   },

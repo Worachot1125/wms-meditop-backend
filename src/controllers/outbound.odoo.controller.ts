@@ -38,7 +38,7 @@ import {
   normalizeLotSerialForMatch,
   sameLotSerialForMatch,
 } from "../utils/outbound/outbound.parse";
-
+5;
 import type {
   BorSerInternalLine,
   TFLine,
@@ -1679,6 +1679,94 @@ export const getSpecialOutboundById = asyncHandler(
   },
 );
 
+const buildOdooOutboundAvailableSearchWhere = async (
+  search: string,
+): Promise<Prisma.outboundWhereInput> => {
+  const terms = search
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  const searchTerms = terms.length > 0 ? terms : [search];
+
+  if (!search || searchTerms.length === 0) return {};
+
+  const orConditions: Prisma.outboundWhereInput[] = [];
+
+  for (const term of searchTerms) {
+    const deptIdsFromShortName: string[] = [];
+
+    const deptRows = await prisma.department.findMany({
+      where: {
+        short_name: { contains: term, mode: "insensitive" },
+      },
+      select: { odoo_id: true },
+      take: 200,
+    });
+
+    for (const d of deptRows) {
+      if (d.odoo_id != null && Number.isFinite(Number(d.odoo_id))) {
+        deptIdsFromShortName.push(String(d.odoo_id));
+      }
+    }
+
+    const dateRange = parseSearchDateRange(term);
+
+    orConditions.push(
+      { no: { contains: term, mode: "insensitive" } },
+      { department: { contains: term, mode: "insensitive" } },
+      { reference: { contains: term, mode: "insensitive" } },
+      { origin: { contains: term, mode: "insensitive" } },
+      { invoice: { contains: term, mode: "insensitive" } },
+      {
+        goods_outs: {
+          some: {
+            deleted_at: null,
+            OR: [
+              { code: { contains: term, mode: "insensitive" } },
+              { name: { contains: term, mode: "insensitive" } },
+              { sku: { contains: term, mode: "insensitive" } },
+            ],
+          },
+        },
+      },
+    );
+
+    if (deptIdsFromShortName.length > 0) {
+      orConditions.push({
+        department_id: { in: deptIdsFromShortName },
+      });
+    }
+
+    if (dateRange) {
+      orConditions.push(
+        {
+          date: {
+            gte: dateRange.gte,
+            lt: dateRange.lt,
+          },
+        },
+        {
+          created_at: {
+            gte: dateRange.gte,
+            lt: dateRange.lt,
+          },
+        },
+        {
+          updated_at: {
+            gte: dateRange.gte,
+            lt: dateRange.lt,
+          },
+        },
+      );
+    }
+  }
+
+  return {
+    OR: orConditions,
+  };
+};
+
 export const getOdooOutboundsAvailable = asyncHandler(
   async (req: AuthRequest, res: Response) => {
     const page = Number(req.query.page) || 1;
@@ -1784,73 +1872,8 @@ export const getOdooOutboundsAvailable = asyncHandler(
     let where: Prisma.outboundWhereInput = baseWhere;
 
     if (search) {
-      const deptIdsFromShortName: string[] = [];
-
-      const deptRows = await prisma.department.findMany({
-        where: {
-          short_name: { contains: search, mode: "insensitive" },
-        },
-        select: { odoo_id: true },
-        take: 200,
-      });
-
-      for (const d of deptRows) {
-        if (d.odoo_id != null && Number.isFinite(Number(d.odoo_id))) {
-          deptIdsFromShortName.push(String(d.odoo_id));
-        }
-      }
-
-      const dateRange = parseSearchDateRange(search);
-
-      const searchCondition: Prisma.outboundWhereInput = {
-        OR: [
-          { no: { contains: search, mode: "insensitive" } },
-          { department: { contains: search, mode: "insensitive" } },
-          { reference: { contains: search, mode: "insensitive" } },
-          { origin: { contains: search, mode: "insensitive" } },
-          { invoice: { contains: search, mode: "insensitive" } },
-
-          ...(deptIdsFromShortName.length > 0
-            ? [{ department_id: { in: deptIdsFromShortName } }]
-            : []),
-
-          ...(dateRange
-            ? [
-                {
-                  date: {
-                    gte: dateRange.gte,
-                    lt: dateRange.lt,
-                  },
-                },
-                {
-                  created_at: {
-                    gte: dateRange.gte,
-                    lt: dateRange.lt,
-                  },
-                },
-                {
-                  updated_at: {
-                    gte: dateRange.gte,
-                    lt: dateRange.lt,
-                  },
-                },
-              ]
-            : []),
-
-          {
-            goods_outs: {
-              some: {
-                deleted_at: null,
-                OR: [
-                  { code: { contains: search, mode: "insensitive" } },
-                  { name: { contains: search, mode: "insensitive" } },
-                  { sku: { contains: search, mode: "insensitive" } },
-                ],
-              },
-            },
-          },
-        ],
-      };
+      const searchCondition =
+        await buildOdooOutboundAvailableSearchWhere(search);
 
       where = {
         AND: [baseWhere, searchCondition],

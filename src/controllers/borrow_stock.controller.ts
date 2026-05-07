@@ -63,9 +63,6 @@ function pickIntIdParam(req: Request, key: string) {
   return n;
 }
 
-
-
-
 function dateKeyUTC(d: Date | null | undefined) {
   if (!d) return null;
   return d.toISOString().slice(0, 10);
@@ -105,7 +102,8 @@ async function resolveBarcodeTextLotExpFromPayload(payload: string) {
   const expDate = parseYYMMDDToDateUTC(expPart);
 
   const front = text.slice(0, -6);
-  if (!front) throw badRequest(`payload ไม่ถูกต้อง (ไม่มี barcode ก่อน exp): ${text}`);
+  if (!front)
+    throw badRequest(`payload ไม่ถูกต้อง (ไม่มี barcode ก่อน exp): ${text}`);
 
   // ใช้ master barcode หา prefix ที่ยาวที่สุด
   const masters = await prisma.barcode.findMany({
@@ -157,9 +155,12 @@ function parseDepartmentIds(input: unknown): number[] {
 }
 
 function parseBooleanTrue(input: unknown): boolean {
-  return String(input ?? "").trim().toLowerCase() === "true";
+  return (
+    String(input ?? "")
+      .trim()
+      .toLowerCase() === "true"
+  );
 }
-
 
 function parseDepartmentIdsAsNumbers(input: unknown): number[] {
   if (Array.isArray(input)) {
@@ -303,7 +304,9 @@ function buildUserRefFromAuth(req: Request) {
   const ref = [first, last].filter(Boolean).join(" ").trim();
 
   if (!ref) {
-    throw badRequest("user_ref ว่าง (กรุณาตั้ง first_name/last_name ให้ผู้ใช้งาน)");
+    throw badRequest(
+      "user_ref ว่าง (กรุณาตั้ง first_name/last_name ให้ผู้ใช้งาน)",
+    );
   }
 
   return ref;
@@ -338,9 +341,15 @@ async function resolveBorrowStockAllowedLocation(location_full_name: string) {
     throw badRequest(`ไม่พบ location full_name: ${location_full_name}`);
   }
 
-  const buildingName = String(loc.building?.short_name ?? "").trim().toUpperCase();
-  const zoneName = String(loc.zone?.short_name ?? "").trim().toUpperCase();
-  const lockNo = String(loc.lock_no ?? "").trim().toUpperCase();
+  const buildingName = String(loc.building?.short_name ?? "")
+    .trim()
+    .toUpperCase();
+  const zoneName = String(loc.zone?.short_name ?? "")
+    .trim()
+    .toUpperCase();
+  const lockNo = String(loc.lock_no ?? "")
+    .trim()
+    .toUpperCase();
 
   const allowedBuilding = buildingName === "BOR/BOS";
   const allowedZone = zoneName === "F01";
@@ -396,7 +405,9 @@ export const scanBorrowStockBarcodePreview = asyncHandler(
     const loc = await resolveBorrowStockAllowedLocation(location_full_name);
     const parsed = await resolveBarcodeScan(req.body.barcode);
 
-    const parsedLockNo = String(loc.lock_no ?? "").trim().toUpperCase();
+    const parsedLockNo = String(loc.lock_no ?? "")
+      .trim()
+      .toUpperCase();
 
     if (!["BOR", "BOS", "SER"].includes(parsedLockNo)) {
       throw badRequest(
@@ -449,7 +460,9 @@ export const scanBorrowStockBarcodePreview = asyncHandler(
     }
 
     if (!gi.code) {
-      throw badRequest("goods_in.code เป็น null (ไม่สามารถสร้าง borrow item ได้)");
+      throw badRequest(
+        "goods_in.code เป็น null (ไม่สามารถสร้าง borrow item ได้)",
+      );
     }
 
     const giLot = normalizeLot(gi.lot_serial);
@@ -651,7 +664,9 @@ export const startBorrowStock = asyncHandler(
     const all_departments =
       typeof req.body.all_departments === "boolean"
         ? req.body.all_departments
-        : String(req.body.all_departments ?? "").trim().toLowerCase() === "true";
+        : String(req.body.all_departments ?? "")
+            .trim()
+            .toLowerCase() === "true";
 
     const department_ids = parseDepartmentIds(req.body.department_ids);
 
@@ -701,7 +716,9 @@ export const startBorrowStock = asyncHandler(
         it.executed_qty == null ? 0 : Math.floor(Number(it.executed_qty));
       const isOutsideLocation =
         it.is_outside_location === true ||
-        String(it.is_outside_location ?? "").trim().toLowerCase() === "true";
+        String(it.is_outside_location ?? "")
+          .trim()
+          .toLowerCase() === "true";
 
       console.log("[startBorrowStock][item]", {
         index,
@@ -721,7 +738,9 @@ export const startBorrowStock = asyncHandler(
       }
 
       if (!Number.isFinite(executedQty) || executedQty < 0) {
-        throw badRequest(`items[${index}] executed_qty ไม่ถูกต้อง (SKU ${code})`);
+        throw badRequest(
+          `items[${index}] executed_qty ไม่ถูกต้อง (SKU ${code})`,
+        );
       }
 
       if (!isOutsideLocation && executedQty > systemQty) {
@@ -1024,7 +1043,8 @@ export const scanBorrowStockBarcode = asyncHandler(
 
     const system_qty = toIntSystemQty(stock.quantity);
 
-    const matchCode = stock.product_code ?? gi.code ?? parsed.barcode_text ?? "-";
+    const matchCode =
+      stock.product_code ?? gi.code ?? parsed.barcode_text ?? "-";
     const matchName = stock.product_name ?? gi.name ?? null;
     const matchLot = stock.lot_name ?? giLot ?? "-";
     const matchExp = stock.expiration_date ?? null;
@@ -1268,6 +1288,44 @@ export const getBorrowStocks = asyncHandler(
   },
 );
 
+const buildBorrowStockSearchWhereByTerms = (
+  search: string,
+  selectedColumns: string[],
+): Prisma.borrow_stockWhereInput => {
+  const terms = search
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  const searchTerms = terms.length > 0 ? terms : [search];
+
+  if (searchTerms.length === 0) return {};
+
+  const orConditions: Prisma.borrow_stockWhereInput[] = [];
+
+  for (const term of searchTerms) {
+    const condition = buildBorrowStockSearchWhere(term, selectedColumns);
+
+    if (Object.keys(condition).length > 0) {
+      orConditions.push(condition);
+    }
+  }
+
+  if (orConditions.length === 0) return {};
+
+  return {
+    OR: orConditions,
+  };
+};
+
+const parseDepartmentNames = (value: unknown): string[] => {
+  if (typeof value !== "string") return [];
+
+  return value
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+};
 
 export const getBorrowStocksPaginated = asyncHandler(
   async (req: AuthRequest, res: Response) => {
@@ -1302,7 +1360,10 @@ export const getBorrowStocksPaginated = asyncHandler(
       throw badRequest("status ต้องเป็น pending หรือ completed");
     }
 
-    const searchWhere = buildBorrowStockSearchWhere(search, selectedColumns);
+    const searchWhere = buildBorrowStockSearchWhereByTerms(
+      search,
+      selectedColumns,
+    );
 
     const user = req.user;
     if (!user) {
@@ -1312,6 +1373,43 @@ export const getBorrowStocksPaginated = asyncHandler(
     const requestedLocalDepartmentIds = parseDepartmentIdsAsNumbers(
       req.query.department_ids ?? req.query.department_id,
     );
+
+    const requestedDepartmentNames = parseDepartmentNames(req.query.department);
+
+    let requestedDepartmentIdsByName: number[] = [];
+
+    if (requestedDepartmentNames.length > 0) {
+      const departmentRows = await prisma.department.findMany({
+        where: {
+          OR: [
+            {
+              short_name: {
+                in: requestedDepartmentNames,
+                mode: "insensitive",
+              },
+            },
+            {
+              full_name: {
+                in: requestedDepartmentNames,
+                mode: "insensitive",
+              },
+            },
+          ],
+        },
+        select: {
+          id: true,
+        },
+      });
+
+      requestedDepartmentIdsByName = departmentRows.map((d) => d.id);
+    }
+
+    const requestedDepartmentIds = [
+      ...new Set([
+        ...requestedLocalDepartmentIds,
+        ...requestedDepartmentIdsByName,
+      ]),
+    ];
 
     let finalDepartmentWhere: Prisma.borrow_stockWhereInput = {};
 
@@ -1329,18 +1427,23 @@ export const getBorrowStocksPaginated = asyncHandler(
         .map((r) => r.department_id)
         .filter((v): v is number => v !== null && v !== undefined);
 
-      if (requestedLocalDepartmentIds.length > 0) {
-        const selectedLocalIds = requestedLocalDepartmentIds.filter((id) =>
+      if (requestedDepartmentIds.length > 0) {
+        const selectedLocalIds = requestedDepartmentIds.filter((id) =>
           allowedLocalDepartmentIds.includes(id),
         );
 
-        finalDepartmentWhere = {
-          borrowStockDepartments: {
-            some: {
-              department_id: { in: selectedLocalIds },
-            },
-          },
-        };
+        finalDepartmentWhere =
+          selectedLocalIds.length > 0
+            ? {
+                borrowStockDepartments: {
+                  some: {
+                    department_id: { in: selectedLocalIds },
+                  },
+                },
+              }
+            : {
+                id: -1,
+              };
       } else {
         finalDepartmentWhere = {
           borrowStockDepartments: {
@@ -1351,11 +1454,11 @@ export const getBorrowStocksPaginated = asyncHandler(
         };
       }
     } else {
-      if (requestedLocalDepartmentIds.length > 0) {
+      if (requestedDepartmentIds.length > 0) {
         finalDepartmentWhere = {
           borrowStockDepartments: {
             some: {
-              department_id: { in: requestedLocalDepartmentIds },
+              department_id: { in: requestedDepartmentIds },
             },
           },
         };
@@ -1441,6 +1544,10 @@ export const getBorrowStocksPaginated = asyncHandler(
           pending: pendingCount,
           completed: completedCount,
         },
+        department:
+          requestedDepartmentNames.length > 0
+            ? requestedDepartmentNames.join(",")
+            : null,
       },
     });
   },
@@ -1599,7 +1706,6 @@ export const deleteBorrowStock = asyncHandler(
   },
 );
 
-
 // ================================
 // GET ALL bor_stocks
 // ================================
@@ -1668,10 +1774,7 @@ export const getBorStocksPaginated = asyncHandler(
         where,
         skip,
         take: limit,
-        orderBy: [
-          { snapshot_date: "desc" },
-          { id: "desc" },
-        ],
+        orderBy: [{ snapshot_date: "desc" }, { id: "desc" }],
       }),
       prisma.bor_stock.count({ where }),
     ]);
@@ -1918,10 +2021,7 @@ type ConfirmBorrowStocksBulkBody = {
 };
 
 export const confirmBorrowStocksBulk = asyncHandler(
-  async (
-    req: Request<{}, {}, ConfirmBorrowStocksBulkBody>,
-    res: Response,
-  ) => {
+  async (req: Request<{}, {}, ConfirmBorrowStocksBulkBody>, res: Response) => {
     const idsRaw = Array.isArray(req.body?.ids) ? req.body.ids : [];
 
     const ids: number[] = Array.from(

@@ -130,6 +130,60 @@ export const getSwapByNo = asyncHandler(
   },
 );
 
+const parseDepartmentNames = (value: unknown): string[] => {
+  if (typeof value !== "string") return [];
+
+  return value
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+};
+
+const buildSwapSearchWhereByTerms = (
+  search: string,
+): Prisma.swapWhereInput => {
+  const terms = search
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  const searchTerms = terms.length > 0 ? terms : [search];
+
+  if (!search || searchTerms.length === 0) return {};
+
+  const orConditions: Prisma.swapWhereInput[] = [];
+
+  for (const term of searchTerms) {
+    orConditions.push(
+      { no: { contains: term, mode: "insensitive" } },
+      { name: { contains: term, mode: "insensitive" } },
+      { location_name: { contains: term, mode: "insensitive" } },
+      { location_dest_name: { contains: term, mode: "insensitive" } },
+      { source_location: { contains: term, mode: "insensitive" } },
+      { dest_location: { contains: term, mode: "insensitive" } },
+      { status: { contains: term, mode: "insensitive" } },
+      { origin: { contains: term, mode: "insensitive" } },
+      { reference: { contains: term, mode: "insensitive" } },
+      {
+        swapItems: {
+          some: {
+            deleted_at: null,
+            OR: [
+              { code: { contains: term, mode: "insensitive" } },
+              { name: { contains: term, mode: "insensitive" } },
+              { lot_serial: { contains: term, mode: "insensitive" } },
+            ],
+          },
+        },
+      },
+    );
+  }
+
+  return {
+    OR: orConditions,
+  };
+};
+
 export const getSwapsPaginated = asyncHandler(
   async (req: AuthRequest, res: Response) => {
     const page = Number(req.query.page) || 1;
@@ -147,28 +201,64 @@ export const getSwapsPaginated = asyncHandler(
     const search =
       typeof req.query.search === "string" ? req.query.search.trim() : "";
 
+    const selectedDepartments = parseDepartmentNames(req.query.department);
+
+    let selectedDepartmentWhere: Prisma.swapWhereInput = {};
+
+    if (selectedDepartments.length > 0) {
+      const deptRows = await prisma.department.findMany({
+        where: {
+          deleted_at: null,
+          OR: [
+            {
+              short_name: {
+                in: selectedDepartments,
+                mode: "insensitive",
+              },
+            },
+            {
+              full_name: {
+                in: selectedDepartments,
+                mode: "insensitive",
+              },
+            },
+          ],
+        },
+        select: {
+          odoo_id: true,
+          short_name: true,
+          full_name: true,
+        },
+      });
+
+      const selectedDeptOdooIds = deptRows
+        .map((d) => d.odoo_id)
+        .filter((id): id is number => typeof id === "number");
+
+      selectedDepartmentWhere =
+        selectedDeptOdooIds.length > 0
+          ? {
+              department_id: {
+                in: selectedDeptOdooIds,
+              },
+            }
+          : {
+              id: -1,
+            };
+    }
+
     const skip = (page - 1) * limit;
 
     const departmentWhere = buildLocalDepartmentAccessWhere(req);
+    const searchWhere = search ? buildSwapSearchWhereByTerms(search) : {};
 
     const where: Prisma.swapWhereInput = {
-      deleted_at: null,
-      ...departmentWhere,
-      ...(search
-        ? {
-            OR: [
-              { no: { contains: search, mode: "insensitive" } },
-              { name: { contains: search, mode: "insensitive" } },
-              { location_name: { contains: search, mode: "insensitive" } },
-              { location_dest_name: { contains: search, mode: "insensitive" } },
-              { source_location: { contains: search, mode: "insensitive" } },
-              { dest_location: { contains: search, mode: "insensitive" } },
-              { status: { contains: search, mode: "insensitive" } },
-              { origin: { contains: search, mode: "insensitive" } },
-              { reference: { contains: search, mode: "insensitive" } },
-            ],
-          }
-        : {}),
+      AND: [
+        { deleted_at: null },
+        departmentWhere,
+        selectedDepartmentWhere,
+        searchWhere,
+      ],
     };
 
     const [rows, total] = await Promise.all([
@@ -184,10 +274,10 @@ export const getSwapsPaginated = asyncHandler(
         skip,
         take: limit,
       }),
+
       prisma.swap.count({ where }),
     ]);
 
-    // swap.department_id = Odoo Department ID
     const deptOdooIds = Array.from(
       new Set(
         rows
@@ -243,6 +333,8 @@ export const getSwapsPaginated = asyncHandler(
         limit,
         total,
         totalPages: Math.ceil(total / limit),
+        department:
+          selectedDepartments.length > 0 ? selectedDepartments.join(",") : null,
       },
     });
   },

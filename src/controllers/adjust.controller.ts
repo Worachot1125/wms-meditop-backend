@@ -2195,6 +2195,57 @@ function resolveReportTypeFromNo(
   return fallback ?? "";
 }
 
+const parseDepartmentNames = (value: unknown): string[] => {
+  if (typeof value !== "string") return [];
+
+  return value
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+};
+
+const buildCombinedAdjustmentSearchWhere = (
+  search: string,
+  selectedAdjustmentColumns: string[],
+  selectedOutboundColumns: string[],
+) => {
+  const terms = search
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  const searchTerms = terms.length > 0 ? terms : [search];
+
+  const adjustmentOr: any[] = [];
+  const outboundOr: any[] = [];
+
+  for (const term of searchTerms) {
+    adjustmentOr.push(
+      buildAdjustmentSearchWhere(term, selectedAdjustmentColumns),
+    );
+
+    outboundOr.push(
+      buildSpecialOutboundSearchWhere(term, selectedOutboundColumns),
+    );
+  }
+
+  return {
+    adjustmentWhere:
+      adjustmentOr.length > 0
+        ? {
+            OR: adjustmentOr,
+          }
+        : {},
+
+    outboundWhere:
+      outboundOr.length > 0
+        ? {
+            OR: outboundOr,
+          }
+        : {},
+  };
+};
+
 /**
  * GET /api/Adjust
  */
@@ -2226,9 +2277,7 @@ export const listCombinedAdjustments = asyncHandler(
       throw badRequest("status ต้องเป็น pending หรือ completed");
     }
 
-    const mode = String(req.query.level ?? "")
-      .trim()
-      .toLowerCase();
+    const mode = String(req.query.level ?? "").trim().toLowerCase();
 
     const allowedModes = ["manual", "auto"] as const;
 
@@ -2236,26 +2285,116 @@ export const listCombinedAdjustments = asyncHandler(
       throw badRequest("level ต้องเป็น manual หรือ auto");
     }
 
+    const selectedDepartments = parseDepartmentNames(req.query.department);
+
+    let selectedDepartmentWhereAdjust: Prisma.adjustmentWhereInput = {};
+    let selectedDepartmentWhereOutbound: Prisma.outboundWhereInput = {};
+
+    if (selectedDepartments.length > 0) {
+      const deptRows = await prisma.department.findMany({
+        where: {
+          OR: [
+            {
+              short_name: {
+                in: selectedDepartments,
+                mode: "insensitive",
+              },
+            },
+            {
+              full_name: {
+                in: selectedDepartments,
+                mode: "insensitive",
+              },
+            },
+          ],
+        },
+        select: {
+          odoo_id: true,
+          short_name: true,
+          full_name: true,
+        },
+      });
+
+      const selectedDeptIds = deptRows
+        .map((d) => d.odoo_id)
+        .filter((id): id is number => typeof id === "number")
+        .map((id) => String(id));
+
+      selectedDepartmentWhereAdjust = {
+        OR: [
+          {
+            department: {
+              in: selectedDepartments,
+              mode: "insensitive",
+            },
+          },
+          ...(selectedDeptIds.length > 0
+            ? [
+                {
+                  department_id: {
+                    in: selectedDeptIds,
+                  },
+                },
+              ]
+            : []),
+        ],
+      };
+
+      selectedDepartmentWhereOutbound = {
+        OR: [
+          {
+            department: {
+              in: selectedDepartments,
+              mode: "insensitive",
+            },
+          },
+          ...(selectedDeptIds.length > 0
+            ? [
+                {
+                  department_id: {
+                    in: selectedDeptIds,
+                  },
+                },
+              ]
+            : []),
+        ],
+      };
+    }
+
     const selectedAdjustmentColumns = parseAdjustmentSearchColumns(
       req.query.columns,
     );
+
     const selectedOutboundColumns = parseSpecialOutboundSearchColumns(
       req.query.columns,
     );
 
-    const adjustmentWhere: any = buildAdjustmentSearchWhere(
-      search,
-      selectedAdjustmentColumns,
-    );
+    const { adjustmentWhere, outboundWhere } =
+      buildCombinedAdjustmentSearchWhere(
+        search,
+        selectedAdjustmentColumns,
+        selectedOutboundColumns,
+      );
 
-    const outboundWhere = buildSpecialOutboundSearchWhere(
-      search,
-      selectedOutboundColumns,
-    );
+    const finalAdjustmentWhere: Prisma.adjustmentWhereInput = {
+      AND: [
+        adjustmentWhere,
+        selectedDepartmentWhereAdjust,
+        { deleted_at: null },
+      ],
+    };
+
+    const finalOutboundWhere: Prisma.outboundWhereInput = {
+      AND: [
+        outboundWhere,
+        selectedDepartmentWhereOutbound,
+        { deleted_at: null },
+      ],
+    };
 
     const [adjustmentRows, outboundRows] = await Promise.all([
       prisma.adjustment.findMany({
-        where: adjustmentWhere,
+        where: finalAdjustmentWhere,
         orderBy: [{ date: "desc" }, { id: "desc" }],
         include: {
           items: {
@@ -2267,7 +2406,7 @@ export const listCombinedAdjustments = asyncHandler(
       }),
 
       prisma.outbound.findMany({
-        where: outboundWhere,
+        where: finalOutboundWhere,
         include: {
           goods_outs: {
             where: { deleted_at: null },
@@ -2310,13 +2449,8 @@ export const listCombinedAdjustments = asyncHandler(
           department,
           location,
           source: "adjust",
-
-          // ใช้ตัวนี้แยก manual / auto
           mode: adjustmentMode,
-
-          // ส่ง level เดิมไว้ด้วย เผื่อ FE ยังใช้แสดง post-process / in-process
           adjustment_level: r.level ?? null,
-
           is_system_generated: isSystemGenerated,
           status: String(r.status ?? "").toLowerCase(),
           type: r.type ?? null,
@@ -2410,13 +2544,10 @@ export const listCombinedAdjustments = asyncHandler(
         return {
           ...formatted,
           source: "outbound",
-
-          // outbound ถือเป็น auto และ completed เสมอใน report นี้
           mode: "auto",
           is_system_generated: true,
           status: "completed",
           in_process: outbound.in_process,
-
           type: resolvedType,
           out_type: resolvedType,
           date: formatted.date ?? formatted.created_at ?? outbound.created_at,
@@ -2506,6 +2637,8 @@ export const listCombinedAdjustments = asyncHandler(
         total,
         totalPages,
         statusCounts,
+        department:
+          selectedDepartments.length > 0 ? selectedDepartments.join(",") : null,
       },
     });
   },

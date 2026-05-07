@@ -747,6 +747,121 @@ export const getTransferMovements = asyncHandler(
   },
 );
 
+const buildTransferMovementSearchCondition = (
+  search: string,
+): Prisma.transfer_movementWhereInput => {
+  const terms = search
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  const searchTerms = terms.length > 0 ? terms : [search];
+
+  const orConditions: Prisma.transfer_movementWhereInput[] = [];
+
+  for (const term of searchTerms) {
+    orConditions.push(
+      { no: { contains: term, mode: "insensitive" } },
+      { status: { contains: term, mode: "insensitive" } },
+
+      { user: { first_name: { contains: term, mode: "insensitive" } } },
+      { user: { last_name: { contains: term, mode: "insensitive" } } },
+      { user: { tel: { contains: term, mode: "insensitive" } } },
+      { user: { user_level: { contains: term, mode: "insensitive" } } },
+
+      { department: { full_name: { contains: term, mode: "insensitive" } } },
+      { department: { short_name: { contains: term, mode: "insensitive" } } },
+
+      {
+        movement_departments: {
+          some: {
+            department: {
+              OR: [
+                { full_name: { contains: term, mode: "insensitive" } },
+                { short_name: { contains: term, mode: "insensitive" } },
+              ],
+            },
+          },
+        },
+      },
+
+      {
+        movement_user_works: {
+          some: {
+            user: {
+              OR: [
+                { first_name: { contains: term, mode: "insensitive" } },
+                { last_name: { contains: term, mode: "insensitive" } },
+                { tel: { contains: term, mode: "insensitive" } },
+                { user_level: { contains: term, mode: "insensitive" } },
+              ],
+            },
+          },
+        },
+      },
+
+      {
+        items: {
+          some: {
+            OR: [
+              { code: { contains: term, mode: "insensitive" } },
+              { name: { contains: term, mode: "insensitive" } },
+              { lot_serial: { contains: term, mode: "insensitive" } },
+              { lock_no: { contains: term, mode: "insensitive" } },
+              { lock_no_dest: { contains: term, mode: "insensitive" } },
+            ],
+          },
+        },
+      },
+
+      {
+        items: {
+          some: {
+            transferMovementItemLocationPutConfirms: {
+              some: {
+                location: {
+                  full_name: {
+                    contains: term,
+                    mode: "insensitive",
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    );
+  }
+
+  return { OR: orConditions };
+};
+
+const parseDepartmentNames = (value: unknown): string[] => {
+  if (typeof value !== "string") return [];
+
+  return value
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+};
+
+const getRowDepartments = (row: any): string[] => {
+  if (Array.isArray(row?.departments)) {
+    return row.departments
+      .map((d: any) => String(d?.short_name ?? d?.full_name ?? "").trim())
+      .filter(Boolean);
+  }
+
+  const singleDept = String(
+    row?.department?.short_name ??
+      row?.department?.full_name ??
+      row?.department ??
+      "",
+  ).trim();
+
+  return singleDept ? [singleDept] : [];
+};
+
 export const getTransferMovementsPaginated = asyncHandler(
   async (req: AuthRequest, res: Response) => {
     const page = Number(req.query.page) || 1;
@@ -760,8 +875,6 @@ export const getTransferMovementsPaginated = asyncHandler(
     if (Number.isNaN(limit) || limit < 1) {
       throw badRequest("limit ต้องเป็นตัวเลขบวกที่มีค่ามากกว่า 0");
     }
-
-    const skip = (page - 1) * limit;
 
     const rawSearch = req.query.search;
     const search = typeof rawSearch === "string" ? rawSearch.trim() : "";
@@ -779,198 +892,119 @@ export const getTransferMovementsPaginated = asyncHandler(
       throw badRequest("status ต้องเป็น pick, put หรือ completed");
     }
 
+    const selectedDepartments = parseDepartmentNames(req.query.department);
+
     const visibilityWhere = buildTransferMovementVisibilityWhere(req);
     const departmentWhere = buildTransferMovementDepartmentAccessWhere(req);
 
-    const baseWhere: Prisma.transfer_movementWhereInput = {
-      AND: [visibilityWhere, departmentWhere],
+    const searchCondition = search
+      ? buildTransferMovementSearchCondition(search)
+      : {};
+
+    const whereBase: Prisma.transfer_movementWhereInput = {
+      AND: [visibilityWhere, departmentWhere, searchCondition],
     };
 
-    let whereForCount: Prisma.transfer_movementWhereInput = baseWhere;
-    let where: Prisma.transfer_movementWhereInput = status
-      ? {
-          AND: [
-            visibilityWhere,
-            departmentWhere,
-            {
-              status,
-            },
-          ],
-        }
-      : baseWhere;
+    const whereWithStatus: Prisma.transfer_movementWhereInput = {
+      AND: [
+        visibilityWhere,
+        departmentWhere,
+        searchCondition,
+        ...(status ? [{ status }] : []),
+      ],
+    };
 
-    if (search) {
-      const searchCondition: Prisma.transfer_movementWhereInput = {
-        OR: [
-          { no: { contains: search, mode: "insensitive" } },
-          { status: { contains: search, mode: "insensitive" } },
+    const allRows = await prisma.transfer_movement.findMany({
+      where: whereWithStatus,
+      orderBy: { created_at: "desc" },
+      include: TM_INCLUDE_FULL,
+    });
 
-          {
-            user: { first_name: { contains: search, mode: "insensitive" } },
-          },
-          {
-            user: { last_name: { contains: search, mode: "insensitive" } },
-          },
-          { user: { tel: { contains: search, mode: "insensitive" } } },
-          {
-            user: { user_level: { contains: search, mode: "insensitive" } },
-          },
+    const allCountRows = await prisma.transfer_movement.findMany({
+      where: whereBase,
+      orderBy: { created_at: "desc" },
+      include: TM_INCLUDE_FULL,
+    });
 
-          {
-            department: {
-              full_name: { contains: search, mode: "insensitive" },
-            },
-          },
-          {
-            department: {
-              short_name: { contains: search, mode: "insensitive" },
-            },
-          },
+    const allItems = allRows.flatMap((r) => r.items ?? []);
+    const countItems = allCountRows.flatMap((r) => r.items ?? []);
 
-          {
-            movement_departments: {
-              some: {
-                department: {
-                  OR: [
-                    {
-                      full_name: { contains: search, mode: "insensitive" },
-                    },
-                    {
-                      short_name: { contains: search, mode: "insensitive" },
-                    },
-                  ],
-                },
-              },
-            },
-          },
-
-          {
-            movement_user_works: {
-              some: {
-                user: {
-                  OR: [
-                    {
-                      first_name: { contains: search, mode: "insensitive" },
-                    },
-                    {
-                      last_name: { contains: search, mode: "insensitive" },
-                    },
-                    { tel: { contains: search, mode: "insensitive" } },
-                    {
-                      user_level: { contains: search, mode: "insensitive" },
-                    },
-                  ],
-                },
-              },
-            },
-          },
-
-          {
-            items: {
-              some: {
-                OR: [
-                  { code: { contains: search, mode: "insensitive" } },
-                  { name: { contains: search, mode: "insensitive" } },
-                  { lot_serial: { contains: search, mode: "insensitive" } },
-                  { lock_no: { contains: search, mode: "insensitive" } },
-                  {
-                    lock_no_dest: { contains: search, mode: "insensitive" },
-                  },
-                ],
-              },
-            },
-          },
-
-          {
-            items: {
-              some: {
-                transferMovementItemLocationPutConfirms: {
-                  some: {
-                    location: {
-                      full_name: {
-                        contains: search,
-                        mode: "insensitive",
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        ],
-      };
-
-      whereForCount = {
-        AND: [visibilityWhere, departmentWhere, searchCondition],
-      };
-
-      where = {
-        AND: [
-          visibilityWhere,
-          departmentWhere,
-          searchCondition,
-          ...(status ? [{ status }] : []),
-        ],
-      };
-    }
-
-    const [rows, total, pickCount, putCount, completedCount] =
-      await Promise.all([
-        prisma.transfer_movement.findMany({
-          where,
-          skip,
-          take: limit,
-          orderBy: { created_at: "desc" },
-          include: TM_INCLUDE_FULL,
-        }),
-
-        prisma.transfer_movement.count({ where }),
-
-        prisma.transfer_movement.count({
-          where: {
-            AND: [whereForCount, { status: "pick" }],
-          },
-        }),
-
-        prisma.transfer_movement.count({
-          where: {
-            AND: [whereForCount, { status: "put" }],
-          },
-        }),
-
-        prisma.transfer_movement.count({
-          where: {
-            AND: [whereForCount, { status: "completed" }],
-          },
-        }),
-      ]);
-
-    const allItems = rows.flatMap((r) => r.items ?? []);
     const barcodePayload = await buildBarcodePayloadFromItems(allItems);
-    const userWorkMap = await buildUserWorkMapFromRows(rows);
+    const userWorkMap = await buildUserWorkMapFromRows(allRows);
     const inputNumberMap = await buildInputNumberMap(allItems);
 
-    return res.json({
-      data: rows.map((r) =>
-        formatTransferMovement(
-          r as any,
-          {
-            ...barcodePayload,
-            inputNumberMap,
-            userWorkMap,
-          } as any,
-        ),
+    const countBarcodePayload = await buildBarcodePayloadFromItems(countItems);
+    const countUserWorkMap = await buildUserWorkMapFromRows(allCountRows);
+    const countInputNumberMap = await buildInputNumberMap(countItems);
+
+    const formattedRows = allRows.map((r) =>
+      formatTransferMovement(
+        r as any,
+        {
+          ...barcodePayload,
+          inputNumberMap,
+          userWorkMap,
+        } as any,
       ),
+    );
+
+    const formattedCountRows = allCountRows.map((r) =>
+      formatTransferMovement(
+        r as any,
+        {
+          ...countBarcodePayload,
+          inputNumberMap: countInputNumberMap,
+          userWorkMap: countUserWorkMap,
+        } as any,
+      ),
+    );
+
+    const filterByDepartment = (rows: any[]) => {
+      if (selectedDepartments.length === 0) return rows;
+
+      return rows.filter((row) => {
+        const rowDepartments = getRowDepartments(row);
+
+        return rowDepartments.some((dept) =>
+          selectedDepartments.includes(dept),
+        );
+      });
+    };
+
+    const filteredRows = filterByDepartment(formattedRows);
+    const filteredCountRows = filterByDepartment(formattedCountRows);
+
+    const pickCount = filteredCountRows.filter(
+      (r: any) => String(r?.status ?? "").toLowerCase() === "pick",
+    ).length;
+
+    const putCount = filteredCountRows.filter(
+      (r: any) => String(r?.status ?? "").toLowerCase() === "put",
+    ).length;
+
+    const completedCount = filteredCountRows.filter(
+      (r: any) => String(r?.status ?? "").toLowerCase() === "completed",
+    ).length;
+
+    const total = filteredRows.length;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const start = (page - 1) * limit;
+    const data = filteredRows.slice(start, start + limit);
+
+    return res.json({
+      data,
       meta: {
         page,
         limit,
         total,
-        totalPages: Math.ceil(total / limit),
+        totalPages,
         statusCounts: {
           pick: pickCount,
           put: putCount,
           completed: completedCount,
         },
+        department:
+          selectedDepartments.length > 0 ? selectedDepartments.join(",") : null,
       },
     });
   },

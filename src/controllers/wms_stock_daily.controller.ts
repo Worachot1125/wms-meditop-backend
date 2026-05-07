@@ -1306,6 +1306,39 @@ function getGoodsInReturnQty(item: any): number {
   );
 }
 
+const parseDepartmentNames = (value: unknown): string[] => {
+  if (typeof value !== "string") return [];
+
+  return value
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+};
+
+const normalizeDept = (value: unknown) =>
+  String(value ?? "")
+    .trim()
+    .toLowerCase();
+
+const getReportRowDepartments = (row: any): string[] => {
+  const departments = Array.isArray(row?.document?.departments)
+    ? row.document.departments
+    : [];
+
+  if (departments.length > 0) {
+    return departments
+      .map((d: any) => normalizeDept(d?.short_name))
+      .filter(Boolean);
+  }
+
+  const fallback = row?.document?.department ?? row?.department ?? "";
+
+  return String(fallback)
+    .split(",")
+    .map((x) => normalizeDept(x))
+    .filter(Boolean);
+};
+
 export const getTransactionReportPaginated = asyncHandler(
   async (req: Request, res: Response) => {
     const page = Number(req.query.page) || 1;
@@ -1327,6 +1360,8 @@ export const getTransactionReportPaginated = asyncHandler(
       typeof req.query.type === "string"
         ? req.query.type.trim().toUpperCase()
         : "";
+
+    const selectedDepartments = parseDepartmentNames(req.query.department);
 
     const dateFrom =
       typeof req.query.date_from === "string" && req.query.date_from.trim()
@@ -2273,6 +2308,16 @@ export const getTransactionReportPaginated = asyncHandler(
       ...swapRows,
     ];
 
+    if (selectedDepartments.length > 0) {
+      const selectedDeptSet = new Set(selectedDepartments.map(normalizeDept));
+
+      rows = rows.filter((row) => {
+        const rowDepartments = getReportRowDepartments(row);
+
+        return rowDepartments.some((dept) => selectedDeptSet.has(dept));
+      });
+    }
+
     if (type) {
       rows = rows.filter(
         (row) => String(row.type ?? "").toUpperCase() === type,
@@ -2395,6 +2440,8 @@ export const getTransactionReportPaginated = asyncHandler(
         totalPages,
         sortBy,
         sortDir,
+        department:
+          selectedDepartments.length > 0 ? selectedDepartments.join(",") : null,
       },
     });
   },
