@@ -1679,6 +1679,15 @@ export const getSpecialOutboundById = asyncHandler(
   },
 );
 
+const parseDepartmentNames = (value: unknown): string[] => {
+  if (typeof value !== "string") return [];
+
+  return value
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+};
+
 const buildOdooOutboundAvailableSearchWhere = async (
   search: string,
 ): Promise<Prisma.outboundWhereInput> => {
@@ -1698,7 +1707,11 @@ const buildOdooOutboundAvailableSearchWhere = async (
 
     const deptRows = await prisma.department.findMany({
       where: {
-        short_name: { contains: term, mode: "insensitive" },
+        deleted_at: null,
+        OR: [
+          { short_name: { contains: term, mode: "insensitive" } },
+          { full_name: { contains: term, mode: "insensitive" } },
+        ],
       },
       select: { odoo_id: true },
       take: 200,
@@ -1762,9 +1775,7 @@ const buildOdooOutboundAvailableSearchWhere = async (
     }
   }
 
-  return {
-    OR: orConditions,
-  };
+  return { OR: orConditions };
 };
 
 export const getOdooOutboundsAvailable = asyncHandler(
@@ -1786,6 +1797,8 @@ export const getOdooOutboundsAvailable = asyncHandler(
     const rawSearch = req.query.search;
     const search = typeof rawSearch === "string" ? rawSearch.trim() : "";
 
+    const selectedDepartmentNames = parseDepartmentNames(req.query.department);
+
     const accessWhere = buildDepartmentAccessWhere(
       req,
     ) as Prisma.outboundWhereInput;
@@ -1796,9 +1809,37 @@ export const getOdooOutboundsAvailable = asyncHandler(
       req.query.department_ids ?? req.query.department_id,
     );
 
-    let selectedDepartmentWhere: Prisma.outboundWhereInput = {};
+    let requestedOdooDepartmentIds: string[] = [];
 
-    if (requestedLocalDepartmentIds.length > 0) {
+    if (selectedDepartmentNames.length > 0) {
+      const deptRows = await prisma.department.findMany({
+        where: {
+          deleted_at: null,
+          OR: [
+            {
+              short_name: {
+                in: selectedDepartmentNames,
+                mode: "insensitive",
+              },
+            },
+            {
+              full_name: {
+                in: selectedDepartmentNames,
+                mode: "insensitive",
+              },
+            },
+          ],
+        },
+        select: {
+          odoo_id: true,
+        },
+      });
+
+      requestedOdooDepartmentIds = deptRows
+        .map((d) => d.odoo_id)
+        .filter((v): v is number => v !== null && v !== undefined)
+        .map((v) => String(v));
+    } else if (requestedLocalDepartmentIds.length > 0) {
       const deptRows = await prisma.department.findMany({
         where: {
           id: { in: requestedLocalDepartmentIds },
@@ -1810,11 +1851,15 @@ export const getOdooOutboundsAvailable = asyncHandler(
         },
       });
 
-      const requestedOdooDepartmentIds = deptRows
+      requestedOdooDepartmentIds = deptRows
         .map((d) => d.odoo_id)
         .filter((v): v is number => v !== null && v !== undefined)
         .map((v) => String(v));
+    }
 
+    let selectedDepartmentWhere: Prisma.outboundWhereInput = {};
+
+    if (requestedOdooDepartmentIds.length > 0) {
       if (typeof allowedDepartmentFilter === "string") {
         selectedDepartmentWhere = requestedOdooDepartmentIds.includes(
           allowedDepartmentFilter,
@@ -1843,7 +1888,9 @@ export const getOdooOutboundsAvailable = asyncHandler(
         };
       }
     } else {
-      if (typeof allowedDepartmentFilter === "string") {
+      if (selectedDepartmentNames.length > 0) {
+        selectedDepartmentWhere = { department_id: { in: [] } };
+      } else if (typeof allowedDepartmentFilter === "string") {
         selectedDepartmentWhere = { department_id: allowedDepartmentFilter };
       } else if (
         allowedDepartmentFilter &&
@@ -1892,6 +1939,7 @@ export const getOdooOutboundsAvailable = asyncHandler(
           },
         },
       }),
+
       prisma.outbound.count({ where }),
     ]);
 
@@ -1918,81 +1966,51 @@ export const getOdooOutboundsAvailable = asyncHandler(
         select: { odoo_id: true, short_name: true },
       });
 
-      for (const d of departments) {
-        if (d.odoo_id != null && d.short_name) {
-          deptMap.set(Number(d.odoo_id), d.short_name);
+      for (const dept of departments) {
+        if (dept.odoo_id) {
+          deptMap.set(Number(dept.odoo_id), dept.short_name);
         }
       }
     }
 
-    const formattedOutbounds = outbounds.map((outbound) => {
-      const deptIdNum =
-        outbound.department_id && String(outbound.department_id).trim() !== ""
-          ? parseInt(String(outbound.department_id), 10)
+    const formatted = outbounds.map((ob) => {
+      const deptId =
+        typeof ob.department_id === "string"
+          ? parseInt(ob.department_id, 10)
           : NaN;
 
-      const shortName = Number.isFinite(deptIdNum)
-        ? deptMap.get(deptIdNum)
+      const departmentShortName = Number.isFinite(deptId)
+        ? deptMap.get(deptId)
         : undefined;
 
       return {
-        id: outbound.id,
-        picking_id: outbound.picking_id,
-        no: outbound.no,
-        location_id: outbound.location_id,
-        location: outbound.location,
-        location_dest_id: outbound.location_dest_id,
-        location_dest: outbound.location_dest,
-        department_id: outbound.department_id,
-        department: shortName ?? outbound.department,
-        reference: outbound.reference,
-        origin: outbound.origin,
-        invoice: outbound.invoice ?? null,
-        date: outbound.date,
-        out_type: outbound.out_type,
-        in_process: outbound.in_process,
-        outbound_barcode: outbound.outbound_barcode ?? null,
-        created_at: outbound.created_at,
-        updated_at: outbound.updated_at,
-        items: outbound.goods_outs.map((gi: any) => ({
-          id: gi.id,
-          outbound_id: gi.outbound_id,
-          sequence: gi.sequence,
-          product_id: gi.product_id,
-          code: gi.code,
-          name: gi.name,
-          unit: gi.unit,
-          tracking: gi.tracking,
-          lot_id: gi.lot_id,
-          lot_serial: gi.lot_serial,
-          qty: gi.qty,
-          pick: gi.pick,
-          pack: gi.pack,
-          status: gi.status,
-          confirmed_pick: gi.confirmed_pick,
-          in_process: gi.in_process,
-          user_pick: gi.user_pick ?? null,
-          user_pack: gi.user_pack ?? null,
-          pick_time: gi.pick_time ?? null,
-          pack_time: gi.pack_time ?? null,
-          lock_no: gi.lock_no ?? null,
-          lock_name: gi.lock_name ?? null,
-          barcode_id: gi.barcode_id ?? null,
-          barcode: gi.barcode ?? null,
-          barcode_text: gi.barcode_text ?? null,
-          created_at: gi.created_at,
-          updated_at: gi.updated_at,
-        })),
+        id: ob.id,
+        no: ob.no,
+        date: ob.date,
+        created_at: ob.created_at,
+        invoice: ob.invoice,
+        origin: ob.origin,
+        reference: ob.reference,
+        department_id: ob.department_id,
+        department: departmentShortName ?? ob.department,
+        location: ob.location,
+        location_dest: ob.location_dest,
+        out_type: ob.out_type,
+        total_items: ob.goods_outs?.length ?? 0,
       };
     });
 
     return res.json({
-      data: formattedOutbounds,
+      data: formatted,
       meta: {
         page,
         limit,
         total,
         totalPages: Math.ceil(total / limit),
+        department:
+          selectedDepartmentNames.length > 0
+            ? selectedDepartmentNames.join(",")
+            : null,
       },
     });
   },
