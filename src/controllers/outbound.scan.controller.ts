@@ -24,9 +24,7 @@ import {
   isNullLikeLot,
   isNullLikeExp,
 } from "../utils/helper_scan/barcode";
-import {
-  sendQueuedOutboundLotAdjustmentsToOdoo,
-} from "../utils/helper_scan/change_lot";
+import { sendQueuedOutboundLotAdjustmentsToOdoo } from "../utils/helper_scan/change_lot";
 
 /**
  * =========================
@@ -1122,8 +1120,31 @@ export const scanOutboundReturn = asyncHandler(
       });
 
       const locationPickedQty = Number(locationPick?.qty_pick ?? 0);
+
       if (locationPickedQty <= 0) {
-        throw badRequest("location นี้ยังไม่มี pick ที่จะคืน");
+        const availablePicks = await tx.goods_out_item_location_pick.findMany({
+          where: {
+            goods_out_item_id: freshItem.id,
+            qty_pick: { gt: 0 },
+          },
+          include: {
+            location: {
+              select: {
+                id: true,
+                full_name: true,
+              },
+            },
+          },
+        });
+
+        throw badRequest(
+          `location นี้ยังไม่มี pick ที่จะคืน: scanned=${loc.full_name}(${loc.id}), available=${availablePicks
+            .map(
+              (x) =>
+                `${x.location?.full_name ?? "-"}(${x.location_id}) qty=${x.qty_pick}`,
+            )
+            .join(", ")}`,
+        );
       }
 
       const willReturn = Math.min(returnQty, currentPick, locationPickedQty);
@@ -1978,34 +1999,82 @@ async function increaseStockFromOutboundReturnTx(
     return;
   }
 
-await tx.stock.create({
-  data: {
-    bucket_key: buildStockBucketKey({
-      source: "wms",
+  await tx.stock.create({
+    data: {
+      bucket_key: buildStockBucketKey({
+        source: "wms",
+        product_id: args.item.product_id,
+        location_id: args.location.id,
+        lot_id: args.item.lot_id ?? null,
+        lot_name: fallback.lot_serial ?? null,
+        expiration_date: fallback.exp ?? null,
+      }),
+
       product_id: args.item.product_id,
+      product_code: args.item.code ?? null,
+      product_name: args.item.name ?? null,
+      unit: args.item.unit ?? null,
+
       location_id: args.location.id,
+      location_name: args.location.full_name,
+
       lot_id: args.item.lot_id ?? null,
       lot_name: fallback.lot_serial ?? null,
       expiration_date: fallback.exp ?? null,
-    }),
 
-    product_id: args.item.product_id,
-    product_code: args.item.code ?? null,
-    product_name: args.item.name ?? null,
-    unit: args.item.unit ?? null,
+      quantity: new Prisma.Decimal(qty),
+      source: "wms",
+      active: true,
+    } as any,
+  });
+}
 
-    location_id: args.location.id,
-    location_name: args.location.full_name,
+async function getPdQtyForGoodsOutItem(
+  tx: any,
+  outbound: {
+    id?: number;
+    no?: string | null;
+    invoice?: string | null;
+    origin?: string | null;
+  },
+  freshItem: any,
+): Promise<number> {
+  const refs = [outbound.invoice, outbound.origin]
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean);
 
-    lot_id: args.item.lot_id ?? null,
-    lot_name: fallback.lot_serial ?? null,
-    expiration_date: fallback.exp ?? null,
+  if (refs.length === 0) return 0;
 
-    quantity: new Prisma.Decimal(qty),
-    source: "wms",
-    active: true,
-  } as any,
-});
+  const pdInbounds = await tx.inbound.findMany({
+    where: {
+      in_type: "PD",
+      deleted_at: null,
+      origin: { in: refs },
+    } as any,
+    select: {
+      id: true,
+    },
+  });
+
+  const inboundIds = pdInbounds.map((x: any) => Number(x.id)).filter(Boolean);
+
+  if (inboundIds.length === 0) return 0;
+
+  const pdGoodsInRows = await tx.goods_in.findMany({
+    where: {
+      inbound_id: { in: inboundIds },
+      product_id: Number(freshItem.product_id),
+      lot_serial: freshItem.lot_serial,
+      deleted_at: null,
+    } as any,
+    select: {
+      qty: true,
+    } as any,
+  });
+
+  return pdGoodsInRows.reduce((sum: number, item: any) => {
+    return sum + Number(item.qty ?? 0);
+  }, 0);
 }
 
 export const scanBarcodeOutboundReturn = asyncHandler(
@@ -2030,12 +2099,20 @@ export const scanBarcodeOutboundReturn = asyncHandler(
 
     const qty = Math.max(1, Math.floor(qtyInput));
 
+    const returnMode = String(req.body?.return_mode ?? "")
+      .trim()
+      .toUpperCase();
+
+    const isPdReturnMode = returnMode === "PD";
+
     const outbound = await prisma.outbound.findFirst({
       where: { no, deleted_at: null } as any,
       select: {
         id: true,
         no: true,
-      },
+        invoice: true,
+        origin: true,
+      } as any,
     });
 
     if (!outbound) throw notFound("outbound not found");
@@ -2099,10 +2176,7 @@ export const scanBarcodeOutboundReturn = asyncHandler(
 
       const parsed: any = parsedRaw;
 
-      const lotMatched = lotMatchedNullable(
-        item.lot_serial,
-        parsed.lot_serial,
-      );
+      const lotMatched = lotMatchedNullable(item.lot_serial, parsed.lot_serial);
 
       const stockExp = await findStockExpByProductLot(
         Number(item.product_id),
@@ -2171,11 +2245,25 @@ export const scanBarcodeOutboundReturn = asyncHandler(
         throw badRequest("ไม่พบ goods_out_item ที่ต้องการคืน");
       }
 
-      const maxReturnable = Math.max(
-        0,
-        Number((freshItem as any).confirmed_pick ?? 0) -
-          Number((freshItem as any).return ?? 0),
-      );
+      let maxReturnable = 0;
+
+      if (isPdReturnMode) {
+        const baseQty = Number((freshItem as any).qty ?? 0);
+        const pickQty = Number((freshItem as any).pick ?? 0);
+        const currentReturn = Number((freshItem as any).return ?? 0);
+
+        const pdQty = await getPdQtyForGoodsOutItem(tx, outbound, freshItem);
+
+        const effectiveQty = Math.max(0, baseQty - pdQty);
+
+        maxReturnable = Math.max(0, pickQty - effectiveQty - currentReturn);
+      } else {
+        maxReturnable = Math.max(
+          0,
+          Number((freshItem as any).confirmed_pick ?? 0) -
+            Number((freshItem as any).return ?? 0),
+        );
+      }
 
       if (qty > maxReturnable) {
         throw badRequest(
@@ -2194,25 +2282,25 @@ export const scanBarcodeOutboundReturn = asyncHandler(
         } as any,
       });
 
-await (tx as any).goods_out_item_location_return.upsert({
-  where: {
-    uniq_goi_return_location: {
-      goods_out_item_id: Number(freshItem.id),
-      location_id: Number(location.id),
-    },
-  },
-  update: {
-    return: {
-      increment: qty,
-    },
-    updated_at: new Date(),
-  },
-  create: {
-    goods_out_item_id: Number(freshItem.id),
-    location_id: Number(location.id),
-    return: qty,
-  },
-});
+      await (tx as any).goods_out_item_location_return.upsert({
+        where: {
+          uniq_goi_return_location: {
+            goods_out_item_id: Number(freshItem.id),
+            location_id: Number(location.id),
+          },
+        },
+        update: {
+          return: {
+            increment: qty,
+          },
+          updated_at: new Date(),
+        },
+        create: {
+          goods_out_item_id: Number(freshItem.id),
+          location_id: Number(location.id),
+          return: qty,
+        },
+      });
 
       return {
         updatedItem,
@@ -2262,7 +2350,12 @@ await (tx as any).goods_out_item_location_return.upsert({
       },
     };
 
-    emitOutboundRealtime(no, "outbound:scan_return", payload, Number(outbound.id));
+    emitOutboundRealtime(
+      no,
+      "outbound:scan_return",
+      payload,
+      Number(outbound.id),
+    );
 
     return res.json(payload);
   },
@@ -2328,357 +2421,172 @@ async function resolveBorSerVirtualLocation(
 }
 
 export const confirmOutboundPickToStock = asyncHandler(
-  async (
-    req: Request<{ no: string }, {}, ConfirmOutboundPickBody>,
-    res: Response,
-  ) => {
-    const no = decodeURIComponent(req.params.no);
+  async (req: Request, res: Response) => {
+    const no = String(req.params.no || "").trim();
 
-    const pickedByRaw =
-      (req.body as any).user_pick ?? (req.body as any).user_ref;
-    const pickedBy =
-      pickedByRaw == null ? null : String(pickedByRaw).trim() || null;
+    if (!no) throw badRequest("no is required");
 
-    const bodyRootLoc = String(req.body.location_full_name ?? "").trim();
-    const bodyLines = Array.isArray(req.body.lines) ? req.body.lines : [];
-    const bodyLocations = Array.isArray((req.body as any).locations)
-      ? (req.body as any).locations
-      : [];
+    const user_ref = String(
+      req.body?.user_ref ?? req.body?.user_pick ?? "",
+    ).trim();
 
-    let rootLoc = bodyRootLoc;
-    let lines: Array<{
-      goods_out_item_id: number;
-      location_full_name?: string;
-    }> = [];
-
-    if (bodyLines.length > 0) {
-      lines = bodyLines.map((l: any) => ({
-        goods_out_item_id: Number(l.goods_out_item_id),
-        location_full_name:
-          l.location_full_name != null
-            ? String(l.location_full_name).trim()
-            : undefined,
-      }));
-    } else if (bodyLocations.length > 0) {
-      const flattened: Array<{
-        goods_out_item_id: number;
-        location_full_name?: string;
-      }> = [];
-
-      for (const group of bodyLocations) {
-        const groupLoc = String(group?.location_full_name ?? "").trim();
-        if (!rootLoc && groupLoc) rootLoc = groupLoc;
-
-        const groupLines = Array.isArray(group?.lines) ? group.lines : [];
-
-        for (const l of groupLines) {
-          flattened.push({
-            goods_out_item_id: Number(l.goods_out_item_id),
-            location_full_name: String(
-              l?.location_full_name ?? groupLoc ?? "",
-            ).trim(),
-          });
-        }
-      }
-
-      lines = flattened;
-    }
-
-    if (!rootLoc) {
-      throw badRequest("กรุณาส่ง location_full_name (root)");
-    }
-
-    if (lines.length === 0) {
-      throw badRequest("กรุณาส่ง lines อย่างน้อย 1 รายการ");
-    }
-
-    for (const l of lines as any[]) {
-      const itemId = Number(l.goods_out_item_id);
-
-      if (!itemId || Number.isNaN(itemId)) {
-        throw badRequest("lines.goods_out_item_id ต้องเป็นตัวเลข");
-      }
-
-      const locName = String(l.location_full_name ?? rootLoc).trim();
-
-      if (!locName) {
-        throw badRequest("location_full_name ห้ามว่าง");
-      }
-    }
-
-    const outbound = await prisma.outbound.findUnique({
-      where: { no },
+    const outbound = await prisma.outbound.findFirst({
+      where: {
+        no,
+        deleted_at: null,
+      } as any,
       select: {
         id: true,
         no: true,
-        deleted_at: true,
-        location: true,
-        location_dest: true,
-        location_dest_id: true,
-        department_id: true,
-        department: true,
       },
     });
 
-    if (!outbound || outbound.deleted_at) {
-      throw notFound(`ไม่พบ outbound: ${no}`);
+    if (!outbound) {
+      throw notFound("outbound not found");
     }
 
-    const outType = resolveOutTypeFromNo(no);
-    const shouldUpsertBorSer = BOR_SER_TYPES.has(outType);
+    const bodyLocations = Array.isArray(req.body?.locations)
+      ? req.body.locations
+      : [];
 
-    const borSerTarget = shouldUpsertBorSer
-      ? resolveBorSerTargetFromLocationDest(outbound.location_dest)
-      : null;
-
-    if (shouldUpsertBorSer && !borSerTarget) {
-      throw badRequest(
-        `Outbound type ${outType} ต้องมี outbound.location_dest ที่มีคำว่า BOR หรือ SER (ตอนนี้คือ: ${outbound.location_dest ?? "-"})`,
-      );
+    if (!bodyLocations.length) {
+      throw badRequest("locations is required");
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      const itemIds = Array.from(
-        new Set((lines as any[]).map((l) => Number(l.goods_out_item_id))),
-      );
-
-      const uniqueLocNames = Array.from(
-        new Set(
-          (lines as any[])
-            .map((l) => String(l.location_full_name ?? rootLoc).trim())
-            .filter(Boolean),
-        ),
-      );
-
-      const dbItems = await tx.goods_out_item.findMany({
-        where: {
-          outbound_id: outbound.id,
-          deleted_at: null,
-          id: { in: itemIds },
-        },
-        select: {
-          id: true,
-          product_id: true,
-          lot_id: true,
-          lot_serial: true,
-          code: true,
-          name: true,
-          unit: true,
-          qty: true,
-          pick: true,
-          confirmed_pick: true,
-          in_process: true,
-          source_item_id: true,
-          lot_adjustment_id: true,
-          is_split_generated: true,
-        },
-      });
-
-      const dbById = new Map<number, (typeof dbItems)[number]>(
-        dbItems.map((x) => [x.id, x]),
-      );
-
-      for (const itemId of itemIds) {
-        const item = dbById.get(itemId);
-        if (!item) {
-          throw badRequest(
-            `ไม่พบ goods_out_item_id=${itemId} ใน outbound ${no} หรือ item ถูกลบ/เปลี่ยนแล้ว`,
-          );
-        }
-      }
-
-      const locRows = await tx.location.findMany({
-        where: {
-          deleted_at: null,
-          full_name: { in: uniqueLocNames },
-        },
-        select: {
-          id: true,
-          full_name: true,
-        },
-      });
-
-      const locByName = new Map(locRows.map((x) => [x.full_name, x]));
-
-      for (const name of uniqueLocNames) {
-        if (!locByName.has(name)) {
-          throw badRequest(`ไม่พบ location full_name: ${name}`);
-        }
-      }
-
-      const locationIds = Array.from(
-        new Set(locRows.map((x) => Number(x.id)).filter((x) => x > 0)),
-      );
-
-      const borSerVirtualLoc =
-        shouldUpsertBorSer && borSerTarget
-          ? await resolveBorSerVirtualLocation(tx, {
-              location_dest_id: outbound.location_dest_id ?? null,
-              location_dest: outbound.location_dest ?? null,
-            })
-          : null;
-
-      if (
-        shouldUpsertBorSer &&
-        borSerTarget &&
-        !borSerVirtualLoc?.location_name
-      ) {
-        throw badRequest(
-          `ไม่พบ virtual location ปลายทางสำหรับ upsert ${borSerTarget}`,
-        );
-      }
-
-      /**
-       * ✅ confirm ทั้งหมดของ item นี้
-       * ใช้คุมไม่ให้ confirmed รวมเกิน qty แม้อยู่คนละ location
-       */
-      const allConfirmsForItems =
-        itemIds.length > 0
-          ? await tx.goods_out_item_location_confirm.findMany({
-              where: {
-                goods_out_item_id: { in: itemIds },
-              },
-              select: {
-                id: true,
-                goods_out_item_id: true,
-                location_id: true,
-                confirmed_pick: true,
-              },
-            })
-          : [];
-
-      const existingConfirmedTotalByItem = new Map<number, number>();
-
-      for (const c of allConfirmsForItems) {
-        const prev = existingConfirmedTotalByItem.get(c.goods_out_item_id) ?? 0;
-        existingConfirmedTotalByItem.set(
-          c.goods_out_item_id,
-          prev + Math.max(0, Math.floor(Number(c.confirmed_pick ?? 0))),
-        );
-      }
-
-      /**
-       * ✅ confirm เฉพาะ location ที่ส่งมารอบนี้
-       * ใช้หา confirmed_pick เดิมของ item + location นี้
-       */
-      const confirmsAtSelectedLocations =
-        itemIds.length > 0 && locationIds.length > 0
-          ? await tx.goods_out_item_location_confirm.findMany({
-              where: {
-                goods_out_item_id: { in: itemIds },
-                location_id: { in: locationIds },
-              },
-              select: {
-                id: true,
-                goods_out_item_id: true,
-                location_id: true,
-                confirmed_pick: true,
-              },
-            })
-          : [];
-
-      const confirmByKey = new Map<
-        string,
-        (typeof confirmsAtSelectedLocations)[number]
-      >();
-
-      for (const c of confirmsAtSelectedLocations) {
-        confirmByKey.set(confirmKey(c.goods_out_item_id, c.location_id), c);
-      }
-
-      /**
-       * ✅ draft pick จากตอน scan
-       * confirm จะตัด stock เฉพาะ qty_pick - confirmed_pick
-       */
-      const locationPicks =
-        itemIds.length > 0 && locationIds.length > 0
-          ? await tx.goods_out_item_location_pick.findMany({
-              where: {
-                goods_out_item_id: { in: itemIds },
-                location_id: { in: locationIds },
-              },
-              select: {
-                goods_out_item_id: true,
-                location_id: true,
-                qty_pick: true,
-              },
-            })
-          : [];
-
-      const pickByKey = new Map<string, number>();
-
-      for (const p of locationPicks) {
-        pickByKey.set(
-          confirmKey(p.goods_out_item_id, p.location_id),
-          Math.max(0, Math.floor(Number(p.qty_pick ?? 0))),
-        );
-      }
-
       const mergedLineMap = new Map<
         string,
-        { itemId: number; locId: number; locName: string }
+        {
+          itemId: number;
+          locId: number;
+          locName: string;
+          pick?: number;
+        }
       >();
 
-      for (const l of lines as any[]) {
-        const itemId = Number(l.goods_out_item_id);
-        const locFullName = String(l.location_full_name ?? rootLoc).trim();
-        const locObj = locByName.get(locFullName)!;
-        const k = confirmKey(itemId, locObj.id);
+      for (const loc of bodyLocations) {
+        const location_full_name = String(loc?.location_full_name ?? "").trim();
 
-        if (!mergedLineMap.has(k)) {
-          mergedLineMap.set(k, {
+        if (!location_full_name) continue;
+
+        const locObj = await resolveLocationByFullNameBasic(location_full_name);
+        const lines = Array.isArray(loc?.lines) ? loc.lines : [];
+
+        for (const line of lines) {
+          const itemId = Number(line?.goods_out_item_id ?? 0);
+          if (!itemId) continue;
+
+          const key = `${itemId}_${locObj.id}`;
+          const incomingPick = Math.max(
+            0,
+            Math.floor(Number((line as any)?.pick ?? 0)),
+          );
+
+          const prev = mergedLineMap.get(key);
+
+          mergedLineMap.set(key, {
             itemId,
-            locId: locObj.id,
-            locName: locObj.full_name,
+            locId: Number(locObj.id),
+            locName: String(locObj.full_name ?? "").trim(),
+            pick: Math.max(Number(prev?.pick ?? 0), incomingPick),
           });
         }
       }
 
-      let decremented = 0;
-      let upsertedConfirm = 0;
-      let skipped = 0;
-      let ignored = 0;
+      const mergedLines = Array.from(mergedLineMap.values());
 
-      const runningConfirmedByItem = new Map<number, number>();
-
-      for (const itemId of itemIds) {
-        runningConfirmedByItem.set(
-          itemId,
-          existingConfirmedTotalByItem.get(itemId) ?? 0,
-        );
+      if (!mergedLines.length) {
+        throw badRequest("ไม่พบรายการ location/item สำหรับ confirm");
       }
 
-      for (const [, l] of mergedLineMap.entries()) {
-        const item = dbById.get(l.itemId);
+      let decremented = 0;
+      let updatedItems = 0;
+      let skipped = 0;
 
-        if (!item || !item.product_id) {
-          ignored++;
+      const touchedItemIds = new Set<number>();
+
+      for (const line of mergedLines) {
+        const item: any = await tx.goods_out_item.findFirst({
+          where: {
+            id: Number(line.itemId),
+            outbound_id: Number(outbound.id),
+            deleted_at: null,
+          } as any,
+          select: {
+            id: true,
+            outbound_id: true,
+            product_id: true,
+            code: true,
+            name: true,
+            unit: true,
+            lot_id: true,
+            lot_serial: true,
+            qty: true,
+            pick: true,
+            confirmed_pick: true,
+            barcode_text: true,
+            status: true,
+          } as any,
+        });
+
+        if (!item) {
+          throw badRequest(`ไม่พบ goods_out_item id=${line.itemId}`);
+        }
+
+        touchedItemIds.add(Number(item.id));
+
+        const locationPick = await (
+          tx as any
+        ).goods_out_item_location_pick.findUnique({
+          where: {
+            goods_out_item_id_location_id: {
+              goods_out_item_id: Number(item.id),
+              location_id: Number(line.locId),
+            },
+          },
+          select: {
+            goods_out_item_id: true,
+            location_id: true,
+            qty_pick: true,
+          },
+        });
+
+        const dbPickedAtLoc = Math.max(
+          0,
+          Math.floor(Number(locationPick?.qty_pick ?? 0)),
+        );
+
+        const requestedPickFromBody = Math.max(
+          0,
+          Math.floor(Number(line.pick ?? 0)),
+        );
+
+        const pickedAtLoc =
+          requestedPickFromBody > 0 ? requestedPickFromBody : dbPickedAtLoc;
+
+        if (pickedAtLoc <= 0) {
+          skipped++;
           continue;
         }
 
-        const required = Math.max(0, Math.floor(Number(item.qty ?? 0)));
-
-        const key = confirmKey(l.itemId, l.locId);
-
-        const existed = confirmByKey.get(key);
+        const alreadyConfirmedAtLoc = await (
+          tx as any
+        ).goods_out_item_location_confirm.findFirst({
+          where: {
+            goods_out_item_id: Number(item.id),
+            location_id: Number(line.locId),
+          },
+          select: {
+            id: true,
+            confirmed_pick: true,
+          },
+        });
 
         const confirmedAtLoc = Math.max(
           0,
-          Math.floor(Number(existed?.confirmed_pick ?? 0)),
+          Math.floor(Number(alreadyConfirmedAtLoc?.confirmed_pick ?? 0)),
         );
 
-        const pickedAtLoc = Math.max(
-          0,
-          Math.floor(Number(pickByKey.get(key) ?? 0)),
-        );
-
-        /**
-         * ✅ concept สำคัญ:
-         * scan รอบแรก 10, confirm แล้ว confirmedAtLoc = 10
-         * scan รอบสองเพิ่มเป็น qty_pick = 15
-         * unconfirmedAtLoc = 15 - 10 = 5
-         * ตัด stock แค่ 5
-         */
         const unconfirmedAtLoc = Math.max(0, pickedAtLoc - confirmedAtLoc);
 
         if (unconfirmedAtLoc <= 0) {
@@ -2686,54 +2594,36 @@ export const confirmOutboundPickToStock = asyncHandler(
           continue;
         }
 
-        const currentTotalConfirmed = Math.max(
-          0,
-          Math.floor(Number(runningConfirmedByItem.get(l.itemId) ?? 0)),
-        );
-
-        const remainingByQty =
-          required > 0
-            ? Math.max(0, required - currentTotalConfirmed)
-            : unconfirmedAtLoc;
-
-        const appliedDelta =
-          required > 0
-            ? Math.min(unconfirmedAtLoc, remainingByQty)
-            : unconfirmedAtLoc;
-
-        if (appliedDelta <= 0) {
-          skipped++;
-          continue;
-        }
-
-        const lotName = item.lot_serial ?? null;
-
-        const st = await findStockRowByLocationName(tx, {
-          product_id: item.product_id,
-          lot_id: item.lot_id ?? null,
-          lot_name: lotName,
-          location_name: l.locName,
+        const stock = await tx.stock.findFirst({
+          where: {
+            product_id: Number(item.product_id || 0),
+            location_id: Number(line.locId),
+            lot_id: item.lot_id ?? null,
+          } as any,
+          orderBy: [{ id: "asc" }],
         });
 
-        if (!st) {
+        if (!stock) {
           throw badRequest(
-            `ไม่พบ stock สำหรับตัดออก (product_id=${item.product_id}, lot_name=${lotName ?? "null"}, location_name=${l.locName})`,
+            `ไม่พบ stock location=${line.locName}, product=${item.code}`,
           );
         }
 
-        const currentQty = Number(st.quantity ?? 0);
+        const currentQty = Number(stock.quantity ?? 0);
 
-        if (currentQty < appliedDelta) {
+        if (currentQty < unconfirmedAtLoc) {
           throw badRequest(
-            `stock ไม่พอ (need=${appliedDelta}, have=${currentQty}) product_id=${item.product_id} lot_name=${lotName ?? "null"} location_name=${l.locName}`,
+            `stock location=${line.locName} ไม่พอ current=${currentQty}, need=${unconfirmedAtLoc}`,
           );
         }
 
         await tx.stock.update({
-          where: { id: st.id },
+          where: {
+            id: Number(stock.id),
+          },
           data: {
             quantity: {
-              decrement: new Prisma.Decimal(appliedDelta),
+              decrement: unconfirmedAtLoc,
             },
             updated_at: new Date(),
           } as any,
@@ -2741,109 +2631,84 @@ export const confirmOutboundPickToStock = asyncHandler(
 
         decremented++;
 
-        if (shouldUpsertBorSer && borSerTarget && borSerVirtualLoc) {
-          await upsertBorSerStockByDelta(tx, {
-            target: borSerTarget,
-            no,
-            product_id: item.product_id,
-            product_code: item.code ?? null,
-            product_name: item.name ?? null,
-            unit: item.unit ?? null,
-            lot_id: item.lot_id ?? null,
-            lot_name: item.lot_serial ?? null,
-            location_id: borSerVirtualLoc.location_id ?? null,
-            location_name: borSerVirtualLoc.location_name ?? null,
-            expiration_date: st.expiration_date ?? null,
-            deltaQty: appliedDelta,
-            user_pick: pickedBy,
-            department_id: outbound.department_id ?? null,
-            department: outbound.department ?? null,
-          });
-        }
+        const nextConfirmedAtLoc = confirmedAtLoc + unconfirmedAtLoc;
 
-        const newConfirmedAtLoc = confirmedAtLoc + appliedDelta;
-
-        if (existed?.id) {
-          await tx.goods_out_item_location_confirm.update({
-            where: { id: existed.id },
+        if (alreadyConfirmedAtLoc?.id) {
+          await (tx as any).goods_out_item_location_confirm.update({
+            where: {
+              id: Number(alreadyConfirmedAtLoc.id),
+            },
             data: {
-              confirmed_pick: newConfirmedAtLoc,
+              confirmed_pick: nextConfirmedAtLoc,
               updated_at: new Date(),
             },
           });
         } else {
-          await tx.goods_out_item_location_confirm.create({
+          await (tx as any).goods_out_item_location_confirm.create({
             data: {
-              goods_out_item_id: l.itemId,
-              location_id: l.locId,
-              confirmed_pick: newConfirmedAtLoc,
+              goods_out_item_id: Number(item.id),
+              location_id: Number(line.locId),
+              confirmed_pick: nextConfirmedAtLoc,
             },
           });
         }
 
-        upsertedConfirm++;
-
-        runningConfirmedByItem.set(
-          l.itemId,
-          currentTotalConfirmed + appliedDelta,
-        );
-      }
-
-      const now = new Date();
-      let updatedItems = 0;
-
-      for (const itemId of itemIds) {
-        const item = dbById.get(itemId);
-        if (!item) continue;
-
-        const required = Math.max(0, Math.floor(Number(item.qty ?? 0)));
-
-        const totalConfirmed = Math.max(
+        const currentConfirmedPick = Math.max(
           0,
-          Math.floor(Number(runningConfirmedByItem.get(itemId) ?? 0)),
+          Math.floor(Number(item.confirmed_pick ?? 0)),
         );
 
-        const finalConfirmed =
-          required > 0 ? Math.min(required, totalConfirmed) : totalConfirmed;
+        const nextConfirmedPick = currentConfirmedPick + unconfirmedAtLoc;
+
+        const totalPick = Math.max(0, Math.floor(Number(item.pick ?? 0)));
+        const requiredQty = Math.max(0, Math.floor(Number(item.qty ?? 0)));
 
         const itemCompleted =
-          required > 0 ? finalConfirmed >= required : finalConfirmed > 0;
+          requiredQty > 0
+            ? nextConfirmedPick >= requiredQty
+            : nextConfirmedPick >= totalPick && totalPick > 0;
 
         await tx.goods_out_item.update({
-          where: { id: itemId },
+          where: {
+            id: Number(item.id),
+          },
           data: {
-            confirmed_pick: finalConfirmed,
+            confirmed_pick: nextConfirmedPick,
             in_process: itemCompleted,
-            user_pick: pickedBy,
-            pick_time: now,
-            updated_at: now,
+            status: itemCompleted ? "completed" : "process",
+            user_pick: user_ref || null,
+            pick_time: new Date(),
+            updated_at: new Date(),
           } as any,
         });
 
         updatedItems++;
       }
 
-      const remainingNotInProcess = await tx.goods_out_item.count({
+      const remainingNotCompleted = await tx.goods_out_item.count({
         where: {
-          outbound_id: outbound.id,
+          outbound_id: Number(outbound.id),
           deleted_at: null,
-          in_process: false,
-        },
+          OR: [{ status: { not: "completed" } }, { in_process: false }],
+        } as any,
       });
 
-      const outboundCompleted = remainingNotInProcess === 0;
-      const batchNow = new Date();
+      const outboundCompleted = remainingNotCompleted === 0;
 
       await tx.outbound.update({
-        where: { id: outbound.id },
+        where: {
+          id: Number(outbound.id),
+        },
         data: {
           in_process: outboundCompleted,
-          updated_at: batchNow,
-        },
+          updated_at: new Date(),
+        } as any,
       });
 
       const batchLock = await tx.batch_outbound.findUnique({
-        where: { outbound_id: outbound.id },
+        where: {
+          outbound_id: Number(outbound.id),
+        },
         select: {
           id: true,
           status: true,
@@ -2852,54 +2717,45 @@ export const confirmOutboundPickToStock = asyncHandler(
 
       if (batchLock) {
         await tx.batch_outbound.update({
-          where: { outbound_id: outbound.id },
+          where: {
+            outbound_id: Number(outbound.id),
+          },
           data: {
             status: outboundCompleted ? "completed" : "process",
-            updated_at: batchNow,
-            released_at: outboundCompleted ? batchNow : null,
-          },
+            released_at: outboundCompleted ? new Date() : null,
+            updated_at: new Date(),
+          } as any,
         });
       }
 
       return {
-        out_type: outType,
-        bor_ser_target: borSerTarget,
-        bor_ser_virtual_location: borSerVirtualLoc,
         updatedItems,
-        ignored,
         decremented,
-        upsertedConfirm,
         skipped,
+        touchedItemIds: Array.from(touchedItemIds),
+        outboundCompleted,
       };
     });
 
-    const odooQueueResult = await sendQueuedOutboundLotAdjustmentsToOdoo({
-      outbound: {
-        id: outbound.id,
-        no: outbound.no,
+    emitOutboundRealtime(
+      no,
+      "outbound:confirm_pick",
+      {
+        message: "confirm pick สำเร็จ",
+        outbound_no: no,
+        user_pick: user_ref || null,
+        ...result,
       },
-      reqOriginalUrl: req.originalUrl,
-    });
+      Number(outbound.id),
+    );
 
-    const payload = {
-      message:
-        "confirm pick -> decrement stock สำเร็จ (confirm เฉพาะ delta จาก qty_pick - confirmed_pick)",
+    return res.json({
+      success: true,
+      message: "confirm pick สำเร็จ",
       outbound_no: no,
-      user_pick: pickedBy,
+      user_pick: user_ref || null,
       ...result,
-      lot_adjustment_odoo_queue: {
-        queued_count: odooQueueResult.queued_count,
-        sent: odooQueueResult.sent,
-        skipped: odooQueueResult.skipped,
-        reason: odooQueueResult.reason,
-        log_id: odooQueueResult.log_id,
-        error: odooQueueResult.error,
-      },
-    };
-
-    emitOutboundRealtime(no, "outbound:confirm_pick", payload, outbound.id);
-
-    return res.json(payload);
+    });
   },
 );
 
@@ -2911,11 +2767,16 @@ function buildStockBucketKey(args: {
   lot_name?: string | null;
   expiration_date?: Date | string | null;
 }) {
-  const source = String(args.source ?? "wms").trim().toLowerCase();
+  const source = String(args.source ?? "wms")
+    .trim()
+    .toLowerCase();
   const productId = Number(args.product_id || 0);
-  const locationId = args.location_id == null ? "null" : String(args.location_id);
+  const locationId =
+    args.location_id == null ? "null" : String(args.location_id);
   const lotId = args.lot_id == null ? "null" : String(args.lot_id);
-  const lotName = String(args.lot_name ?? "").trim().toLowerCase();
+  const lotName = String(args.lot_name ?? "")
+    .trim()
+    .toLowerCase();
 
   const exp = args.expiration_date
     ? new Date(args.expiration_date).toISOString().slice(0, 10)
@@ -2929,6 +2790,63 @@ function buildStockBucketKey(args: {
     `lot:${lotName || "null"}`,
     `exp:${exp}`,
   ].join("|");
+}
+
+async function decreaseStockFromOutboundPickTx(
+  tx: any,
+  args: {
+    item: {
+      product_id: number;
+      code?: string | null;
+      name?: string | null;
+      unit?: string | null;
+      lot_id?: number | null;
+      lot_serial?: string | null;
+      exp?: Date | string | null;
+    };
+    location: {
+      id: number;
+      full_name: string;
+    };
+    qty: number;
+  },
+) {
+  const qty = Number(args.qty || 0);
+  if (qty <= 0) return;
+
+  const stock = await tx.stock.findFirst({
+    where: {
+      product_id: args.item.product_id,
+      location_id: args.location.id,
+      lot_id: args.item.lot_id ?? null,
+      lot_serial: args.item.lot_serial ?? null,
+    } as any,
+    orderBy: [{ id: "asc" }],
+  });
+
+  if (!stock) {
+    throw badRequest(
+      `ไม่พบ stock สำหรับ location=${args.location.full_name}, product_id=${args.item.product_id}`,
+    );
+  }
+
+  const currentQty = Number(stock.quantity ?? 0);
+
+  if (currentQty < qty) {
+    throw badRequest(
+      `stock ไม่พอสำหรับ confirm pick location=${args.location.full_name}, current=${currentQty}, need=${qty}`,
+    );
+  }
+
+  await tx.stock.update({
+    where: { id: stock.id },
+    data: {
+      quantity: {
+        decrement: qty,
+      },
+      updated_at: new Date(),
+    } as any,
+  });
 }
 
 export const confirmOutboundReturn = asyncHandler(
@@ -2957,6 +2875,8 @@ export const confirmOutboundReturn = asyncHandler(
       throw badRequest("ไม่พบรายการ return ที่รอ confirm");
     }
 
+    let updatedPDInboundCount = 0;
+
     await prisma.$transaction(async (tx) => {
       for (const item of items) {
         const returnRows = await (
@@ -2971,7 +2891,17 @@ export const confirmOutboundReturn = asyncHandler(
 
         if (!returnRows.length) continue;
 
+        const fallback = await resolveFallbackLotExpForOutboundReturnTx(tx, {
+          product_id: Number(item.product_id || 0),
+          lot_id: item.lot_id ?? null,
+          lot_serial: item.lot_serial ?? null,
+          exp: null,
+        });
+
         for (const row of returnRows) {
+          const returnQty = Number(row.return || 0);
+          if (returnQty <= 0) continue;
+
           const location = await tx.location.findUnique({
             where: { id: row.location_id },
             select: { id: true, full_name: true },
@@ -2980,13 +2910,6 @@ export const confirmOutboundReturn = asyncHandler(
           if (!location) {
             throw badRequest(`ไม่พบ location id=${row.location_id}`);
           }
-
-          const fallback = await resolveFallbackLotExpForOutboundReturnTx(tx, {
-            product_id: Number(item.product_id || 0),
-            lot_id: item.lot_id ?? null,
-            lot_serial: item.lot_serial ?? null,
-            exp: null,
-          });
 
           await increaseStockFromOutboundReturnTx(tx, {
             item: {
@@ -3002,7 +2925,7 @@ export const confirmOutboundReturn = asyncHandler(
               id: location.id,
               full_name: location.full_name,
             },
-            qty: Number(row.return || 0),
+            qty: returnQty,
           });
         }
 
@@ -3014,11 +2937,42 @@ export const confirmOutboundReturn = asyncHandler(
           },
         });
       }
+
+      // ✅ Complete related PD inbound
+      const outboundOrigin = String((outbound as any).origin ?? "").trim();
+      const outboundInvoice = String((outbound as any).invoice ?? "").trim();
+
+      const refs = Array.from(
+        new Set([outboundOrigin, outboundInvoice].filter(Boolean)),
+      );
+
+      if (refs.length > 0) {
+        const updatedPD = await tx.inbound.updateMany({
+          where: {
+            deleted_at: null,
+            in_type: "PD",
+            status: { not: "completed" },
+            OR: refs.map((ref) => ({
+              origin: {
+                equals: ref,
+                mode: "insensitive",
+              },
+            })),
+          },
+          data: {
+            status: "completed",
+            updated_at: new Date(),
+          },
+        });
+
+        updatedPDInboundCount = updatedPD.count;
+      }
     });
 
     return res.json({
       success: true,
       message: "confirm return สำเร็จ",
+      pd_inbound_completed_count: updatedPDInboundCount,
     });
   },
 );

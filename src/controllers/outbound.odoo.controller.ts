@@ -2509,7 +2509,6 @@ export const getOdooOutboundsByBatchName = asyncHandler(
                 },
               },
 
-              // ✅ NEW: return by location
               goodsOutItemLocationReturns: {
                 include: {
                   location: {
@@ -2585,6 +2584,51 @@ export const getOdooOutboundsByBatchName = asyncHandler(
       return ia - ib;
     });
 
+    // ✅ NEW: collect outbound origin/invoice refs for PD inbound matching
+    const outboundRefs = Array.from(
+      new Set(
+        outbounds
+          .flatMap((o: any) => [o.origin, o.invoice])
+          .map((v) => String(v ?? "").trim())
+          .filter(Boolean),
+      ),
+    );
+
+    // ✅ NEW: get inbound PD where inbound.origin matches outbound.origin OR outbound.invoice
+    const pdInbounds =
+      outboundRefs.length > 0
+        ? await prisma.inbound.findMany({
+            where: {
+              deleted_at: null,
+              in_type: "PD",
+              OR: outboundRefs.map((ref) => ({
+                origin: {
+                  equals: ref,
+                  mode: "insensitive",
+                },
+              })),
+            },
+            include: {
+              goods_ins: {
+                where: { deleted_at: null },
+                orderBy: [{ sequence: "asc" }, { id: "asc" }],
+              },
+            },
+            orderBy: { id: "desc" },
+          })
+        : [];
+
+    // ✅ NEW: map by inbound.origin
+    const pdInboundMap = new Map<string, any[]>();
+
+    for (const inbound of pdInbounds as any[]) {
+      const key = String(inbound.origin ?? "").trim().toLowerCase();
+      if (!key) continue;
+
+      if (!pdInboundMap.has(key)) pdInboundMap.set(key, []);
+      pdInboundMap.get(key)!.push(inbound);
+    }
+
     const deptMap = await buildDepartmentCodeMapFromOutbounds(outbounds as any);
 
     const data = await Promise.all(
@@ -2601,6 +2645,82 @@ export const getOdooOutboundsByBatchName = asyncHandler(
         formatted.department_code = resolveDepartmentCodeForOutbound(
           deptMap,
           outbound as any,
+        );
+
+        // ✅ NEW: attach PD inbounds only if inbound.origin matches this outbound.origin or outbound.invoice
+        const outboundOriginKey = String(outbound.origin ?? "")
+          .trim()
+          .toLowerCase();
+        const outboundInvoiceKey = String(outbound.invoice ?? "")
+          .trim()
+          .toLowerCase();
+
+        const pdInboundsByOrigin = outboundOriginKey
+          ? pdInboundMap.get(outboundOriginKey) ?? []
+          : [];
+
+        const pdInboundsByInvoice = outboundInvoiceKey
+          ? pdInboundMap.get(outboundInvoiceKey) ?? []
+          : [];
+
+        const pdInboundUniqueMap = new Map<number, any>();
+
+        for (const pd of [...pdInboundsByOrigin, ...pdInboundsByInvoice]) {
+          pdInboundUniqueMap.set(Number(pd.id), pd);
+        }
+
+        formatted.pd_inbounds = [...pdInboundUniqueMap.values()].map(
+          (pd: any) => ({
+            id: pd.id,
+            no: pd.no,
+            picking_id: pd.picking_id ?? null,
+            in_type: pd.in_type,
+            origin: pd.origin,
+            invoice: pd.invoice ?? null,
+            reference: pd.reference ?? null,
+            status: pd.status,
+            location_id: pd.location_id ?? null,
+            location: pd.location ?? null,
+            location_dest_id: pd.location_dest_id ?? null,
+            location_dest: pd.location_dest ?? null,
+            department_id: pd.department_id ?? null,
+            department: pd.department ?? null,
+            created_at: pd.created_at,
+            updated_at: pd.updated_at ?? null,
+            matched_outbound_by:
+              outboundOriginKey &&
+              String(pd.origin ?? "").trim().toLowerCase() === outboundOriginKey
+                ? "origin"
+                : outboundInvoiceKey &&
+                    String(pd.origin ?? "").trim().toLowerCase() ===
+                      outboundInvoiceKey
+                  ? "invoice"
+                  : null,
+            matched_outbound_value:
+              String(pd.origin ?? "").trim() || null,
+            items: Array.isArray(pd.goods_ins)
+              ? pd.goods_ins.map((gi: any) => ({
+                  id: gi.id,
+                  inbound_id: gi.inbound_id,
+                  sequence: gi.sequence ?? null,
+                  product_id: gi.product_id,
+                  code: gi.code,
+                  name: gi.name,
+                  unit: gi.unit,
+                  tracking: gi.tracking ?? null,
+                  lot_id: gi.lot_id,
+                  lot_serial: gi.lot_serial,
+                  barcode_id: gi.barcode_id ?? null,
+                  barcode_text: gi.barcode_text ?? null,
+                  qty: gi.quantity ?? gi.qty ?? null,
+                  quantity: gi.quantity ?? null,
+                  quantity_count: gi.quantity_count ?? null,
+                  status: gi.status ?? null,
+                  created_at: gi.created_at ?? null,
+                  updated_at: gi.updated_at ?? null,
+                }))
+              : [],
+          }),
         );
 
         const visibleGoodsOuts = Array.isArray(outbound.goods_outs)
@@ -2684,7 +2804,6 @@ export const getOdooOutboundsByBatchName = asyncHandler(
               }))
             : [];
 
-          // ✅ NEW: return by location
           const return_locations = Array.isArray(gi.goodsOutItemLocationReturns)
             ? gi.goodsOutItemLocationReturns.map((lr: any) => ({
                 location_id: Number(lr.location_id ?? lr.location?.id ?? 0),

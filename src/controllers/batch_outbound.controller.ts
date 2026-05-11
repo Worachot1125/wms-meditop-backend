@@ -660,3 +660,47 @@ export const deleteBatchOutboundsByOutboundId = asyncHandler(
     });
   },
 );
+
+
+export const updateBatchOutboundStatusByName = asyncHandler(
+  async (req: Request<{ name: string }, {}, { status?: string }>, res: Response) => {
+    const name = decodeURIComponent(String(req.params.name ?? "")).trim();
+    const status = String(req.body?.status ?? "").trim();
+
+    if (!name) throw badRequest("กรุณาระบุ batch name");
+    if (!status) throw badRequest("กรุณาระบุ status");
+
+    const allowedStatuses = ["process", "completed", "cancelled"];
+
+    if (!allowedStatuses.includes(status)) {
+      throw badRequest(
+        `status ไม่ถูกต้อง ต้องเป็น: ${allowedStatuses.join(", ")}`,
+      );
+    }
+
+    const exists = await prisma.batch_outbound.count({
+      where: { name },
+    });
+
+    if (exists === 0) {
+      throw notFound(`ไม่พบ batch_outbound name: ${name}`);
+    }
+
+    const result = await prisma.batch_outbound.updateMany({
+      where: { name },
+      data: {
+        status,
+        updated_at: new Date(),
+        released_at: status === "completed" ? new Date() : null,
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: `อัปเดต batch ${name} เป็น ${status} สำเร็จ`,
+      batch_name: name,
+      status,
+      updated_count: result.count,
+    });
+  },
+);

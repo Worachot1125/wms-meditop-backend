@@ -2085,18 +2085,6 @@ async function resolveMovementLotFromWmsTx(
   };
 }
 
-type ConfirmPickInput = {
-  transfer_movement_id: number;
-  user_id: number;
-  locations: {
-    location_id: number;
-    lines: {
-      transfer_movement_item_id: string;
-      quantity_pick: number;
-    }[];
-  }[];
-};
-
 // POST /api/transfer_movements/:no/confirm/pick
 export const confirmTransferMovementPick = asyncHandler(
   async (

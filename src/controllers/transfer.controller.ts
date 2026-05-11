@@ -11,48 +11,6 @@ import {
 } from "../types/transfer_doc";
 import { AuthRequest, buildDepartmentAccessWhere } from "../middleware/auth";
 
-/**
- * =========================
- * Item matching helpers
- * ✅ เปลี่ยนให้เช็ค items ด้วย:
- *    - product_id
- *    - lot_serial (lot_name)
- * ❌ ไม่ใช้ lot_id ในการเช็ค/เทียบ items แล้ว
- * =========================
- */
-
-// normalize lot_serial/lot_name ให้เทียบกันได้เสถียร (กัน space/เคส)
-function normalizeLotSerial(value: unknown): string {
-  return String(value ?? "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .toLowerCase();
-}
-
-/**
- * key สำหรับการเช็ค/เทียบ item (ตัวเดียวกันหรือไม่)
- * - ต้องมี product_id
- * - lot_serial อาจว่างได้ แต่ยังถือว่าเป็นส่วนหนึ่งของ key
- */
-function itemKey(productId: unknown, lotSerial: unknown): string {
-  const pid = Number(productId);
-  const pidPart = Number.isFinite(pid) ? String(pid) : "NaN";
-  const lotPart = normalizeLotSerial(lotSerial);
-  return `${pidPart}|${lotPart}`;
-}
-
-/**
- * เทียบว่า item สองตัวเป็น "ตัวเดียวกัน" ไหม ตามกติกาใหม่
- */
-function isSameItem(
-  a: { product_id: unknown; lot_serial?: unknown; lot?: unknown },
-  b: { product_id: unknown; lot_serial?: unknown; lot?: unknown },
-): boolean {
-  const aLot = a.lot_serial ?? a.lot;
-  const bLot = b.lot_serial ?? b.lot;
-  return itemKey(a.product_id, aLot) === itemKey(b.product_id, bLot);
-}
-
 // ===== transfer stock location helpers =====
 type StockKey = string;
 const stockKeyOf = (

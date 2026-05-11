@@ -2277,7 +2277,9 @@ export const listCombinedAdjustments = asyncHandler(
       throw badRequest("status ต้องเป็น pending หรือ completed");
     }
 
-    const mode = String(req.query.level ?? "").trim().toLowerCase();
+    const mode = String(req.query.level ?? "")
+      .trim()
+      .toLowerCase();
 
     const allowedModes = ["manual", "auto"] as const;
 
@@ -2736,21 +2738,34 @@ export const getAdjustmentDetail = asyncHandler(
               lot_id: true,
               lot_name: true,
               expiration_date: true,
+              zone_type: true,
             },
             orderBy: [{ id: "desc" }],
           })
         : [];
 
-    // product_id + lot_id -> goods row
+    // ✅ product_id + lot_id -> goods row (ใช้ exp)
     const goodsRowByProductLot = new Map<string, any>();
+
+    // ✅ product_id -> goods row (ใช้ zone_type)
+    const goodsRowByProductId = new Map<number, any>();
+
     for (const g of goodsRows as any[]) {
       const pid = g?.product_id;
       const lid = g?.lot_id;
-      if (pid == null || lid == null) continue;
 
-      const key = `${Number(pid)}__${Number(lid)}`;
-      if (!goodsRowByProductLot.has(key)) {
-        goodsRowByProductLot.set(key, g);
+      // exp
+      if (pid != null && lid != null) {
+        const key = `${Number(pid)}__${Number(lid)}`;
+
+        if (!goodsRowByProductLot.has(key)) {
+          goodsRowByProductLot.set(key, g);
+        }
+      }
+
+      // zone_type
+      if (pid != null && !goodsRowByProductId.has(Number(pid))) {
+        goodsRowByProductId.set(Number(pid), g);
       }
     }
 
@@ -2766,6 +2781,11 @@ export const getAdjustmentDetail = asyncHandler(
           ? goodsRowByProductLot.get(
               `${Number(it.product_id)}__${Number(it.lot_id)}`,
             )
+          : null;
+
+      const zoneRef =
+        it.product_id != null
+          ? goodsRowByProductId.get(Number(it.product_id))
           : null;
 
       return {
@@ -2788,6 +2808,7 @@ export const getAdjustmentDetail = asyncHandler(
 
         // ✅ เพิ่ม exp จาก wms_mdt_goods
         exp: goodsRef?.expiration_date ?? null,
+        zone_type: goodsRef?.zone_type ?? null,
       };
     });
 
@@ -3744,64 +3765,6 @@ function normalizeTransfersPayload(body: any) {
       barcodes: Array.isArray(it?.barcodes) ? it.barcodes : [],
     }))
     .filter((x: any) => Number(parseIntSafe(x.qty_pick, 0)) > 0);
-}
-
-function resolveAdjustmentItemId(input: {
-  line: any;
-  adjItems: any[];
-}): number | null {
-  // ✅ FE ไม่ส่ง key/id ของ adjustment_item → resolve ด้วย product_id + lot_serial + sequence
-  const pid =
-    input.line?.product_id != null ? Number(input.line.product_id) : null;
-  if (!pid) return null;
-
-  const lot = normalizeLotOptional(input.line?.lot_serial);
-  const seq = input.line?.sequence != null ? Number(input.line.sequence) : null;
-
-  const candidates = input.adjItems.filter((x: any) => {
-    if (Number(x.product_id ?? 0) !== pid) return false;
-
-    if (lot !== undefined) {
-      const xl = normalizeLotOptional(x.lot_serial);
-      if (xl !== lot) return false;
-    }
-
-    if (seq != null && Number(x.sequence ?? 0) !== seq) return false;
-
-    return true;
-  });
-
-  if (candidates.length === 1) return Number(candidates[0].id);
-
-  // ถ้าหลายตัว: เลือกตัวที่ qty_pick ยังน้อยที่สุดก่อน
-  if (candidates.length > 1) {
-    const sorted = [...candidates].sort((a: any, b: any) => {
-      const ap = Number(a.qty_pick ?? 0);
-      const bp = Number(b.qty_pick ?? 0);
-      if (ap !== bp) return ap - bp;
-      return Number(a.id) - Number(b.id);
-    });
-    return Number(sorted[0].id);
-  }
-
-  return null;
-}
-
-function normalizeLotOptional(v: unknown): string | undefined {
-  const s = String(v ?? "")
-    .trim()
-    .replace(/\s+/g, "");
-  return s ? s : undefined;
-}
-
-function parseExpireDateOptional(v: unknown): Date | null {
-  const s = String(v ?? "").trim();
-  if (!s) return null;
-
-  // FE ส่ง "YYYY-MM-DD"
-  const d = new Date(s);
-  if (Number.isNaN(d.getTime())) return null;
-  return d;
 }
 
 function normalizeLot(v: unknown): string {

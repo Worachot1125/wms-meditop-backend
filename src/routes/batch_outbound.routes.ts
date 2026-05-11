@@ -8,6 +8,7 @@ import {
   deleteBatchOutboundsByName,
   getMyBatchOutboundGroups,
   deleteBatchOutboundsByOutboundId,
+  updateBatchOutboundStatusByName,
 } from "../controllers/batch_outbound.controller";
 
 const router = Router();
@@ -17,6 +18,7 @@ router.get("/get", auth, getBatchOutbounds);
 router.get("/get/my", auth, getMyBatchOutbounds);
 router.get("/get/groups", auth, attachDepartmentAccess, getMyBatchOutboundGroups);
 router.patch("/release", auth, releaseBatchOutbounds);
+router.patch("/update/:name", updateBatchOutboundStatusByName);
 router.delete("/delete/:name", auth, deleteBatchOutboundsByName);
 router.delete(
   "/delete/outboundId/:outbound_id",

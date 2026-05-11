@@ -4,6 +4,19 @@ import { NormalizedInboundItem } from "./inbound.normalize.helper";
 import { handleInboundTransfer } from "./inbound.transfer.helper";
 import { io } from "../../index";
 
+type PdMatchedOutbound = {
+  id: number;
+  no: string;
+  origin: string | null;
+  invoice: string | null;
+  in_process: boolean | null;
+};
+
+const normalizePdDocRef = (value: unknown) =>
+  String(value ?? "")
+    .trim()
+    .toLowerCase();
+
 export async function handlePDAutoProcess(input: {
   picking_id: any;
   number: string;
@@ -34,31 +47,96 @@ export async function handlePDAutoProcess(input: {
   } = input;
 
   const pdOrigin = String(origin ?? "").trim();
+  const pdInvoice = String(invoice ?? "").trim();
 
-  if (!pdOrigin) {
-    throw badRequest(
-      `PD ${number} ไม่พบ origin สำหรับใช้เทียบกับ outbound.origin`,
-    );
-  }
+  const createNormalInbound = async (reason: string) => {
+    const inbound = await handleInboundTransfer({
+      picking_id,
+      number,
+      location_id,
+      location,
+      location_dest_id,
+      location_dest,
+      department_id,
+      department,
+      reference,
+      origin,
+      invoice,
+      mergedItems,
+    });
 
-  const outbound = await prisma.outbound.findFirst({
+    return {
+      source: "pd",
+      pd_no: number,
+      mode: "normal_inbound",
+      reason,
+      origin,
+      invoice,
+      data: inbound,
+    };
+  };
+
+  const rawOutbounds = await prisma.outbound.findMany({
     where: {
       deleted_at: null,
-      origin: {
-        equals: pdOrigin,
-        mode: "insensitive",
-      },
     },
     select: {
       id: true,
       no: true,
       origin: true,
-    },
+      invoice: true,
+      in_process: true,
+    } as any,
   });
 
+  const allOutbounds: PdMatchedOutbound[] = (rawOutbounds as any[]).map(
+    (o) => ({
+      id: Number(o.id),
+      no: String(o.no ?? ""),
+      origin: o.origin ?? null,
+      invoice: o.invoice ?? null,
+      in_process: Boolean(o.in_process),
+    }),
+  );
+
+  const outbound: PdMatchedOutbound | null =
+    allOutbounds.find((o) => {
+      const outOrigin = normalizePdDocRef(o.origin);
+      const outInvoice = normalizePdDocRef(o.invoice);
+      const originRef = normalizePdDocRef(pdOrigin);
+      const invoiceRef = normalizePdDocRef(pdInvoice);
+
+      return (
+        (originRef && originRef === outOrigin) ||
+        (originRef && originRef === outInvoice) ||
+        (invoiceRef && invoiceRef === outOrigin) ||
+        (invoiceRef && invoiceRef === outInvoice)
+      );
+    }) ?? null;
+
   if (!outbound) {
-    throw badRequest(`PD ${number} ไม่พบ outbound จาก origin: ${pdOrigin}`);
+    return createNormalInbound("outbound_not_found");
   }
+
+  if (Boolean(outbound.in_process)) {
+    return createNormalInbound("outbound_already_in_process");
+  }
+
+  const outboundId = Number(outbound.id);
+  const outboundNo = String(outbound.no);
+  const outboundOrigin = outbound.origin ?? null;
+  const outboundInvoice = outbound.invoice ?? null;
+
+  const matchedBy =
+    normalizePdDocRef(outbound.origin) === normalizePdDocRef(pdOrigin)
+      ? "origin"
+      : normalizePdDocRef(outbound.invoice) === normalizePdDocRef(pdInvoice)
+        ? "invoice"
+        : normalizePdDocRef(outbound.invoice) === normalizePdDocRef(pdOrigin)
+          ? "pd_origin_to_outbound_invoice"
+          : normalizePdDocRef(outbound.origin) === normalizePdDocRef(pdInvoice)
+            ? "pd_invoice_to_outbound_origin"
+            : "unknown";
 
   const inbound = await handleInboundTransfer({
     picking_id,
@@ -69,7 +147,7 @@ export async function handlePDAutoProcess(input: {
     location_dest,
     department_id,
     department,
-    reference: reference || `[PD] ${outbound.no}`,
+    reference: reference || `[PD] ${outboundNo}`,
     origin,
     invoice,
     mergedItems,
@@ -86,7 +164,6 @@ export async function handlePDAutoProcess(input: {
     await tx.inbound.update({
       where: { id: inboundId },
       data: {
-        status: "completed",
         updated_at: new Date(),
       } as any,
     });
@@ -104,7 +181,7 @@ export async function handlePDAutoProcess(input: {
 
     const dbItems = await tx.goods_out_item.findMany({
       where: {
-        outbound_id: outbound.id,
+        outbound_id: outboundId,
         deleted_at: null,
       },
       select: {
@@ -159,47 +236,20 @@ export async function handlePDAutoProcess(input: {
       }
 
       const currentQty = Math.max(0, Math.floor(Number(match.qty ?? 0)));
-      const currentPick = Math.max(0, Math.floor(Number(match.pick ?? 0)));
+      const nextQty = currentQty - pdQty;
 
-      if (currentPick > 0) {
+      if (nextQty <= 0) {
         await tx.goods_out_item.update({
-          where: { id: match.id },
+          where: { id: Number(match.id) },
           data: {
-            rtc_check: true,
+            deleted_at: new Date(),
             updated_at: new Date(),
           } as any,
         });
 
         affected.push({
           pd_no: number,
-          outbound_no: outbound.no,
-          goods_out_item_id: match.id,
-          product_id,
-          lot_id,
-          lot_serial: match.lot_serial ?? item.lot_serial ?? null,
-          old_qty: currentQty,
-          pd_qty: pdQty,
-          new_qty: currentQty,
-          action: "rtc_check_only",
-        });
-
-        continue;
-      }
-
-      const nextQty = currentQty - pdQty;
-
-      if (nextQty <= 0) {
-        await tx.goods_out_item.update({
-          where: { id: match.id },
-          data: {
-            deleted_at: new Date(),
-            updated_at: new Date(),
-          },
-        });
-
-        affected.push({
-          pd_no: number,
-          outbound_no: outbound.no,
+          outbound_no: outboundNo,
           goods_out_item_id: match.id,
           product_id,
           lot_id,
@@ -214,16 +264,16 @@ export async function handlePDAutoProcess(input: {
       }
 
       await tx.goods_out_item.update({
-        where: { id: match.id },
+        where: { id: Number(match.id) },
         data: {
           qty: nextQty,
           updated_at: new Date(),
-        },
+        } as any,
       });
 
       affected.push({
         pd_no: number,
-        outbound_no: outbound.no,
+        outbound_no: outboundNo,
         goods_out_item_id: match.id,
         product_id,
         lot_id,
@@ -237,7 +287,7 @@ export async function handlePDAutoProcess(input: {
 
     const remainingActiveItems = await tx.goods_out_item.count({
       where: {
-        outbound_id: outbound.id,
+        outbound_id: outboundId,
         deleted_at: null,
       },
     });
@@ -246,34 +296,34 @@ export async function handlePDAutoProcess(input: {
 
     if (remainingActiveItems === 0) {
       await tx.outbound.update({
-        where: { id: outbound.id },
+        where: { id: outboundId },
         data: {
           deleted_at: new Date(),
           updated_at: new Date(),
-        },
+        } as any,
       });
 
       outbound_action = "soft_delete";
     } else {
       await tx.outbound.update({
-        where: { id: outbound.id },
+        where: { id: outboundId },
         data: {
           updated_at: new Date(),
-        },
+        } as any,
       });
     }
 
     return {
       source: "pd",
       pd_no: number,
-      outbound_id: outbound.id,
-      outbound_no: outbound.no,
-      outbound_origin: outbound.origin,
+      outbound_id: outboundId,
+      outbound_no: outboundNo,
+      outbound_origin: outboundOrigin,
+      outbound_invoice: outboundInvoice,
       inbound_id: inboundId,
       inbound_no: inboundNo,
       mode: "auto_process",
-      status: "completed",
-      matched_by_origin: pdOrigin,
+      matched_by: matchedBy,
       affected,
       ignored,
       remaining_active_items: remainingActiveItems,
