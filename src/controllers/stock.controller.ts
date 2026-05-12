@@ -556,6 +556,20 @@ export const getStocks = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
+function normalizeLocationKeyword(value: string) {
+  const text = value.trim().toLowerCase();
+
+  if (["location_pack", "location pack", "location-pack"].includes(text)) {
+    return "Location_Pack";
+  }
+
+  if (["exp&ncr", "exp ncr", "exp-ncr", "exp_ncr"].includes(text)) {
+    return "EXP&NCR";
+  }
+
+  return value.trim();
+}
+
 // GET Stocks (WITH PAGINATION)
 export const getStocksPaginated = asyncHandler(
   async (req: Request, res: Response) => {
@@ -572,25 +586,49 @@ export const getStocksPaginated = asyncHandler(
     }
 
     const skip = (page - 1) * limit;
+
     const rawSearch = req.query.search;
     const search = typeof rawSearch === "string" ? rawSearch.trim() : "";
+    const locationSearch = search ? normalizeLocationKeyword(search) : "";
+
+    const locationMode =
+      typeof req.query.locationMode === "string"
+        ? req.query.locationMode.trim()
+        : "default";
 
     const sortBy = parseStockSortBy(req.query.sortBy);
     const sortDir = parseSortDir(req.query.sortDir);
 
-    let where: Prisma.stockWhereInput = {};
+    const andWhere: Prisma.stockWhereInput[] = [];
 
+    // ✅ Search ปกติ
     if (search) {
       const isNumber = !isNaN(Number(search));
 
-      where = {
+      andWhere.push({
         OR: [
           { bucket_key: { contains: search, mode: "insensitive" } },
           { product_code: { contains: search, mode: "insensitive" } },
           { product_name: { contains: search, mode: "insensitive" } },
+
+          // search location_name ปกติ
           { location_name: { contains: search, mode: "insensitive" } },
+
+          // รองรับ location pack / exp ncr แบบ normalize
+          ...(locationSearch !== search
+            ? [
+                {
+                  location_name: {
+                    contains: locationSearch,
+                    mode: "insensitive" as const,
+                  },
+                },
+              ]
+            : []),
+
           { lot_name: { contains: search, mode: "insensitive" } },
           { source: { contains: search, mode: "insensitive" } },
+
           ...(isNumber
             ? [
                 { quantity: { equals: Number(search) } },
@@ -598,8 +636,52 @@ export const getStocksPaginated = asyncHandler(
               ]
             : []),
         ],
-      };
+      });
     }
+
+    // ✅ Location mode filter
+    // default = ไม่เอา Location_Pack และ EXP&NCR
+    if (locationMode === "default") {
+      andWhere.push({
+        NOT: [
+          {
+            location_name: {
+              contains: "Location_Pack",
+              mode: "insensitive",
+            },
+          },
+          {
+            location_name: {
+              contains: "EXP&NCR",
+              mode: "insensitive",
+            },
+          },
+        ],
+      });
+    }
+
+    // location_pack = เอาเฉพาะ Location_Pack
+    if (locationMode === "location_pack") {
+      andWhere.push({
+        location_name: {
+          contains: "Location_Pack",
+          mode: "insensitive",
+        },
+      });
+    }
+
+    // exp_ncr = เอาเฉพาะ EXP&NCR
+    if (locationMode === "exp_ncr") {
+      andWhere.push({
+        location_name: {
+          contains: "EXP&NCR",
+          mode: "insensitive",
+        },
+      });
+    }
+
+    const where: Prisma.stockWhereInput =
+      andWhere.length > 0 ? { AND: andWhere } : {};
 
     const orderBy = buildStockOrderBy(sortBy, sortDir);
 
@@ -613,9 +695,12 @@ export const getStocksPaginated = asyncHandler(
       prisma.stock.count({ where }),
     ]);
 
-    // ✅ attach barcode_text + barcode detail (เฉพาะหน้า page นี้)
+    // ✅ attach barcode_text + barcode detail เฉพาะ page นี้
     const { keyToBarcodeText, barcodeMap } = await attachBarcodeToStocks(
-      stocks.map((s) => ({ product_id: s.product_id, lot_name: s.lot_name })),
+      stocks.map((s) => ({
+        product_id: s.product_id,
+        lot_name: s.lot_name,
+      })),
     );
 
     const data = stocks.map((s) => {
@@ -624,7 +709,7 @@ export const getStocksPaginated = asyncHandler(
       const k = stockGoodsKey(s.product_id, s.lot_name);
       const barcode_text = keyToBarcodeText.get(k) ?? null;
       const barcode = barcode_text
-        ? (barcodeMap.get(barcode_text) ?? null)
+        ? barcodeMap.get(barcode_text) ?? null
         : null;
 
       return {
@@ -643,6 +728,7 @@ export const getStocksPaginated = asyncHandler(
         totalPages: Math.ceil(total / limit),
         sortBy,
         sortDir,
+        locationMode,
       },
     });
   },

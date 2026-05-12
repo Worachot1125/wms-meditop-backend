@@ -1,3 +1,5 @@
+// src/services/wmsDailySnapshot.service.ts
+
 import { prisma } from "../lib/prisma";
 import { logger } from "../lib/logger";
 
@@ -13,6 +15,7 @@ function toStartOfDay(d: Date) {
   x.setHours(0, 0, 0, 0);
   return x;
 }
+
 function addDays(d: Date, days: number) {
   const x = new Date(d);
   x.setDate(x.getDate() + days);
@@ -21,8 +24,13 @@ function addDays(d: Date, days: number) {
 
 export class WmsDailySnapshotService {
   /**
-   * สร้างรายวันจาก stock (live) ของ WMS
-   * policy: delete ของวันนั้นก่อน แล้ว createMany ใหม่
+   * Refresh daily WMS stock snapshot.
+   *
+   * Policy:
+   * - Keep old dates.
+   * - Delete only the target date.
+   * - Insert latest live WMS stock again.
+   * - Can run every hour safely.
    */
   async createDailySnapshot(
     triggeredBy: string = "system",
@@ -36,29 +44,42 @@ export class WmsDailySnapshotService {
     };
 
     try {
-      const target = date ? toStartOfDay(new Date(date)) : toStartOfDay(new Date());
-      const nextDay = addDays(target, 1);
+      const target = date
+        ? toStartOfDay(new Date(date))
+        : toStartOfDay(new Date());
 
+      const nextDay = addDays(target, 1);
       result.snapshot_date = target.toISOString().split("T")[0];
 
-      logger.info("📸 Creating WMS DAILY snapshot...", {
+      logger.info("📸 Refreshing WMS daily latest snapshot...", {
         triggeredBy,
         snapshot_date: result.snapshot_date,
       });
 
       const liveStocks = await prisma.stock.findMany({
-        where: { source: "wms" },
-        orderBy: { id: "asc" },
+        where: {
+          source: "wms",
+        },
+        orderBy: {
+          id: "asc",
+        },
       });
 
       logger.info(`📥 Found ${liveStocks.length} live WMS stock records`);
 
       await prisma.$transaction(async (tx) => {
-        // ✅ ลบด้วย "ช่วงวัน" กัน timezone mismatch
         const deleted = await tx.wms_stock_daily.deleteMany({
-          where: { snapshot_date: { gte: target, lt: nextDay } },
+          where: {
+            snapshot_date: {
+              gte: target,
+              lt: nextDay,
+            },
+          },
         });
-        logger.info(`🗑️ Deleted ${deleted.count} existing daily records`);
+
+        logger.info(
+          `🗑️ Deleted ${deleted.count} existing records for ${result.snapshot_date}`,
+        );
 
         if (liveStocks.length === 0) return;
 
@@ -67,6 +88,7 @@ export class WmsDailySnapshotService {
             snapshot_date: target,
 
             bucket_key: s.bucket_key,
+
             product_id: s.product_id,
             product_code: s.product_code ?? null,
             product_name: s.product_name ?? null,
@@ -84,18 +106,27 @@ export class WmsDailySnapshotService {
         });
       });
 
-      // ✅ นับด้วย "ช่วงวัน" เช่นกัน
       result.total_snapshot = await prisma.wms_stock_daily.count({
-        where: { snapshot_date: { gte: target, lt: nextDay } },
+        where: {
+          snapshot_date: {
+            gte: target,
+            lt: nextDay,
+          },
+        },
       });
 
-      logger.info(`✅ WMS DAILY snapshot done: ${result.total_snapshot} rows`);
+      logger.info(
+        `✅ WMS daily latest snapshot done: ${result.total_snapshot} rows`,
+      );
+
       return result;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+
       result.success = false;
       result.errors.push(msg);
-      logger.error(`❌ WMS DAILY snapshot failed: ${msg}`);
+
+      logger.error(`❌ WMS daily latest snapshot failed: ${msg}`);
       throw e;
     }
   }

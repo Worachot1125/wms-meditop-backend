@@ -45,6 +45,7 @@ import {
   finalizePackProduct,
   getPackProductSummary,
   getPackProducts,
+  movePdPackingToLocation,
 } from "../controllers/pack_product.controller";
 
 const router = Router();
@@ -86,6 +87,10 @@ router.patch("/update/rtc/:id", updateGoodsOutItemRtc);
 // list
 router.get("/pack-products", getPackProducts);
 router.get("/pack-products/by-prefix/:prefix", getPackProductByPrefix);
+router.post(
+  "/pack-products/:packProductId/pd/move-to-pack-location",
+  movePdPackingToLocation,
+);
 // summary ต้องมาก่อน :id ถ้าใช้ pattern นี้
 router.get("/pack-products/:packProductId/summary", getPackProductSummary);
 router.get("/pack-products/:id", getPackProductById);
@@ -129,7 +134,6 @@ router.post(
   "/pack-products/:packProductId/finalize",
   finalizePackProduct,
 );
-
 
 router.delete(
   "/pack-products/:packProductId/boxes/:boxId/items/:packBoxItemId",

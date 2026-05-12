@@ -394,3 +394,27 @@ export const deleteLocation = asyncHandler(
     return res.json({ message: "ลบสถานที่เรียบร้อยแล้ว" });
   }
 );
+
+export const getAllLocationPackLocations = asyncHandler(
+  async (_req: Request, res: Response) => {
+    const data = await prisma.location.findMany({
+      where: {
+        deleted_at: null,
+        lock_no: {
+          equals: "Location_Pack",
+          mode: "insensitive",
+        },
+      },
+      include: {
+        building: true,
+        zone: true,
+      },
+      orderBy: [{ full_name: "asc" }, { id: "asc" }],
+    });
+
+    return res.json({
+      data,
+      total: data.length,
+    });
+  },
+);

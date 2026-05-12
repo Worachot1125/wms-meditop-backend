@@ -9,6 +9,7 @@ import {
 } from "../utils/helper_scan/barcode";
 import { formatPackProduct } from "../utils/formatters/pack_product.formatter";
 import { io } from "../index";
+import { resolveLocationByFullNameBasic } from "../utils/helper_scan/location";
 
 function buildDayRangeFromSearch(search: string) {
   const maybeDate = new Date(search);
@@ -873,7 +874,7 @@ function pickSingleMatchedItem(
 }
 
 function applyReturnToPackProduct(row: any) {
-  const cloned = {
+  return {
     ...row,
     outbounds: Array.isArray(row?.outbounds)
       ? row.outbounds.map((po: any) => ({
@@ -887,8 +888,13 @@ function applyReturnToPackProduct(row: any) {
 
                       return {
                         ...item,
-                        qty: Math.max(0, Number(item.qty ?? 0) - returnQty),
-                        pick: Math.max(0, Number(item.pick ?? 0) - returnQty),
+
+                        // ✅ qty เดิมจาก DB
+                        qty: Number(item.qty ?? 0),
+
+                        // ✅ pick เดิมจาก DB
+                        pick: Number(item.pick ?? 0),
+
                         original_qty: Number(item.qty ?? 0),
                         original_pick: Number(item.pick ?? 0),
                         return_qty: returnQty,
@@ -900,8 +906,6 @@ function applyReturnToPackProduct(row: any) {
         }))
       : row?.outbounds,
   };
-
-  return cloned;
 }
 
 export const getPackProducts = asyncHandler(
@@ -2405,6 +2409,407 @@ export const finalizePackProduct = asyncHandler(
           force,
         },
       },
+    });
+  },
+);
+
+async function resolveWmsLotExpTx(
+  tx: any,
+  args: {
+    product_id: number;
+    lot_id?: number | null;
+    lot_serial?: string | null;
+  },
+) {
+  const wms = await tx.wms_mdt_goods.findFirst({
+    where: {
+      product_id: Number(args.product_id),
+      lot_id: args.lot_id ?? null,
+    } as any,
+    select: {
+      lot_name: true,
+      expiration_date: true,
+    } as any,
+  });
+
+  return {
+    lot_name: wms?.lot_name ?? args.lot_serial ?? null,
+    expiration_date: wms?.expiration_date ?? null,
+  };
+}
+
+const buildMoveToPackStockKey = (args: {
+  product_id: number;
+  location_id: number;
+  lot_id?: number | null;
+}) => {
+  return `wms_${args.product_id}_${args.location_id}_${args.lot_id ?? "null"}`;
+};
+
+function buildPdItemKey(item: any) {
+  return `${Number(item.product_id ?? 0)}__${item.lot_id ?? "null"}__${String(
+    item.lot_serial ?? item.lot ?? "",
+  )
+    .trim()
+    .toLowerCase()}`;
+}
+
+async function getPendingPdInboundForOutboundTx(tx: any, outbound: any) {
+  const refs = [outbound.no, outbound.invoice, outbound.origin]
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean);
+
+  if (!refs.length) return [];
+
+  return tx.inbound.findMany({
+    where: {
+      deleted_at: null,
+      in_type: "PD",
+      status: { not: "completed" },
+      OR: refs.flatMap((ref) => [
+        { origin: { equals: ref, mode: "insensitive" } },
+        { invoice: { equals: ref, mode: "insensitive" } },
+        { reference: { contains: ref, mode: "insensitive" } },
+      ]),
+    } as any,
+    include: {
+      goods_ins: true,
+    } as any,
+  });
+}
+
+export const movePdPackingToLocation = asyncHandler(
+  async (req: Request, res: Response) => {
+    const packProductId = Number(req.params.packProductId || 0);
+    const outboundNo = String(req.body?.outbound_no || "").trim();
+    const locationFullName = String(req.body?.location_full_name || "").trim();
+
+    if (!packProductId) throw badRequest("packProductId is required");
+    if (!outboundNo) throw badRequest("outbound_no is required");
+    if (!locationFullName) throw badRequest("location_full_name is required");
+
+    const location = await resolveLocationByFullNameBasic(locationFullName);
+
+    const result = await prisma.$transaction(async (tx) => {
+      const packProduct: any = await tx.pack_product.findFirst({
+        where: {
+          id: packProductId,
+          deleted_at: null,
+        } as any,
+        select: {
+          id: true,
+          name: true,
+          status: true,
+        } as any,
+      });
+
+      if (!packProduct) {
+        throw badRequest(`ไม่พบ pack_product id=${packProductId}`);
+      }
+
+      const outbound: any = await tx.outbound.findFirst({
+        where: {
+          no: outboundNo,
+          deleted_at: null,
+        } as any,
+        select: {
+          id: true,
+          no: true,
+          origin: true,
+          invoice: true,
+        } as any,
+      });
+
+      if (!outbound) {
+        throw badRequest(`ไม่พบ outbound: ${outboundNo}`);
+      }
+
+      const pdInbounds = await getPendingPdInboundForOutboundTx(tx, outbound);
+
+      const pdQtyMap = new Map<string, number>();
+
+      for (const inbound of pdInbounds as any[]) {
+        for (const gi of inbound.goods_ins ?? []) {
+          const key = buildPdItemKey(gi);
+          const qty = Math.max(
+            0,
+            Math.floor(
+              Number(gi.qty ?? gi.quantity_receive ?? gi.quantity ?? 0),
+            ),
+          );
+
+          if (qty <= 0) continue;
+
+          pdQtyMap.set(key, Number(pdQtyMap.get(key) ?? 0) + qty);
+        }
+      }
+
+      const link = await tx.pack_product_outbound.findFirst({
+        where: {
+          pack_product_id: packProductId,
+          outbound_id: Number(outbound.id),
+        } as any,
+        select: {
+          id: true,
+        },
+      });
+
+      if (!link) {
+        throw badRequest(
+          `outbound ${outboundNo} ไม่ได้อยู่ใน pack_product นี้`,
+        );
+      }
+
+      const items: any[] = await tx.goods_out_item.findMany({
+        where: {
+          outbound_id: Number(outbound.id),
+          deleted_at: null,
+        } as any,
+        select: {
+          id: true,
+          product_id: true,
+          code: true,
+          name: true,
+          unit: true,
+          lot_id: true,
+          lot_serial: true,
+          qty: true,
+          pick: true,
+          pack: true,
+        } as any,
+      });
+
+      if (!items.length) {
+        throw badRequest(
+          "ไม่พบสินค้าใน outbound สำหรับย้ายไป Location Packing",
+        );
+      }
+
+      const moved: any[] = [];
+
+      for (const item of items) {
+        if (!item.product_id) {
+          throw badRequest(`goods_out_item id=${item.id} ไม่มี product_id`);
+        }
+
+        const packQty = Math.max(0, Math.floor(Number(item.pack ?? 0)));
+        const pickQty = Math.max(0, Math.floor(Number(item.pick ?? 0)));
+        const baseQty = Math.max(0, Math.floor(Number(item.qty ?? 0)));
+
+        const moveQty = packQty > 0 ? packQty : pickQty > 0 ? pickQty : baseQty;
+
+        if (moveQty <= 0) continue;
+
+        const fallback = await resolveWmsLotExpTx(tx, {
+          product_id: Number(item.product_id),
+          lot_id: item.lot_id ?? null,
+          lot_serial: item.lot_serial ?? null,
+        });
+
+        const bucketKey = buildMoveToPackStockKey({
+          product_id: Number(item.product_id),
+          location_id: Number(location.id),
+          lot_id: item.lot_id ?? null,
+        });
+
+        const stock: any = await tx.stock.findFirst({
+          where: {
+            bucket_key: bucketKey,
+          } as any,
+          orderBy: [{ id: "asc" }],
+        });
+
+        if (stock) {
+          await tx.stock.update({
+            where: {
+              id: Number(stock.id),
+            },
+            data: {
+              quantity: {
+                increment: moveQty,
+              },
+              product_code: item.code ?? stock.product_code ?? null,
+              product_name: item.name ?? stock.product_name ?? null,
+              unit: item.unit ?? stock.unit ?? null,
+              location_id: Number(location.id),
+              location_name: location.full_name,
+              lot_id: item.lot_id ?? null,
+              lot_name: fallback.lot_name,
+              expiration_date: fallback.expiration_date,
+              active: true,
+              updated_at: new Date(),
+            } as any,
+          });
+        } else {
+          await tx.stock.create({
+            data: {
+              bucket_key: bucketKey,
+
+              product_id: Number(item.product_id),
+              product_code: item.code ?? null,
+              product_name: item.name ?? null,
+              unit: item.unit ?? null,
+
+              location_id: Number(location.id),
+              location_name: location.full_name,
+
+              lot_id: item.lot_id ?? null,
+              lot_name: fallback.lot_name,
+              expiration_date: fallback.expiration_date,
+
+              quantity: new Prisma.Decimal(moveQty),
+              source: "wms",
+              active: true,
+            } as any,
+          });
+        }
+
+        await tx.pack_product_box_item.deleteMany({
+          where: {
+            goods_out_item_id: Number(item.id),
+          } as any,
+        });
+
+        const itemKey = buildPdItemKey(item);
+        const pdQtyForItem = Math.max(
+          0,
+          Math.floor(Number(pdQtyMap.get(itemKey) ?? 0)),
+        );
+
+        const currentPick = Math.max(0, Math.floor(Number(item.pick ?? 0)));
+        const nextPick = Math.max(0, currentPick - pdQtyForItem);
+
+        await tx.goods_out_item.update({
+          where: {
+            id: Number(item.id),
+          },
+          data: {
+            pack: 0,
+            pick: nextPick,
+            updated_at: new Date(),
+          } as any,
+        });
+
+        moved.push({
+          goods_out_item_id: Number(item.id),
+          product_id: Number(item.product_id),
+          code: item.code,
+          name: item.name,
+          lot_id: item.lot_id,
+          lot_serial: item.lot_serial,
+          qty: moveQty,
+          used_qty_source: packQty > 0 ? "pack" : pickQty > 0 ? "pick" : "qty",
+          location_id: Number(location.id),
+          location_full_name: location.full_name,
+          lot_name: fallback.lot_name,
+          expiration_date: fallback.expiration_date,
+          pd_qty_for_pick_reduce: pdQtyForItem,
+          old_pick: currentPick,
+          new_pick: nextPick,
+        });
+      }
+
+      if (!moved.length) {
+        throw badRequest("ไม่พบจำนวนสินค้าที่สามารถย้ายไป Location Packing");
+      }
+
+      const remainingLinks = await tx.pack_product_outbound.count({
+        where: {
+          pack_product_id: packProductId,
+        } as any,
+      });
+
+      let packProductAction: "keep" | "soft_delete" = "keep";
+
+      if (remainingLinks === 0) {
+        await tx.pack_product.update({
+          where: {
+            id: packProductId,
+          },
+          data: {
+            updated_at: new Date(),
+          } as any,
+        });
+
+        packProductAction = "keep";
+      } else {
+        await tx.pack_product.update({
+          where: {
+            id: packProductId,
+          },
+          data: {
+            updated_at: new Date(),
+          } as any,
+        });
+
+        packProductAction = "keep";
+      }
+
+      await tx.inbound.updateMany({
+        where: {
+          OR: [
+            {
+              origin: {
+                equals: outbound.no,
+                mode: "insensitive",
+              },
+            },
+            {
+              invoice: {
+                equals: outbound.invoice ?? "",
+                mode: "insensitive",
+              },
+            },
+          ],
+          deleted_at: null,
+        } as any,
+        data: {
+          status: "completed",
+          updated_at: new Date(),
+        } as any,
+      });
+
+      if (pdInbounds.length > 0) {
+        await tx.inbound.updateMany({
+          where: {
+            id: {
+              in: pdInbounds.map((x: any) => Number(x.id)),
+            },
+          } as any,
+          data: {
+            status: "completed",
+            updated_at: new Date(),
+          } as any,
+        });
+      }
+
+      return {
+        pack_product_id: packProductId,
+        pack_product_name: packProduct.name,
+        pack_product_action: packProductAction,
+        remaining_pack_outbounds: remainingLinks,
+        outbound_id: Number(outbound.id),
+        outbound_no: outbound.no,
+        outbound_origin: outbound.origin,
+        outbound_invoice: outbound.invoice,
+        location_id: Number(location.id),
+        location_full_name: location.full_name,
+        moved,
+      };
+    });
+
+    io.to(`pack_product:${packProductId}`).emit("pack_product:updated", {
+      pack_product_id: packProductId,
+      reason: "pd_move_to_pack_location",
+      data: result,
+    });
+
+    io.emit("packing:pd_moved", result);
+
+    return res.json({
+      success: true,
+      message: "ย้ายสินค้าไป Location Packing สำเร็จ",
+      data: result,
     });
   },
 );

@@ -7,17 +7,64 @@ import { rtcAdjustmentMatchKey } from "./inbound.key.helper";
 import { io } from "../../index";
 
 export async function handleRTCReturnTransfer(input: {
+  picking_id?: any;
   number: string;
+  location_id?: any;
+  location?: any;
+  location_dest_id?: any;
+  location_dest?: any;
+  department_id?: any;
+  department?: any;
+  reference?: any;
   origin: any;
+  invoice?: any;
   mergedItems: NormalizedInboundItem[];
 }) {
-  const { number, origin, mergedItems } = input;
+  const {
+    picking_id,
+    number,
+    location_id,
+    location,
+    location_dest_id,
+    location_dest,
+    department_id,
+    department,
+    reference,
+    origin,
+    invoice,
+    mergedItems,
+  } = input;
 
   const outboundNo = extractOutboundNoFromOrigin(origin);
+
+  // ✅ RTC ที่ไม่มี outbound ref
+  // -> เข้า inbound ปกติ
   if (!outboundNo) {
-    throw badRequest(
-      `RTC ${number} ไม่สามารถหา outbound no จาก origin ได้: ${String(origin ?? "")}`,
-    );
+    const inbound = await handleInboundTransfer({
+      picking_id,
+      number,
+      location_id,
+      location,
+      location_dest_id,
+      location_dest,
+      department_id,
+      department,
+      reference:
+        reference != null ? String(reference) : `[RTC-NO-REF] ${number}`,
+      origin,
+      invoice,
+      mergedItems,
+    });
+
+    return {
+      source: "rtc",
+      rtc_no: number,
+      outbound_id: null,
+      outbound_no: null,
+      mode: "fallback_inbound",
+      reason: "missing_outbound_ref",
+      data: inbound,
+    };
   }
 
   const outbound = await prisma.outbound.findFirst({
@@ -43,7 +90,34 @@ export async function handleRTCReturnTransfer(input: {
   });
 
   if (!outbound) {
-    throw badRequest(`RTC ${number} ไม่พบ outbound จาก origin: ${outboundNo}`);
+    // ✅ RTC ที่ไม่ match outbound
+    // -> เข้า inbound/goods_in ปกติ
+
+    const inbound = await handleInboundTransfer({
+      number,
+      origin,
+      mergedItems,
+
+      // fallback
+      picking_id: null,
+      location_id: null,
+      location: null,
+      location_dest_id: null,
+      location_dest: null,
+      department_id: null,
+      department: "",
+      reference: `[RTC-NO-MATCH] ${outboundNo}`,
+      invoice: null,
+    } as any);
+
+    return {
+      source: "rtc",
+      rtc_no: number,
+      outbound_id: null,
+      outbound_no: outboundNo,
+      mode: "fallback_inbound",
+      data: inbound,
+    };
   }
 
   /**
@@ -54,17 +128,18 @@ export async function handleRTCReturnTransfer(input: {
    */
   if (Boolean(outbound.in_process)) {
     const inbound = await handleInboundTransfer({
-      picking_id: outbound.picking_id ?? null,
+      picking_id,
       number,
-      location_id: outbound.location_id ?? null,
-      location: outbound.location ?? null,
-      location_dest_id: outbound.location_dest_id ?? null,
-      location_dest: outbound.location_dest ?? null,
-      department_id: outbound.department_id ?? null,
-      department: outbound.department ?? "",
-      reference: `[RTC] ${outbound.no}`,
+      location_id,
+      location,
+      location_dest_id,
+      location_dest,
+      department_id,
+      department,
+      reference:
+        reference != null ? String(reference) : `[RTC-NO-REF] ${number}`,
       origin,
-      invoice: outbound.invoice ?? null,
+      invoice,
       mergedItems,
     });
 
@@ -487,11 +562,17 @@ export function extractOutboundNoFromOrigin(origin: any): string | null {
 
   if (!s) return null;
 
-  // รองรับรูปแบบ: "การส่งคืนของ DOxxxx-xxxx"
-  const m = s.match(/\b(DO[A-Z0-9-]+)\b/i);
-  if (!m) return null;
+  // ✅ WH/DO/xxxx
+  const whMatch = s.match(/WH\/DO\/[^\s]+/i);
+  if (whMatch?.[0]) {
+    return whMatch[0].trim().toUpperCase();
+  }
 
-  return String(m[1] ?? "")
-    .trim()
-    .toUpperCase();
+  // ✅ DO-xxxx / DOxxxx
+  const doMatch = s.match(/\b(DO[A-Z0-9-]+)\b/i);
+  if (doMatch?.[1]) {
+    return doMatch[1].trim().toUpperCase();
+  }
+
+  return null;
 }

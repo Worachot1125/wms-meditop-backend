@@ -6,6 +6,7 @@ import {
   getInboundByGr,
   getInbounds,
   getInboundsPaginated,
+  replaceOutboundByInbound,
   updateInbound,
 } from "../controllers/inbound.controller";
 import {
@@ -28,6 +29,9 @@ const router = Router();
 router.post("/create", createInbound);
 router.get("/getAll", auth, attachDepartmentAccess, getInbounds);
 router.get("/get", auth, attachDepartmentAccess, getInboundsPaginated);
+
+router.post("/:no/replace-outbound", replaceOutboundByInbound);
+
 router.get("/get/:gr", getInboundByGr);
 router.patch("/update/:gr", updateInbound);
 router.delete("/delete/:gr", deleteInbound);

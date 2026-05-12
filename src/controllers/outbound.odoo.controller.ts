@@ -1739,6 +1739,9 @@ const buildOdooOutboundAvailableSearchWhere = async (
               { code: { contains: term, mode: "insensitive" } },
               { name: { contains: term, mode: "insensitive" } },
               { sku: { contains: term, mode: "insensitive" } },
+              { lot_serial: { contains: term, mode: "insensitive" } },
+              { barcode_text: { contains: term, mode: "insensitive" } },
+              { unit: { contains: term, mode: "insensitive" } },
             ],
           },
         },
@@ -1936,6 +1939,12 @@ export const getOdooOutboundsAvailable = asyncHandler(
         include: {
           goods_outs: {
             where: { deleted_at: null },
+            include: {
+              barcode_ref: {
+                where: { deleted_at: null },
+              },
+            },
+            orderBy: [{ sequence: "asc" }, { id: "asc" }],
           },
         },
       }),
@@ -1983,6 +1992,46 @@ export const getOdooOutboundsAvailable = asyncHandler(
         ? deptMap.get(deptId)
         : undefined;
 
+      const items = Array.isArray(ob.goods_outs)
+        ? ob.goods_outs.map((item: any) => ({
+            id: item.id,
+            outbound_id: item.outbound_id,
+            sequence: item.sequence,
+            product_id: item.product_id,
+            code: item.code,
+            name: item.name,
+            sku: item.sku,
+            unit: item.unit,
+            tracking: item.tracking,
+            lot_id: item.lot_id,
+            lot_serial: item.lot_serial,
+            qty: item.qty,
+            pick: item.pick,
+            confirmed_pick: item.confirmed_pick,
+            pack: item.pack,
+            rtc: item.rtc,
+            rtc_check: item.rtc_check,
+            return: item.return,
+            return_check: item.return_check,
+            status: item.status,
+            barcode_id: item.barcode_id,
+            barcode_text: item.barcode_text,
+            created_at: item.created_at,
+            updated_at: item.updated_at,
+            barcode: item.barcode_ref
+              ? {
+                  id: item.barcode_ref.id,
+                  barcode: item.barcode_ref.barcode,
+                  lot_start: item.barcode_ref.lot_start,
+                  lot_stop: item.barcode_ref.lot_stop,
+                  exp_start: item.barcode_ref.exp_start,
+                  exp_stop: item.barcode_ref.exp_stop,
+                  barcode_length: item.barcode_ref.barcode_length,
+                }
+              : null,
+          }))
+        : [];
+
       return {
         id: ob.id,
         no: ob.no,
@@ -1996,7 +2045,8 @@ export const getOdooOutboundsAvailable = asyncHandler(
         location: ob.location,
         location_dest: ob.location_dest,
         out_type: ob.out_type,
-        total_items: ob.goods_outs?.length ?? 0,
+        total_items: items.length,
+        items, // ✅ เพิ่มตรงนี้
       };
     });
 
@@ -2622,7 +2672,9 @@ export const getOdooOutboundsByBatchName = asyncHandler(
     const pdInboundMap = new Map<string, any[]>();
 
     for (const inbound of pdInbounds as any[]) {
-      const key = String(inbound.origin ?? "").trim().toLowerCase();
+      const key = String(inbound.origin ?? "")
+        .trim()
+        .toLowerCase();
       if (!key) continue;
 
       if (!pdInboundMap.has(key)) pdInboundMap.set(key, []);
@@ -2656,11 +2708,11 @@ export const getOdooOutboundsByBatchName = asyncHandler(
           .toLowerCase();
 
         const pdInboundsByOrigin = outboundOriginKey
-          ? pdInboundMap.get(outboundOriginKey) ?? []
+          ? (pdInboundMap.get(outboundOriginKey) ?? [])
           : [];
 
         const pdInboundsByInvoice = outboundInvoiceKey
-          ? pdInboundMap.get(outboundInvoiceKey) ?? []
+          ? (pdInboundMap.get(outboundInvoiceKey) ?? [])
           : [];
 
         const pdInboundUniqueMap = new Map<number, any>();
@@ -2689,15 +2741,17 @@ export const getOdooOutboundsByBatchName = asyncHandler(
             updated_at: pd.updated_at ?? null,
             matched_outbound_by:
               outboundOriginKey &&
-              String(pd.origin ?? "").trim().toLowerCase() === outboundOriginKey
+              String(pd.origin ?? "")
+                .trim()
+                .toLowerCase() === outboundOriginKey
                 ? "origin"
                 : outboundInvoiceKey &&
-                    String(pd.origin ?? "").trim().toLowerCase() ===
-                      outboundInvoiceKey
+                    String(pd.origin ?? "")
+                      .trim()
+                      .toLowerCase() === outboundInvoiceKey
                   ? "invoice"
                   : null,
-            matched_outbound_value:
-              String(pd.origin ?? "").trim() || null,
+            matched_outbound_value: String(pd.origin ?? "").trim() || null,
             items: Array.isArray(pd.goods_ins)
               ? pd.goods_ins.map((gi: any) => ({
                   id: gi.id,

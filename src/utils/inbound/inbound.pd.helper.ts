@@ -1,84 +1,118 @@
 import { prisma } from "../../lib/prisma";
 import { badRequest } from "../appError";
-import { NormalizedInboundItem } from "./inbound.normalize.helper";
 import { handleInboundTransfer } from "./inbound.transfer.helper";
 import { io } from "../../index";
 
-type PdMatchedOutbound = {
-  id: number;
-  no: string;
-  origin: string | null;
-  invoice: string | null;
-  in_process: boolean | null;
-};
+async function reducePackingBoxItemsForPdTx(
+  tx: any,
+  args: {
+    goods_out_item_id: number;
+    reduce_qty: number;
+  },
+) {
+  let remaining = Math.max(0, Math.floor(Number(args.reduce_qty ?? 0)));
+  if (remaining <= 0) return [];
 
-const normalizePdDocRef = (value: unknown) =>
-  String(value ?? "")
-    .trim()
-    .toLowerCase();
+  const boxItems = await tx.pack_product_box_item.findMany({
+    where: {
+      goods_out_item_id: args.goods_out_item_id,
+      deleted_at: null,
+    } as any,
+    orderBy: [{ id: "asc" }],
+  });
 
-export async function handlePDAutoProcess(input: {
-  picking_id: any;
+  const affected: any[] = [];
+
+  for (const boxItem of boxItems) {
+    if (remaining <= 0) break;
+
+    const currentQty = Math.max(0, Math.floor(Number(boxItem.quantity ?? 0)));
+    if (currentQty <= 0) continue;
+
+    const reduceQty = Math.min(currentQty, remaining);
+    const nextQty = currentQty - reduceQty;
+
+    if (nextQty <= 0) {
+      await tx.pack_product_box_item.delete({
+        where: { id: Number(boxItem.id) },
+      });
+    } else {
+      await tx.pack_product_box_item.update({
+        where: { id: Number(boxItem.id) },
+        data: {
+          quantity: nextQty,
+          updated_at: new Date(),
+        } as any,
+      });
+    }
+
+    affected.push({
+      pack_product_box_item_id: boxItem.id,
+      old_quantity: currentQty,
+      reduced_qty: reduceQty,
+      new_quantity: nextQty,
+      action: nextQty <= 0 ? "delete" : "decrement",
+    });
+
+    remaining -= reduceQty;
+  }
+
+  return affected;
+}
+
+export async function handlePDAutoProcess({
+  picking_id,
+  number,
+  location_id,
+  location,
+  location_dest_id,
+  location_dest,
+  department_id,
+  department,
+  reference,
+  origin,
+  invoice,
+  mergedItems,
+}: {
+  picking_id?: any;
   number: string;
-  location_id: any;
-  location: any;
-  location_dest_id: any;
-  location_dest: any;
-  department_id: any;
-  department: any;
-  reference: any;
-  origin: any;
-  invoice: any;
-  mergedItems: NormalizedInboundItem[];
+  location_id?: any;
+  location?: any;
+  location_dest_id?: any;
+  location_dest?: any;
+  department_id?: any;
+  department?: any;
+  reference?: any;
+  origin?: any;
+  invoice?: any;
+  mergedItems: any[];
 }) {
-  const {
-    picking_id,
-    number,
-    location_id,
-    location,
-    location_dest_id,
-    location_dest,
-    department_id,
-    department,
-    reference,
-    origin,
-    invoice,
-    mergedItems,
-  } = input;
-
   const pdOrigin = String(origin ?? "").trim();
   const pdInvoice = String(invoice ?? "").trim();
 
-  const createNormalInbound = async (reason: string) => {
-    const inbound = await handleInboundTransfer({
-      picking_id,
-      number,
-      location_id,
-      location,
-      location_dest_id,
-      location_dest,
-      department_id,
-      department,
-      reference,
-      origin,
-      invoice,
-      mergedItems,
-    });
+  const refs = Array.from(new Set([pdOrigin, pdInvoice].filter(Boolean)));
 
-    return {
-      source: "pd",
-      pd_no: number,
-      mode: "normal_inbound",
-      reason,
-      origin,
-      invoice,
-      data: inbound,
-    };
-  };
+  if (refs.length === 0) {
+    throw badRequest(`PD ${number} ไม่พบ origin/invoice สำหรับเทียบ outbound`);
+  }
 
-  const rawOutbounds = await prisma.outbound.findMany({
+  const outbound = await prisma.outbound.findFirst({
     where: {
       deleted_at: null,
+      OR: refs.flatMap((ref) => [
+        {
+          origin: {
+            equals: ref,
+            mode: "insensitive" as const,
+          },
+        },
+        {
+          invoice: {
+            equals: ref,
+            mode: "insensitive" as const,
+          },
+        },
+      ]),
     },
     select: {
       id: true,
@@ -89,55 +123,69 @@ export async function handlePDAutoProcess(input: {
     } as any,
   });
 
-  const allOutbounds: PdMatchedOutbound[] = (rawOutbounds as any[]).map(
-    (o) => ({
-      id: Number(o.id),
-      no: String(o.no ?? ""),
-      origin: o.origin ?? null,
-      invoice: o.invoice ?? null,
-      in_process: Boolean(o.in_process),
-    }),
-  );
-
-  const outbound: PdMatchedOutbound | null =
-    allOutbounds.find((o) => {
-      const outOrigin = normalizePdDocRef(o.origin);
-      const outInvoice = normalizePdDocRef(o.invoice);
-      const originRef = normalizePdDocRef(pdOrigin);
-      const invoiceRef = normalizePdDocRef(pdInvoice);
-
-      return (
-        (originRef && originRef === outOrigin) ||
-        (originRef && originRef === outInvoice) ||
-        (invoiceRef && invoiceRef === outOrigin) ||
-        (invoiceRef && invoiceRef === outInvoice)
-      );
-    }) ?? null;
-
   if (!outbound) {
-    return createNormalInbound("outbound_not_found");
+    throw badRequest(
+      `PD ${number} ไม่พบ outbound จาก origin/invoice: ${pdOrigin || "-"} / ${
+        pdInvoice || "-"
+      }`,
+    );
   }
 
-  if (Boolean(outbound.in_process)) {
-    return createNormalInbound("outbound_already_in_process");
+  const matchedBy = refs.some(
+    (ref) =>
+      String(outbound.origin ?? "")
+        .trim()
+        .toLowerCase() === ref.toLowerCase(),
+  )
+    ? "origin"
+    : refs.some(
+          (ref) =>
+            String(outbound.invoice ?? "")
+              .trim()
+              .toLowerCase() === ref.toLowerCase(),
+        )
+      ? "invoice"
+      : "unknown";
+
+  const packing = await prisma.pack_product_outbound.findFirst({
+    where: {
+      outbound_id: Number(outbound.id),
+    },
+    select: {
+      id: true,
+      outbound_id: true,
+      pack_product_id: true,
+    },
+  });
+
+  if (packing) {
+    const payload = {
+      source: "pd",
+      mode: "packing_pd_detected",
+      pd_no: number,
+      outbound_id: outbound.id,
+      outbound_no: outbound.no,
+      origin: pdOrigin,
+      invoice: pdInvoice,
+      pack_product_id: packing.pack_product_id,
+      pack_product_name: null,
+      items: mergedItems,
+    };
+
+    try {
+      io.to(`pack_product:${packing.pack_product_id}`).emit(
+        "packing:pd_detected",
+        payload,
+      );
+      io.to(`outbound:${outbound.no}`).emit("packing:pd_detected", payload);
+      io.emit("packing:pd_detected", payload);
+    } catch {}
+
+    // ห้าม return ตรงนี้
   }
 
-  const outboundId = Number(outbound.id);
-  const outboundNo = String(outbound.no);
-  const outboundOrigin = outbound.origin ?? null;
-  const outboundInvoice = outbound.invoice ?? null;
-
-  const matchedBy =
-    normalizePdDocRef(outbound.origin) === normalizePdDocRef(pdOrigin)
-      ? "origin"
-      : normalizePdDocRef(outbound.invoice) === normalizePdDocRef(pdInvoice)
-        ? "invoice"
-        : normalizePdDocRef(outbound.invoice) === normalizePdDocRef(pdOrigin)
-          ? "pd_origin_to_outbound_invoice"
-          : normalizePdDocRef(outbound.origin) === normalizePdDocRef(pdInvoice)
-            ? "pd_invoice_to_outbound_origin"
-            : "unknown";
-
+  // ✅ ใช้ flow เดิมของ inbound helper
+  // ✅ แก้ error tx.inbound.create() Argument date is missing เพราะไม่ create เองแล้ว
   const inbound = await handleInboundTransfer({
     picking_id,
     number,
@@ -147,101 +195,98 @@ export async function handlePDAutoProcess(input: {
     location_dest,
     department_id,
     department,
-    reference: reference || `[PD] ${outboundNo}`,
-    origin,
-    invoice,
+    reference,
+    origin: pdOrigin,
+    invoice: pdInvoice,
     mergedItems,
   });
 
-  if (!inbound || inbound.id == null) {
-    throw badRequest(`PD ${number} สร้าง inbound ไม่สำเร็จ`);
-  }
-
-  const inboundId = Number(inbound.id);
-  const inboundNo = String((inbound as any).no ?? number);
-
   const result = await prisma.$transaction(async (tx) => {
-    await tx.inbound.update({
-      where: { id: inboundId },
-      data: {
-        updated_at: new Date(),
-      } as any,
-    });
-
-    await tx.goods_in.updateMany({
+    const outboundItems = await tx.goods_out_item.findMany({
       where: {
-        inbound_id: inboundId,
+        outbound_id: Number(outbound.id),
         deleted_at: null,
       },
-      data: {
-        quantity_count: 0,
-        updated_at: new Date(),
-      } as any,
+      orderBy: [{ sequence: "asc" }, { id: "asc" }],
     });
-
-    const dbItems = await tx.goods_out_item.findMany({
-      where: {
-        outbound_id: outboundId,
-        deleted_at: null,
-      },
-      select: {
-        id: true,
-        product_id: true,
-        lot_id: true,
-        lot_serial: true,
-        qty: true,
-        pick: true,
-        pack: true,
-      },
-    });
-
-    const itemMap = new Map<string, (typeof dbItems)[number]>();
-
-    for (const row of dbItems) {
-      const key = `${row.product_id ?? "null"}__${row.lot_id ?? "null"}`;
-      if (!itemMap.has(key)) itemMap.set(key, row);
-    }
 
     const affected: any[] = [];
     const ignored: any[] = [];
+    const packingBoxAffected: any[] = [];
 
     for (const item of mergedItems) {
-      const product_id = item.product_id ?? null;
-      const lot_id = item.lot_id ?? null;
-      const pdQty = Math.max(0, Math.floor(Number(item.qty ?? 0)));
+      const productId =
+        item.product_id != null ? Number(item.product_id) : null;
+      const lotId = item.lot_id != null ? Number(item.lot_id) : null;
+      const lotSerial = String(item.lot_serial ?? item.lot_name ?? "").trim();
 
-      if (product_id == null || pdQty <= 0) {
+      const pdQty = Math.max(
+        0,
+        Number(item.quantity ?? item.qty ?? item.product_uom_qty ?? 0),
+      );
+
+      if (!productId || pdQty <= 0) {
         ignored.push({
-          product_id,
-          lot_id,
-          lot_serial: item.lot_serial ?? null,
-          qty: pdQty,
-          reason: product_id == null ? "missing_product_id" : "invalid_qty",
+          reason: "invalid_product_or_qty",
+          item,
         });
         continue;
       }
 
-      const key = `${product_id}__${lot_id ?? "null"}`;
-      const match = itemMap.get(key);
+      const match = outboundItems.find((go: any) => {
+        if (Number(go.product_id) !== Number(productId)) return false;
+
+        if (lotId != null && go.lot_id != null) {
+          return Number(go.lot_id) === Number(lotId);
+        }
+
+        if (lotSerial) {
+          return (
+            String(go.lot_serial ?? "")
+              .trim()
+              .toLowerCase() === lotSerial.toLowerCase()
+          );
+        }
+
+        return true;
+      });
 
       if (!match) {
         ignored.push({
-          product_id,
-          lot_id,
-          lot_serial: item.lot_serial ?? null,
-          qty: pdQty,
-          reason: "goods_out_item_not_found",
+          reason: "outbound_item_not_found",
+          product_id: productId,
+          lot_id: lotId,
+          lot_serial: lotSerial || null,
+          pd_qty: pdQty,
         });
         continue;
       }
 
-      const currentQty = Math.max(0, Math.floor(Number(match.qty ?? 0)));
-      const nextQty = currentQty - pdQty;
+      const currentQty = Math.max(0, Number(match.qty ?? 0));
+      const currentPack = Math.max(0, Number(match.pack ?? 0));
+
+      const qtyReduce = Math.min(currentQty, pdQty);
+      const packReduce = Math.min(currentPack, pdQty);
+
+      const nextQty = Math.max(0, currentQty - qtyReduce);
+      const nextPack = Math.max(0, currentPack - packReduce);
+
+      const boxResult =
+        packReduce > 0
+          ? await reducePackingBoxItemsForPdTx(tx, {
+              goods_out_item_id: Number(match.id),
+              reduce_qty: packReduce,
+            })
+          : [];
+
+      packingBoxAffected.push(...boxResult);
 
       if (nextQty <= 0) {
         await tx.goods_out_item.update({
-          where: { id: Number(match.id) },
+          where: { id: match.id },
           data: {
+            qty: 0,
+            pack: nextPack,
             deleted_at: new Date(),
             updated_at: new Date(),
           } as any,
@@ -249,54 +294,57 @@ export async function handlePDAutoProcess(input: {
 
         affected.push({
           pd_no: number,
-          outbound_no: outboundNo,
+          outbound_no: outbound.no,
           goods_out_item_id: match.id,
-          product_id,
-          lot_id,
-          lot_serial: match.lot_serial ?? item.lot_serial ?? null,
+          product_id: productId,
+          lot_id: lotId,
+          lot_serial: match.lot_serial ?? lotSerial ?? null,
           old_qty: currentQty,
           pd_qty: pdQty,
           new_qty: 0,
-          action: "soft_delete",
+          action: "pd_soft_delete_item",
         });
 
         continue;
       }
 
       await tx.goods_out_item.update({
-        where: { id: Number(match.id) },
+        where: { id: match.id },
         data: {
           qty: nextQty,
+          pack: nextPack,
           updated_at: new Date(),
         } as any,
       });
 
       affected.push({
         pd_no: number,
-        outbound_no: outboundNo,
+        outbound_no: outbound.no,
         goods_out_item_id: match.id,
-        product_id,
-        lot_id,
-        lot_serial: match.lot_serial ?? item.lot_serial ?? null,
+        product_id: productId,
+        lot_id: lotId,
+        lot_serial: match.lot_serial ?? lotSerial ?? null,
         old_qty: currentQty,
         pd_qty: pdQty,
         new_qty: nextQty,
-        action: "decrement",
+        action: "pd_reduce_qty",
       });
     }
 
     const remainingActiveItems = await tx.goods_out_item.count({
       where: {
-        outbound_id: outboundId,
+        outbound_id: Number(outbound.id),
         deleted_at: null,
+        qty: { gt: 0 },
       },
     });
 
     let outbound_action: "keep" | "soft_delete" = "keep";
+    let pack_product_action: "keep" | "remove_from_pack" = "keep";
 
     if (remainingActiveItems === 0) {
       await tx.outbound.update({
-        where: { id: outboundId },
+        where: { id: Number(outbound.id) },
         data: {
           deleted_at: new Date(),
           updated_at: new Date(),
@@ -304,45 +352,53 @@ export async function handlePDAutoProcess(input: {
       });
 
       outbound_action = "soft_delete";
+      pack_product_action = "keep";
     } else {
       await tx.outbound.update({
-        where: { id: outboundId },
+        where: { id: Number(outbound.id) },
         data: {
           updated_at: new Date(),
         } as any,
       });
+
+      outbound_action = "keep";
+      pack_product_action = "keep";
     }
 
     return {
       source: "pd",
       pd_no: number,
-      outbound_id: outboundId,
-      outbound_no: outboundNo,
-      outbound_origin: outboundOrigin,
-      outbound_invoice: outboundInvoice,
-      inbound_id: inboundId,
-      inbound_no: inboundNo,
+      outbound_id: outbound.id,
+      outbound_no: outbound.no,
+      outbound_origin: outbound.origin,
+      outbound_invoice: outbound.invoice,
+      inbound_id: inbound?.id ?? null,
+      inbound_no: inbound?.no ?? number,
       mode: "auto_process",
       matched_by: matchedBy,
       affected,
       ignored,
+      packing_box_affected: packingBoxAffected,
       remaining_active_items: remainingActiveItems,
       outbound_action,
+      pack_product_action,
       data: inbound,
     };
   });
 
   try {
-    io.to(`outbound:${result.outbound_no}`).emit(
-      "outbound:pd_adjusted",
-      result,
-    );
-    io.to(`outbound-id:${result.outbound_id}`).emit(
-      "outbound:pd_adjusted",
-      result,
-    );
-    io.emit("outbound:pd_adjusted", result);
-    io.emit("inbound:updated", result);
+    io.to(`outbound:${outbound.no}`).emit("outbound:pd_updated", result);
+
+    if (packing?.pack_product_id) {
+      io.to(`pack_product:${packing.pack_product_id}`).emit(
+        "pack_product:updated",
+        {
+          pack_product_id: packing.pack_product_id,
+          reason: "pd_auto_process",
+          data: result,
+        },
+      );
+    }
   } catch {}
 
   return result;

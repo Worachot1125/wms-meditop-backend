@@ -36,7 +36,10 @@ import {
 /**
  * ✅ เลือก lot_text สำหรับ item (lot_serial มาก่อน ถ้าไม่มีค่อยใช้ lot)
  */
-export const resolveLotText = (input: { lot_serial?: any; lot?: any }): string => {
+export const resolveLotText = (input: {
+  lot_serial?: any;
+  lot?: any;
+}): string => {
   const ls = normalizeLotText(input.lot_serial);
   if (ls) return ls;
   const l = normalizeLotText(input.lot);
@@ -173,8 +176,17 @@ export const receiveFromOdoo = asyncHandler(
         // ✅ RTC -> logic เดิม
         if (isRTCNumber(number)) {
           const rtc = await handleRTCReturnTransfer({
+            picking_id,
             number,
+            location_id,
+            location,
+            location_dest_id,
+            location_dest,
+            department_id,
+            department,
+            reference,
             origin,
+            invoice,
             mergedItems,
           });
 

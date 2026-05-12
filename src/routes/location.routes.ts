@@ -9,6 +9,7 @@ import {
   updateLocation,
   deleteLocation,
   getLocationsBorBosSer,
+  getAllLocationPackLocations,
 } from "../controllers/location.controller";
 
 const router = Router();
@@ -17,6 +18,10 @@ router.post("/create", uploadLocationFile, createLocation);
 router.get("/getAll", getLocations);
 router.get("/get", getLocationsPaginated);
 router.get("/get/bor", getLocationsBorBosSer);
+router.get(
+  "/get/location-pack",
+  getAllLocationPackLocations,
+);
 router.get("/get/:id", getLocationById);
 router.patch("/update/:id", uploadLocationFile, updateLocation);
 router.delete("/delete/:id", deleteLocation);

@@ -2,7 +2,7 @@ import { Request, Response } from "express";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { asyncHandler } from "../utils/asyncHandler";
-import { badRequest, notFound } from "../utils/appError";
+import { notFound } from "../utils/appError";
 import { parseDateInput } from "../utils/parseDate";
 import { AuthRequest, buildDepartmentAccessWhere } from "../middleware/auth";
 import {
@@ -20,40 +20,6 @@ import {
  * ❌ ไม่ใช้ lot_id ในการเช็ค/เทียบ items แล้ว
  * =========================
  */
-
-// normalize lot_serial/lot_name ให้เทียบกันได้เสถียร (กัน space/เคส)
-function normalizeLotSerial(value: unknown): string {
-  return String(value ?? "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .toLowerCase();
-}
-
-/**
- * key สำหรับการเช็ค/เทียบ item (ตัวเดียวกันหรือไม่)
- * - ต้องมี product_id
- * - lot_serial อาจว่างได้ แต่ยังถือว่าเป็นส่วนหนึ่งของ key
- */
-function itemKey(productId: unknown, lotSerial: unknown): string {
-  const pid = Number(productId);
-  // ถ้า product_id ไม่ใช่ตัวเลขจริง ให้ทำ key ที่เด่นชัดไว้กันชน
-  const pidPart = Number.isFinite(pid) ? String(pid) : "NaN";
-  const lotPart = normalizeLotSerial(lotSerial);
-  return `${pidPart}|${lotPart}`;
-}
-
-/**
- * เทียบว่า item สองตัวเป็น "ตัวเดียวกัน" ไหม ตามกติกาใหม่
- */
-function isSameItem(
-  a: { product_id: unknown; lot_serial?: unknown; lot?: unknown },
-  b: { product_id: unknown; lot_serial?: unknown; lot?: unknown },
-): boolean {
-  // lot_serial(lot_name) บางระบบเก็บไว้ที่ lot หรือ lot_serial
-  const aLot = a.lot_serial ?? a.lot;
-  const bLot = b.lot_serial ?? b.lot;
-  return itemKey(a.product_id, aLot) === itemKey(b.product_id, bLot);
-}
 
 // CREATE Inbound
 export const createInbound = asyncHandler(
@@ -104,113 +70,115 @@ export const createInbound = asyncHandler(
 );
 
 // GET ALL Inbound
-export const getInbounds = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const rawSearch = req.query.search;
-  const search = typeof rawSearch === "string" ? rawSearch.trim() : "";
+export const getInbounds = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    const rawSearch = req.query.search;
+    const search = typeof rawSearch === "string" ? rawSearch.trim() : "";
 
-  const departmentWhere = buildDepartmentAccessWhere(req);
+    const departmentWhere = buildDepartmentAccessWhere(req);
 
-  const baseWhere: Prisma.inboundWhereInput = {
-    deleted_at: null,
-    ...departmentWhere,
-  };
+    const baseWhere: Prisma.inboundWhereInput = {
+      deleted_at: null,
+      ...departmentWhere,
+    };
 
-  let where: Prisma.inboundWhereInput = baseWhere;
+    let where: Prisma.inboundWhereInput = baseWhere;
 
-  if (search) {
-    const searchCondition: Prisma.inboundWhereInput = {
-      OR: [
-        { no: { contains: search, mode: "insensitive" } },
-        { lot: { contains: search, mode: "insensitive" } },
-        { in_type: { contains: search, mode: "insensitive" } },
-        { department: { contains: search, mode: "insensitive" } },
-        {
-          quantity: {
-            equals: isNaN(Number(search)) ? undefined : Number(search),
+    if (search) {
+      const searchCondition: Prisma.inboundWhereInput = {
+        OR: [
+          { no: { contains: search, mode: "insensitive" } },
+          { lot: { contains: search, mode: "insensitive" } },
+          { in_type: { contains: search, mode: "insensitive" } },
+          { department: { contains: search, mode: "insensitive" } },
+          {
+            quantity: {
+              equals: isNaN(Number(search)) ? undefined : Number(search),
+            },
           },
-        },
-      ],
-    };
-    where = { AND: [baseWhere, searchCondition] };
-  }
+        ],
+      };
+      where = { AND: [baseWhere, searchCondition] };
+    }
 
-  const inbounds = await prisma.inbound.findMany({
-    where,
-    orderBy: { created_at: "desc" },
-    include: {
-      goods_ins: true,
-    },
-  });
-
-  const departmentIds = [
-    ...new Set(
-      inbounds
-        .map((ib) => ib.department_id)
-        .filter((id): id is string => id != null)
-        .map((id) => parseInt(id, 10))
-        .filter((id) => !isNaN(id)),
-    ),
-  ];
-
-  const deptMap = new Map<number, string>();
-  if (departmentIds.length > 0) {
-    const departments = await prisma.department.findMany({
-      where: { odoo_id: { in: departmentIds } },
-      select: { odoo_id: true, short_name: true },
+    const inbounds = await prisma.inbound.findMany({
+      where,
+      orderBy: { created_at: "desc" },
+      include: {
+        goods_ins: true,
+      },
     });
-    departments.forEach((dept) => {
-      if (dept.odoo_id) deptMap.set(dept.odoo_id, dept.short_name);
+
+    const departmentIds = [
+      ...new Set(
+        inbounds
+          .map((ib) => ib.department_id)
+          .filter((id): id is string => id != null)
+          .map((id) => parseInt(id, 10))
+          .filter((id) => !isNaN(id)),
+      ),
+    ];
+
+    const deptMap = new Map<number, string>();
+    if (departmentIds.length > 0) {
+      const departments = await prisma.department.findMany({
+        where: { odoo_id: { in: departmentIds } },
+        select: { odoo_id: true, short_name: true },
+      });
+      departments.forEach((dept) => {
+        if (dept.odoo_id) deptMap.set(dept.odoo_id, dept.short_name);
+      });
+    }
+
+    const formattedInbounds = inbounds.map((inbound) => {
+      const deptId = inbound.department_id
+        ? parseInt(inbound.department_id, 10)
+        : NaN;
+      const shortName = !isNaN(deptId) ? deptMap.get(deptId) : undefined;
+
+      return {
+        id: inbound.id,
+        picking_id: inbound.picking_id,
+        no: inbound.no,
+        lot: inbound.lot,
+        location_id: inbound.location_id,
+        location: inbound.location,
+        location_dest_id: inbound.location_dest_id,
+        location_dest: inbound.location_dest,
+        department_id: inbound.department_id,
+        department: shortName ?? inbound.department,
+        reference: inbound.reference,
+        quantity: inbound.quantity,
+        origin: inbound.origin,
+        date: inbound.date,
+        in_type: inbound.in_type,
+        created_at: inbound.created_at,
+        updated_at: inbound.updated_at,
+        items: inbound.goods_ins
+          .filter((gi) => !gi.deleted_at)
+          .map((gi) => ({
+            id: gi.id,
+            sequence: gi.sequence,
+            product_id: gi.product_id,
+            code: gi.code,
+            name: gi.name,
+            unit: gi.unit,
+            tracking: gi.tracking,
+            lot_id: gi.lot_id,
+            lot: gi.lot,
+            lot_serial: gi.lot_serial,
+            exp: gi.exp,
+            qty: gi.qty,
+            quantity_receive: (gi as any).quantity_receive ?? null,
+            quantity_count: (gi as any).quantity_count ?? null,
+            barcode_id: gi.barcode_id,
+          })),
+      };
     });
-  }
 
-  const formattedInbounds = inbounds.map((inbound) => {
-    const deptId = inbound.department_id
-      ? parseInt(inbound.department_id, 10)
-      : NaN;
-    const shortName = !isNaN(deptId) ? deptMap.get(deptId) : undefined;
-
-    return {
-      id: inbound.id,
-      picking_id: inbound.picking_id,
-      no: inbound.no,
-      lot: inbound.lot,
-      location_id: inbound.location_id,
-      location: inbound.location,
-      location_dest_id: inbound.location_dest_id,
-      location_dest: inbound.location_dest,
-      department_id: inbound.department_id,
-      department: shortName ?? inbound.department,
-      reference: inbound.reference,
-      quantity: inbound.quantity,
-      origin: inbound.origin,
-      date: inbound.date,
-      in_type: inbound.in_type,
-      created_at: inbound.created_at,
-      updated_at: inbound.updated_at,
-      items: inbound.goods_ins
-        .filter((gi) => !gi.deleted_at)
-        .map((gi) => ({
-          id: gi.id,
-          sequence: gi.sequence,
-          product_id: gi.product_id,
-          code: gi.code,
-          name: gi.name,
-          unit: gi.unit,
-          tracking: gi.tracking,
-          lot_id: gi.lot_id,
-          lot: gi.lot,
-          lot_serial: gi.lot_serial,
-          exp: gi.exp,
-          qty: gi.qty,
-          quantity_receive: (gi as any).quantity_receive ?? null,
-          quantity_count: (gi as any).quantity_count ?? null,
-          barcode_id: gi.barcode_id,
-        })),
-    };
-  });
-
-  return res.json(formattedInbounds);
-});
+    return res.json(formattedInbounds);
+  },
+);
 
 const buildInboundSearchCondition = (
   search: string,
@@ -388,32 +356,31 @@ export const getInboundsPaginated = asyncHandler(
       whereForCount = { AND: [baseWhereForCount, searchCondition] };
     }
 
-    const [inbounds, total, pendingCount, completedCount] =
-      await Promise.all([
-        prisma.inbound.findMany({
-          where,
-          skip,
-          take: limit,
-          orderBy: { created_at: "desc" },
-          include: {
-            goods_ins: true,
-          },
-        }),
+    const [inbounds, total, pendingCount, completedCount] = await Promise.all([
+      prisma.inbound.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { created_at: "desc" },
+        include: {
+          goods_ins: true,
+        },
+      }),
 
-        prisma.inbound.count({ where }),
+      prisma.inbound.count({ where }),
 
-        prisma.inbound.count({
-          where: {
-            AND: [whereForCount, { status: "pending" }],
-          },
-        }),
+      prisma.inbound.count({
+        where: {
+          AND: [whereForCount, { status: "pending" }],
+        },
+      }),
 
-        prisma.inbound.count({
-          where: {
-            AND: [whereForCount, { status: "completed" }],
-          },
-        }),
-      ]);
+      prisma.inbound.count({
+        where: {
+          AND: [whereForCount, { status: "completed" }],
+        },
+      }),
+    ]);
 
     const departmentIds = [
       ...new Set(
@@ -630,5 +597,322 @@ export const deleteInbound = asyncHandler(
     });
 
     return res.json({ message: "ลบ inbound เรียบร้อยแล้ว" });
+  },
+);
+
+const badRequest = (message: string) => {
+  const err: any = new Error(message);
+  err.statusCode = 400;
+  return err;
+};
+
+function normText(v: unknown) {
+  return String(v ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+function normDate(v: unknown) {
+  if (!v) return "NULL";
+  const d = new Date(v as any);
+  if (Number.isNaN(d.getTime())) return "NULL";
+  return d.toISOString().slice(0, 10);
+}
+
+function qty(v: unknown) {
+  return Number(v ?? 0);
+}
+
+function buildInKey(item: any) {
+  return [
+    item.product_id ?? "NULL",
+    normText(item.code),
+    normText(item.name),
+    normText(item.unit),
+    item.lot_id ?? "NULL",
+    normText(item.lot_serial ?? item.lot),
+    normDate(item.exp),
+  ].join("|");
+}
+
+function buildOutKey(item: any) {
+  return [
+    item.product_id ?? "NULL",
+    normText(item.code),
+    normText(item.name),
+    normText(item.unit),
+    item.lot_id ?? "NULL",
+    normText(item.lot_serial),
+    normDate((item as any).exp), // ถ้า goods_out_item ไม่มี exp ในบางระบบ จะเป็น NULL
+  ].join("|");
+}
+
+function summarizeLines(rows: any[], type: "in" | "out") {
+  const map = new Map<string, { key: string; qty: number; sample: any }>();
+
+  for (const row of rows) {
+    const key = type === "in" ? buildInKey(row) : buildOutKey(row);
+
+    const rowQty =
+      type === "in" ? qty(row.quantity_receive ?? row.qty) : qty(row.qty);
+
+    const current = map.get(key);
+
+    if (current) {
+      current.qty += rowQty;
+    } else {
+      map.set(key, { key, qty: rowQty, sample: row });
+    }
+  }
+
+  return Array.from(map.values()).sort((a, b) => a.key.localeCompare(b.key));
+}
+
+function assertInboundOutboundMatched(inRows: any[], outRows: any[]) {
+  const inSum = summarizeLines(inRows, "in");
+  const outSum = summarizeLines(outRows, "out");
+
+  if (inSum.length !== outSum.length) {
+    throw badRequest(
+      `สินค้าไม่ตรงกัน: inbound มี ${inSum.length} กลุ่ม แต่ outbound มี ${outSum.length} กลุ่ม`,
+    );
+  }
+
+  const outMap = new Map(outSum.map((x) => [x.key, x]));
+
+  for (const inLine of inSum) {
+    const outLine = outMap.get(inLine.key);
+
+    if (!outLine) {
+      console.log("INBOUND_KEY_NOT_FOUND:", inLine.key);
+      console.log(
+        "OUTBOUND_KEYS:",
+        outSum.map((x) => ({
+          key: x.key,
+          qty: x.qty,
+          code: x.sample.code,
+          lot_id: x.sample.lot_id,
+          lot_serial: x.sample.lot_serial,
+        })),
+      );
+
+      throw badRequest(
+        `สินค้าไม่ตรงกัน: ไม่พบสินค้าใน outbound ที่ตรงกับ ${inLine.sample.code ?? "-"} / lot ${inLine.sample.lot_serial ?? inLine.sample.lot ?? "-"}`,
+      );
+    }
+
+    if (inLine.qty !== outLine.qty) {
+      throw badRequest(
+        `จำนวนไม่ตรงกัน: ${inLine.sample.code ?? "-"} / lot ${inLine.sample.lot_serial ?? inLine.sample.lot ?? "-"} inbound=${inLine.qty}, outbound=${outLine.qty}`,
+      );
+    }
+  }
+}
+
+async function generatePickName(tx: any) {
+  const prefix = "PICK_";
+  const latest = await tx.batch_outbound.findFirst({
+    where: {
+      name: {
+        startsWith: prefix,
+      },
+    },
+    orderBy: {
+      id: "desc",
+    },
+    select: {
+      id: true,
+      name: true,
+    },
+  });
+
+  const nextNo = Number(latest?.id ?? 0) + 1;
+  return `${prefix}${String(nextNo).padStart(5, "0")}`;
+}
+
+function normLot(v: unknown) {
+  return String(v ?? "")
+    .trim()
+    .replace(/\s+/g, "")
+    .toLowerCase();
+}
+
+function normNullableId(v: unknown) {
+  if (v === null || v === undefined || v === "") return "NULL";
+  return String(v);
+}
+
+async function attachExpToOutboundGoods(tx: any, goodsOuts: any[]) {
+  const or = goodsOuts
+    .filter((x) => x.product_id && (x.lot_id || x.lot_serial))
+    .map((x) => ({
+      product_id: x.product_id,
+      ...(x.lot_id ? { lot_id: x.lot_id } : { lot_name: x.lot_serial }),
+    }));
+
+  if (or.length === 0) return goodsOuts;
+
+  const masters = await tx.wms_mdt_goods.findMany({
+    where: { OR: or },
+    select: {
+      product_id: true,
+      lot_id: true,
+      lot_name: true,
+      expiration_date: true,
+    },
+  });
+
+  const byLotId = new Map<string, Date | null>();
+  const byLotName = new Map<string, Date | null>();
+
+  for (const m of masters) {
+    if (m.product_id && m.lot_id != null) {
+      byLotId.set(`${m.product_id}|${m.lot_id}`, m.expiration_date);
+    }
+
+    if (m.product_id && m.lot_name) {
+      byLotName.set(
+        `${m.product_id}|${normText(m.lot_name)}`,
+        m.expiration_date,
+      );
+    }
+  }
+
+  return goodsOuts.map((x) => ({
+    ...x,
+    exp:
+      byLotId.get(`${x.product_id}|${x.lot_id}`) ??
+      byLotName.get(`${x.product_id}|${normText(x.lot_serial)}`) ??
+      null,
+  }));
+}
+
+export const replaceOutboundByInbound = asyncHandler(
+  async (req: Request<{ no: string }>, res: Response) => {
+    const no = decodeURIComponent(req.params.no || "").trim();
+    const outboundId = Number(req.body?.outbound_id);
+    const userId = Number(req.body?.user_id);
+    const remark = String(req.body?.remark ?? "").trim();
+
+    if (!no) throw badRequest("ไม่พบเลข inbound");
+    if (!Number.isFinite(outboundId))
+      throw badRequest("outbound_id ไม่ถูกต้อง");
+    if (!Number.isFinite(userId)) throw badRequest("user_id ไม่ถูกต้อง");
+
+    const result = await prisma.$transaction(async (tx) => {
+      const inbound = await tx.inbound.findUnique({
+        where: { no },
+        include: {
+          goods_ins: {
+            where: { deleted_at: null },
+          },
+        },
+      });
+
+      if (!inbound || inbound.deleted_at) {
+        throw badRequest(`ไม่พบ inbound: ${no}`);
+      }
+
+      if (inbound.status === "completed") {
+        throw badRequest("Inbound นี้ completed แล้ว");
+      }
+
+      const outbound = await tx.outbound.findUnique({
+        where: { id: outboundId },
+        include: {
+          goods_outs: {
+            where: { deleted_at: null },
+          },
+          batch_lock: true,
+        },
+      });
+
+      if (!outbound || outbound.deleted_at) {
+        throw badRequest("ไม่พบ outbound");
+      }
+
+      if (outbound.batch_lock) {
+        throw badRequest(
+          `Outbound นี้ถูกสร้าง batch แล้ว: ${outbound.batch_lock.name ?? "-"}`,
+        );
+      }
+
+      if (!inbound.goods_ins.length) {
+        throw badRequest("Inbound ไม่มีรายการสินค้า");
+      }
+
+      if (!outbound.goods_outs.length) {
+        throw badRequest("Outbound ไม่มีรายการสินค้า");
+      }
+
+      const goodsOutsWithExp = await attachExpToOutboundGoods(
+        tx,
+        outbound.goods_outs,
+      );
+
+      assertInboundOutboundMatched(inbound.goods_ins, goodsOutsWithExp);
+
+      const batchName = await generatePickName(tx);
+
+      const batch = await tx.batch_outbound.create({
+        data: {
+          name: batchName,
+          outbound_id: outbound.id,
+          user_id: userId,
+          status: "completed",
+          remark: remark || `Replace outbound from inbound ${inbound.no}`,
+          updated_at: new Date(),
+          released_at: new Date(),
+        },
+      });
+
+      for (const item of outbound.goods_outs) {
+        const q = qty(item.qty);
+
+        await tx.goods_out_item.update({
+          where: { id: item.id },
+          data: {
+            pick: q,
+            confirmed_pick: q,
+            status: "completed",
+            in_process: true,
+            user_pick: String(userId),
+            pick_time: new Date(),
+            updated_at: new Date(),
+          },
+        });
+      }
+
+      await tx.outbound.update({
+        where: { id: outbound.id },
+        data: {
+          in_process: true,
+          updated_at: new Date(),
+        },
+      });
+
+      await tx.inbound.update({
+        where: { id: inbound.id },
+        data: {
+          status: "completed",
+          updated_at: new Date(),
+        },
+      });
+
+      return {
+        inbound_no: inbound.no,
+        outbound_id: outbound.id,
+        outbound_no: outbound.no,
+        batch_id: batch.id,
+        batch_name: batch.name,
+        batch_status: batch.status,
+      };
+    });
+
+    return res.json({
+      success: true,
+      message: "แทนที่ outbound สำเร็จ",
+      data: result,
+    });
   },
 );
