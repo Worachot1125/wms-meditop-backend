@@ -2813,3 +2813,325 @@ export const movePdPackingToLocation = asyncHandler(
     });
   },
 );
+
+export const moveRtcPackingToLocation = asyncHandler(
+  async (req: Request, res: Response) => {
+    const packProductId = Number(req.params.packProductId || 0);
+    const outboundNo = String(req.body?.outbound_no || "").trim();
+    const locationFullName = String(req.body?.location_full_name || "").trim();
+
+    if (!packProductId) throw badRequest("packProductId is required");
+    if (!outboundNo) throw badRequest("outbound_no is required");
+    if (!locationFullName) throw badRequest("location_full_name is required");
+
+    const location = await resolveLocationByFullNameBasic(locationFullName);
+
+    const result = await prisma.$transaction(async (tx) => {
+      const packProduct = await tx.pack_product.findFirst({
+        where: {
+          id: packProductId,
+          deleted_at: null,
+        } as any,
+      });
+
+      if (!packProduct) {
+        throw badRequest(`ไม่พบ pack_product id=${packProductId}`);
+      }
+
+      const outbound = await tx.outbound.findFirst({
+        where: {
+          no: outboundNo,
+          deleted_at: null,
+        } as any,
+      });
+
+      if (!outbound) {
+        throw badRequest(`ไม่พบ outbound: ${outboundNo}`);
+      }
+
+      const link = await tx.pack_product_outbound.findFirst({
+        where: {
+          pack_product_id: packProductId,
+          outbound_id: Number(outbound.id),
+        } as any,
+      });
+
+      if (!link) {
+        throw badRequest(
+          `outbound ${outboundNo} ไม่ได้อยู่ใน pack_product นี้`,
+        );
+      }
+
+      const items = await tx.goods_out_item.findMany({
+        where: {
+          outbound_id: Number(outbound.id),
+          deleted_at: null,
+        } as any,
+        orderBy: [{ id: "asc" }],
+      });
+
+      if (!items.length) {
+        throw badRequest("ไม่พบสินค้าใน outbound สำหรับ RTC packing");
+      }
+
+      const moved: any[] = [];
+      const itemIds = items.map((x: any) => Number(x.id)).filter(Boolean);
+
+      for (const item of items as any[]) {
+        if (!item.product_id) {
+          throw badRequest(`goods_out_item id=${item.id} ไม่มี product_id`);
+        }
+
+        const rtcQty = Math.max(0, Math.floor(Number(item.rtc ?? 0)));
+        const packQty = Math.max(0, Math.floor(Number(item.pack ?? 0)));
+        const pickQty = Math.max(0, Math.floor(Number(item.pick ?? 0)));
+        const baseQty = Math.max(0, Math.floor(Number(item.qty ?? 0)));
+
+        /**
+         * RTC during packing:
+         * - Prefer rtc qty.
+         * - Fallback to pack/pick/qty for safety.
+         */
+        const moveQty =
+          rtcQty > 0
+            ? rtcQty
+            : packQty > 0
+              ? packQty
+              : pickQty > 0
+                ? pickQty
+                : baseQty;
+
+        if (moveQty <= 0) continue;
+
+        const fallback = await resolveWmsLotExpTx(tx, {
+          product_id: Number(item.product_id),
+          lot_id: item.lot_id ?? null,
+          lot_serial: item.lot_serial ?? null,
+        });
+
+        const bucketKey = buildMoveToPackStockKey({
+          product_id: Number(item.product_id),
+          location_id: Number(location.id),
+          lot_id: item.lot_id ?? null,
+        });
+
+        const stock = await tx.stock.findFirst({
+          where: {
+            bucket_key: bucketKey,
+          } as any,
+          orderBy: [{ id: "asc" }],
+        });
+
+        if (stock) {
+          await tx.stock.update({
+            where: {
+              id: Number(stock.id),
+            },
+            data: {
+              quantity: {
+                increment: new Prisma.Decimal(moveQty),
+              },
+              product_code: item.code ?? stock.product_code ?? null,
+              product_name: item.name ?? stock.product_name ?? null,
+              unit: item.unit ?? stock.unit ?? null,
+              location_id: Number(location.id),
+              location_name: location.full_name,
+              lot_id: item.lot_id ?? null,
+              lot_name: fallback.lot_name,
+              expiration_date: fallback.expiration_date,
+              active: true,
+              updated_at: new Date(),
+            } as any,
+          });
+        } else {
+          await tx.stock.create({
+            data: {
+              bucket_key: bucketKey,
+              product_id: Number(item.product_id),
+              product_code: item.code ?? null,
+              product_name: item.name ?? null,
+              unit: item.unit ?? null,
+              location_id: Number(location.id),
+              location_name: location.full_name,
+              lot_id: item.lot_id ?? null,
+              lot_name: fallback.lot_name,
+              expiration_date: fallback.expiration_date,
+              quantity: new Prisma.Decimal(moveQty),
+              source: "wms",
+              active: true,
+            } as any,
+          });
+        }
+
+        moved.push({
+          goods_out_item_id: Number(item.id),
+          product_id: Number(item.product_id),
+          code: item.code,
+          name: item.name,
+          lot_id: item.lot_id,
+          lot_serial: item.lot_serial,
+          qty: moveQty,
+          rtc_qty: rtcQty,
+          pack_qty: packQty,
+          pick_qty: pickQty,
+          used_qty_source:
+            rtcQty > 0
+              ? "rtc"
+              : packQty > 0
+                ? "pack"
+                : pickQty > 0
+                  ? "pick"
+                  : "qty",
+          location_id: Number(location.id),
+          location_full_name: location.full_name,
+          lot_name: fallback.lot_name,
+          expiration_date: fallback.expiration_date,
+        });
+      }
+
+      if (!moved.length) {
+        throw badRequest("ไม่พบจำนวนสินค้าที่สามารถย้าย RTC ไป Location");
+      }
+
+      /**
+       * Delete real tables / relation tables.
+       * These tables do not use deleted_at.
+       */
+      if (itemIds.length > 0) {
+        await tx.goods_out_item_location_pick.deleteMany({
+          where: {
+            goods_out_item_id: { in: itemIds },
+          } as any,
+        });
+
+        await tx.goods_out_item_location_confirm.deleteMany({
+          where: {
+            goods_out_item_id: { in: itemIds },
+          } as any,
+        });
+
+        await tx.pack_product_box_item.deleteMany({
+          where: {
+            goods_out_item_id: { in: itemIds },
+          } as any,
+        });
+      }
+
+      await tx.batch_outbound.deleteMany({
+        where: {
+          outbound_id: Number(outbound.id),
+        } as any,
+      });
+
+      const deletedPackProductOutbound =
+        await tx.pack_product_outbound.deleteMany({
+          where: {
+            pack_product_id: Number(packProductId),
+            outbound_id: Number(outbound.id),
+          } as any,
+        });
+
+      /**
+       * Soft delete goods_out_item and outbound.
+       */
+      await tx.goods_out_item.updateMany({
+        where: {
+          id: { in: itemIds },
+        } as any,
+        data: {
+          rtc_check: true,
+          deleted_at: new Date(),
+          updated_at: new Date(),
+        } as any,
+      });
+
+      await tx.outbound.update({
+        where: {
+          id: Number(outbound.id),
+        },
+        data: {
+          deleted_at: new Date(),
+          updated_at: new Date(),
+        } as any,
+      });
+
+      /**
+       * Soft delete pack_product only when no outbound link remains.
+       */
+      const remainingPackLinks = await tx.pack_product_outbound.count({
+        where: {
+          pack_product_id: Number(packProductId),
+        } as any,
+      });
+
+      const isLastOutboundInPack = remainingPackLinks === 0;
+
+      let packProductAction: "keep" | "soft_delete" = "keep";
+
+      if (isLastOutboundInPack) {
+        await tx.pack_product.update({
+          where: {
+            id: packProductId,
+          },
+          data: {
+            deleted_at: new Date(),
+            updated_at: new Date(),
+          } as any,
+        });
+
+        packProductAction = "soft_delete";
+      } else {
+        await tx.pack_product.update({
+          where: {
+            id: packProductId,
+          },
+          data: {
+            updated_at: new Date(),
+          } as any,
+        });
+      }
+
+      return {
+        pack_product_id: packProductId,
+        pack_product_name: packProduct.name,
+        pack_product_action: packProductAction,
+        remaining_pack_outbounds: remainingPackLinks,
+        outbound_id: Number(outbound.id),
+        outbound_no: outbound.no,
+        location_id: Number(location.id),
+        location_full_name: location.full_name,
+        is_last_outbound_in_pack: isLastOutboundInPack,
+        deleted_pack_product_outbound_count:
+          deletedPackProductOutbound.count,
+        moved,
+        deleted: {
+          batch_outbound: true,
+          pack_product_outbound: true,
+          goods_out_item_location_pick: true,
+          goods_out_item_location_confirm: true,
+          pack_product_box_item: true,
+        },
+        soft_deleted: {
+          outbound: true,
+          goods_out_item: true,
+          pack_product: packProductAction === "soft_delete",
+        },
+      };
+    });
+
+    io.to(`pack_product:${packProductId}`).emit("pack_product:updated", {
+      pack_product_id: packProductId,
+      reason: "rtc_move_to_location",
+      data: result,
+    });
+
+    io.emit("packing:rtc_moved", result);
+
+    return res.json({
+      success: true,
+      message: "ย้ายสินค้า RTC ไป Location และลบ Packing Flow สำเร็จ",
+      data: result,
+    });
+  },
+);
+

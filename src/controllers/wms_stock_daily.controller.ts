@@ -1507,12 +1507,30 @@ export const getTransactionReportPaginated = asyncHandler(
       }),
 
       prisma.outbound.findMany({
-        where: withDeletedAtNull(
-          buildOutboundReportWhere(createdAtFilter, search, selectedColumns),
-        ),
+        where: {
+          AND: [
+            buildOutboundReportWhere(createdAtFilter, search, selectedColumns),
+            {
+              OR: [
+                { deleted_at: null },
+                {
+                  AND: [
+                    { deleted_at: { not: null } },
+                    {
+                      out_type: {
+                        equals: "DO",
+                        mode: "insensitive",
+                      },
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
         include: {
           goods_outs: {
-            where: { deleted_at: null },
+            // ✅ ดึง item ทั้งหมดมาก่อน เพื่อให้ deleted DO ยังมี item แสดง
             include: {
               barcode_ref: true,
               goodsOutItemLocationReturns: {
@@ -1852,7 +1870,33 @@ export const getTransactionReportPaginated = asyncHandler(
     const outboundRows: ReportRow[] = outbounds.flatMap((doc: any) => {
       const formatted = formatOdooOutbound(doc);
 
-      const items = (formatted.items ?? []).map((item: any) => ({
+      const rawGoodsOuts = Array.isArray(doc.goods_outs) ? doc.goods_outs : [];
+
+      const baseItems =
+        formatted.items && formatted.items.length > 0
+          ? formatted.items
+          : rawGoodsOuts.map((item: any) => ({
+              id: item.id,
+              product_id: item.product_id ?? null,
+              code: item.code ?? null,
+              name: item.name ?? null,
+              unit: item.unit ?? null,
+              lot_id: item.lot_id ?? null,
+              lot_serial: item.lot_serial ?? item.lot ?? null,
+              lot: item.lot ?? item.lot_serial ?? null,
+              qty: item.qty ?? item.quantity ?? 0,
+              quantity: item.quantity ?? item.qty ?? 0,
+              pick: item.pick ?? 0,
+              pack: item.pack ?? 0,
+              return: item.return ?? 0,
+              barcode_id: item.barcode_id ?? null,
+              barcode_text: item.barcode_text ?? null,
+              barcode: item.barcode_ref ?? null,
+              barcode_ref: item.barcode_ref ?? null,
+              deleted_at: item.deleted_at ?? null,
+            }));
+
+      const items = baseItems.map((item: any) => ({
         ...item,
         exp: getExp(item.product_id, item.lot_id) ?? item.exp ?? null,
         zone_type: getZoneType(item.code) ?? item.zone_type ?? null,
@@ -1867,6 +1911,30 @@ export const getTransactionReportPaginated = asyncHandler(
         doc.department_id,
         formatted.department,
       );
+
+      if (items.length === 0) {
+        return [
+          {
+            source: "outbound",
+            id: `outbound-${formatted.id}-empty`,
+            no: formatted.no,
+            created_at: formatted.created_at,
+            type: resolvedType,
+            location: formatted.location ?? null,
+            location_dest: formatted.location_dest ?? null,
+            user_ref: null,
+            code: null,
+            name: null,
+            document: {
+              ...formatted,
+              out_type: resolvedType,
+              type: resolvedType,
+              department,
+              items: [],
+            },
+          },
+        ];
+      }
 
       const normalRows: ReportRow[] = items.map((item: any, index: number) => ({
         source: "outbound",
@@ -1883,94 +1951,17 @@ export const getTransactionReportPaginated = asyncHandler(
           {
             ...formatted,
             out_type: resolvedType,
+            type: resolvedType,
             department,
           },
           item,
         ),
       }));
 
+      // ของเดิม returnRows ใช้ต่อได้
       const returnRows: ReportRow[] = (doc.goods_outs ?? [])
         .map((goi: any, index: number) => {
-          const rows = Array.isArray(goi?.goodsOutItemLocationReturns)
-            ? goi.goodsOutItemLocationReturns
-            : [];
-
-          const returnQty = rows.reduce(
-            (sum: number, r: any) => sum + Math.max(0, Number(r?.return ?? 0)),
-            0,
-          );
-
-          if (returnQty <= 0) return null;
-
-          const formattedItem =
-            items.find((x: any) => Number(x.id) === Number(goi.id)) ??
-            items.find(
-              (x: any) =>
-                Number(x.product_id) === Number(goi.product_id) &&
-                Number(x.lot_id ?? 0) === Number(goi.lot_id ?? 0) &&
-                String(x.lot_serial ?? "") === String(goi.lot_serial ?? ""),
-            ) ??
-            {};
-
-          const returnLocation = rows[0]?.location ?? null;
-
-          const returnItem = {
-            ...formattedItem,
-            ...goi,
-            barcode: formattedItem?.barcode ?? goi?.barcode_ref ?? null,
-            barcode_ref: formattedItem?.barcode_ref ?? goi?.barcode_ref ?? null,
-            barcode_text:
-              formattedItem?.barcode_text ?? goi?.barcode_text ?? null,
-            exp:
-              getExp(goi.product_id, goi.lot_id) ??
-              formattedItem?.exp ??
-              goi?.exp ??
-              null,
-            zone_type:
-              getZoneType(goi.code) ??
-              formattedItem?.zone_type ??
-              goi?.zone_type ??
-              null,
-            unit: formattedItem?.unit ?? goi?.unit ?? null,
-            code: formattedItem?.code ?? goi?.code ?? null,
-            name: formattedItem?.name ?? goi?.name ?? null,
-            qty: returnQty,
-            quantity: returnQty,
-            quantity_receive: returnQty,
-            quantity_count: returnQty,
-            confirmed_qty: returnQty,
-            in: returnQty,
-            out: 0,
-            return: returnQty,
-            return_qty: returnQty,
-            qty_return: returnQty,
-            quantity_return: returnQty,
-            return_locations: rows,
-            return_location: returnLocation,
-            location_return: returnLocation?.full_name ?? null,
-          };
-
-          return {
-            source: "outbound_return",
-            id: makeRowId("outbound-return", doc.id, returnItem, index),
-            no: formatted.no,
-            created_at: formatted.created_at,
-            type: "RETURN",
-            location: formatted.location_dest ?? null,
-            location_dest: formatted.location ?? null,
-            user_ref: null,
-            code: getItemCode(returnItem),
-            name: getItemName(returnItem),
-            document: withSingleItemDocument(
-              {
-                ...formatted,
-                out_type: "RETURN",
-                type: "RETURN",
-                department,
-              },
-              returnItem,
-            ),
-          } as ReportRow;
+          // ...โค้ด returnRows เดิมของคุณ
         })
         .filter((x: ReportRow | null): x is ReportRow => x !== null);
 

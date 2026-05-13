@@ -3,20 +3,85 @@ import { prisma } from "./lib/prisma";
 import { initializeScheduler } from "./schedulers/odoo.sync.scheduler";
 
 import http from "http";
-import { Server } from "socket.io";
+import { Server, Socket } from "socket.io";
 
 const PORT = Number(process.env.PORT || 7000);
 
-// ✅ สร้าง http server เพื่อให้ socket.io attach ได้
+// ✅ Create HTTP server so Socket.IO can attach to it.
 const httpServer = http.createServer(app);
 
-// ✅ กัน request sync นาน ๆ โดน Node ตัด
+// ✅ Prevent long sync requests from being cut by Node timeout.
 const TWENTY_MINUTES = 20 * 60 * 1000;
 
 httpServer.setTimeout(TWENTY_MINUTES);
 httpServer.keepAliveTimeout = TWENTY_MINUTES;
 httpServer.headersTimeout = TWENTY_MINUTES + 5000;
 httpServer.requestTimeout = TWENTY_MINUTES;
+
+type DocRoomPayload =
+  | {
+      no?: string;
+      id?: number | string;
+    }
+  | string;
+
+function normalizeText(value: unknown): string {
+  return String(value ?? "").trim();
+}
+
+function joinDocRoom(socket: Socket, prefix: string, payload: DocRoomPayload) {
+  let noRaw: string | undefined;
+  let idRaw: number | string | undefined;
+
+  if (typeof payload === "string") {
+    noRaw = payload;
+  } else if (payload && typeof payload === "object") {
+    noRaw = payload.no;
+    idRaw = payload.id;
+  }
+
+  const no = normalizeText(noRaw);
+  const docId = Number(idRaw);
+
+  if (no) {
+    const roomNo = `${prefix}:${no}`;
+    socket.join(roomNo);
+    console.log(`✅ ${socket.id} joined ${roomNo}`);
+  }
+
+  if (Number.isFinite(docId) && docId > 0) {
+    const roomId = `${prefix}-id:${docId}`;
+    socket.join(roomId);
+    console.log(`✅ ${socket.id} joined ${roomId}`);
+  }
+}
+
+function leaveDocRoom(socket: Socket, prefix: string, payload: DocRoomPayload) {
+  let noRaw: string | undefined;
+  let idRaw: number | string | undefined;
+
+  if (typeof payload === "string") {
+    noRaw = payload;
+  } else if (payload && typeof payload === "object") {
+    noRaw = payload.no;
+    idRaw = payload.id;
+  }
+
+  const no = normalizeText(noRaw);
+  const docId = Number(idRaw);
+
+  if (no) {
+    const roomNo = `${prefix}:${no}`;
+    socket.leave(roomNo);
+    console.log(`👈 ${socket.id} left ${roomNo}`);
+  }
+
+  if (Number.isFinite(docId) && docId > 0) {
+    const roomId = `${prefix}-id:${docId}`;
+    socket.leave(roomId);
+    console.log(`👈 ${socket.id} left ${roomId}`);
+  }
+}
 
 // ✅ สร้าง io และกำหนด CORS ให้ตรง FE ของคุณ
 export const io = new Server(httpServer, {
@@ -31,10 +96,12 @@ export const io = new Server(httpServer, {
 io.on("connection", (socket) => {
   console.log("🟢 socket connected:", socket.id);
 
+  // =========================================
+  // ✅ GENERIC ROOM
+  // ใช้ได้กับ room ทั่วไป
+  // =========================================
   socket.on("join", (room: string) => {
-    if (!room || typeof room !== "string") return;
-
-    const normalizedRoom = room.trim();
+    const normalizedRoom = normalizeText(room);
     if (!normalizedRoom) return;
 
     socket.join(normalizedRoom);
@@ -42,17 +109,76 @@ io.on("connection", (socket) => {
   });
 
   socket.on("leave", (room: string) => {
-    if (!room || typeof room !== "string") return;
-
-    const normalizedRoom = room.trim();
+    const normalizedRoom = normalizeText(room);
     if (!normalizedRoom) return;
 
     socket.leave(normalizedRoom);
     console.log(`👈 ${socket.id} left ${normalizedRoom}`);
   });
 
+  // =========================================
+  // ✅ INBOUND SOCKET ROOMS
+  // room:
+  // inbound:<no>
+  // inbound-id:<id>
+  // =========================================
+  socket.on("inbound:join", (payload: DocRoomPayload) => {
+    joinDocRoom(socket, "inbound", payload);
+  });
+
+  socket.on("inbound:leave", (payload: DocRoomPayload) => {
+    leaveDocRoom(socket, "inbound", payload);
+  });
+
+  // =========================================
+  // ✅ OUTBOUND SOCKET ROOMS
+  // room:
+  // outbound:<no>
+  // outbound-id:<id>
+  // =========================================
+  socket.on("outbound:join", (payload: DocRoomPayload) => {
+    joinDocRoom(socket, "outbound", payload);
+  });
+
+  socket.on("outbound:leave", (payload: DocRoomPayload) => {
+    leaveDocRoom(socket, "outbound", payload);
+  });
+
+  // =========================================
+  // ✅ ADJUSTMENT SOCKET ROOMS
+  // room:
+  // adjustment:<no>
+  // adjustment-id:<id>
+  // =========================================
+  socket.on("adjustment:join", (payload: DocRoomPayload) => {
+    joinDocRoom(socket, "adjustment", payload);
+  });
+
+  socket.on("adjustment:leave", (payload: DocRoomPayload) => {
+    leaveDocRoom(socket, "adjustment", payload);
+  });
+
+  // =========================================
+  // ✅ BORROW STOCK SOCKET ROOMS
+  // room:
+  // borrow_stock:<no>
+  // borrow_stock-id:<id>
+  // =========================================
+  socket.on("borrow_stock:join", (payload: DocRoomPayload) => {
+    joinDocRoom(socket, "borrow_stock", payload);
+  });
+
+  socket.on("borrow_stock:leave", (payload: DocRoomPayload) => {
+    leaveDocRoom(socket, "borrow_stock", payload);
+  });
+
+  // =========================================
+  // ✅ TRANSFER MOVEMENT SOCKET ROOMS
+  // เดิมใช้ room tm:<no>
+  // คงไว้เพื่อไม่ให้ FE เดิมพัง
+  // =========================================
   socket.on("join_transfer_movement", (no: string) => {
-    const normalizedNo = String(no ?? "").trim();
+    const normalizedNo = normalizeText(no);
     if (!normalizedNo) return;
 
     const room = `tm:${normalizedNo}`;
@@ -61,7 +187,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("leave_transfer_movement", (no: string) => {
-    const normalizedNo = String(no ?? "").trim();
+    const normalizedNo = normalizeText(no);
     if (!normalizedNo) return;
 
     const room = `tm:${normalizedNo}`;
@@ -69,9 +195,17 @@ io.on("connection", (socket) => {
     console.log(`🚚 ${socket.id} left ${room}`);
   });
 
+  // ✅ เพิ่มชื่อ event แบบใหม่ไว้ด้วย ถ้าภายหลังอยากใช้ pattern เดียวกัน
+  socket.on("transfer_movement:join", (payload: DocRoomPayload) => {
+    joinDocRoom(socket, "transfer_movement", payload);
+  });
+
+  socket.on("transfer_movement:leave", (payload: DocRoomPayload) => {
+    leaveDocRoom(socket, "transfer_movement", payload);
+  });
+
   // =========================================
   // ✅ PACK PRODUCT SOCKET ROOMS
-  // FE จะใช้ event นี้เพื่อเข้า room ตาม packProduct
   // =========================================
   socket.on(
     "pack_product:join",
@@ -164,81 +298,43 @@ io.on("connection", (socket) => {
   // =========================================
   // ✅ TRANSFER DOC SOCKET ROOMS
   // ใช้ร่วมกันทั้งหน้า PICK และ PUT
+  // room:
+  // transfer_doc:<no>
+  // transfer_doc-id:<id>
   // =========================================
-  socket.on(
-    "transfer_doc:join",
-    (payload: { no?: string; id?: number | string } | string) => {
-      let noRaw: string | undefined;
-      let idRaw: number | string | undefined;
+  socket.on("transfer_doc:join", (payload: DocRoomPayload) => {
+    joinDocRoom(socket, "transfer_doc", payload);
+  });
 
-      if (typeof payload === "string") {
-        noRaw = payload;
-      } else if (payload && typeof payload === "object") {
-        noRaw = payload.no;
-        idRaw = payload.id;
-      }
+  socket.on("transfer_doc:leave", (payload: DocRoomPayload) => {
+    leaveDocRoom(socket, "transfer_doc", payload);
+  });
 
-      const no = String(noRaw ?? "").trim();
-      const docId = Number(idRaw);
-
-      if (no) {
-        const roomNo = `transfer_doc:${no}`;
-        socket.join(roomNo);
-        console.log(`📄 ${socket.id} joined ${roomNo}`);
-      }
-
-      if (Number.isFinite(docId) && docId > 0) {
-        const roomId = `transfer_doc-id:${docId}`;
-        socket.join(roomId);
-        console.log(`📄 ${socket.id} joined ${roomId}`);
-      }
-    },
-  );
-
-  socket.on(
-    "transfer_doc:leave",
-    (payload: { no?: string; id?: number | string } | string) => {
-      let noRaw: string | undefined;
-      let idRaw: number | string | undefined;
-
-      if (typeof payload === "string") {
-        noRaw = payload;
-      } else if (payload && typeof payload === "object") {
-        noRaw = payload.no;
-        idRaw = payload.id;
-      }
-
-      const no = String(noRaw ?? "").trim();
-      const docId = Number(idRaw);
-
-      if (no) {
-        const roomNo = `transfer_doc:${no}`;
-        socket.leave(roomNo);
-        console.log(`📄 ${socket.id} left ${roomNo}`);
-      }
-
-      if (Number.isFinite(docId) && docId > 0) {
-        const roomId = `transfer_doc-id:${docId}`;
-        socket.leave(roomId);
-        console.log(`📄 ${socket.id} left ${roomId}`);
-      }
-    },
-  );
+  // =========================================
+  // ✅ BASIC EVENTS
+  // =========================================
+  socket.on("ping", () => socket.emit("pong"));
 
   socket.on("disconnect", () => {
     console.log("🔴 socket disconnected:", socket.id);
   });
-
-  socket.on("ping", () => socket.emit("pong"));
 });
 
 app.get("/health", async (_req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
-    res.json({ status: "ok", database: "connected" });
+
+    res.json({
+      status: "ok",
+      database: "connected",
+    });
   } catch (error) {
     console.error("❌ Database health check failed:", error);
-    res.status(500).json({ status: "error", database: "disconnected" });
+
+    res.status(500).json({
+      status: "error",
+      database: "disconnected",
+    });
   }
 });
 

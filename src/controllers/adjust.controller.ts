@@ -3512,9 +3512,6 @@ export const confirmAdjustmentByLocation = asyncHandler(
                   location_id: locationId,
                 }),
 
-                snapshot_date: new Date(),
-                no,
-
                 product_id: item.product_id,
                 product_code: item.code ?? null,
                 product_name: item.name ?? null,

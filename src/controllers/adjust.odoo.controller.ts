@@ -15,12 +15,28 @@ function formatYYMMDD(d: Date | null | undefined): string {
   return `${yy}${mm}${dd}`;
 }
 
+async function findMasterBarcodeByProductId(
+  productId: number | null | undefined,
+) {
+  if (!productId) return null;
+
+  return prisma.barcode.findFirst({
+    where: {
+      product_id: productId,
+      deleted_at: null, // ถ้า model barcode ไม่มี field นี้ ให้ลบบรรทัดนี้ออก
+    },
+    orderBy: { id: "asc" },
+  });
+}
+
 function buildAdjustmentBarcodePayload(input: {
   barcode: string;
   lot_serial: string | null | undefined;
   exp: Date | null | undefined;
 }) {
-  const barcode = String(input.barcode ?? "").trim().replace(/\s+/g, "");
+  const barcode = String(input.barcode ?? "")
+    .trim()
+    .replace(/\s+/g, "");
   if (!barcode) return "";
 
   const lotPart = input.lot_serial
@@ -71,10 +87,14 @@ function detectAdjustMode(body: any): AdjustMode {
   }
 
   const hasAuto = adjusts.some((adj: any) => adj?.is_system_generated === true);
-  const hasManual = adjusts.some((adj: any) => adj?.is_system_generated !== true);
+  const hasManual = adjusts.some(
+    (adj: any) => adj?.is_system_generated !== true,
+  );
 
   if (hasAuto && hasManual) {
-    throw badRequest("request เดียวห้ามมีทั้ง auto และ manual adjustment ปนกัน");
+    throw badRequest(
+      "request เดียวห้ามมีทั้ง auto และ manual adjustment ปนกัน",
+    );
   }
 
   return hasAuto ? "auto" : "manual";
@@ -295,7 +315,18 @@ async function upsertAdjustmentItems(adjustmentId: number, items: any[]) {
         item.expire_date ?? item.exp ?? item.expiration_date,
       );
 
-      const barcodeBase = typeof item.code === "string" ? item.code : "";
+      const masterBarcode = await findMasterBarcodeByProductId(
+        item.product_id != null ? Number(item.product_id) : null,
+      );
+
+      // ใช้ barcode จาก master ก่อน ถ้าไม่มีค่อย fallback เป็น item.code
+      const barcodeBase =
+        typeof masterBarcode?.barcode === "string" &&
+        masterBarcode.barcode.trim()
+          ? masterBarcode.barcode
+          : typeof item.code === "string"
+            ? item.code
+            : "";
 
       const barcodePayload = buildAdjustmentBarcodePayload({
         barcode: barcodeBase,
@@ -308,6 +339,9 @@ async function upsertAdjustmentItems(adjustmentId: number, items: any[]) {
         code: item.code ?? null,
         name: item.name,
         unit: item.unit,
+
+        barcode_id: masterBarcode?.id ?? null,
+  barcode_text: masterBarcode?.barcode ?? null,
 
         location_id: item.location_id ?? null,
         location: normalizeString(item.location),

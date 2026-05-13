@@ -192,7 +192,13 @@ export function isRTCNumber(no: string | null | undefined): boolean {
   const s = String(no ?? "")
     .trim()
     .toUpperCase();
-  return s.startsWith("RTC");
+
+  return (
+    s.startsWith("RTC") ||
+    s.startsWith("BOR") ||
+    s.includes("/RTC/") ||
+    s.includes("/BOR/")
+  );
 }
 
 // PD auto-process

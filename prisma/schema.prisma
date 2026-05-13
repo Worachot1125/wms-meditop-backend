@@ -154,6 +154,8 @@ model location {
   transferMovementItemLocationPickConfirms transfer_movement_item_location_pick_confirm[]
   goodsOutItemLocationPicks                goods_out_item_location_pick[]
   goodsOutItemLocationReturns              goods_out_item_location_return[]               @relation("LocationToGoodsOutItemReturn")
+  goodsOutItemLocationRtcs                 goods_out_item_location_rtc[]
+  goodsOutItemLocationBors                 goods_out_item_location_bor[]
 
   @@map("locations")
 }
@@ -347,7 +349,6 @@ model goods_in_scan_history {
   @@map("goods_in_scan_histories")
 }
 
-
 model odoo_request_log {
   id              Int      @id @default(autoincrement())
   endpoint        String
@@ -489,6 +490,7 @@ model goods_out_item {
   pack               Int       @default(0)
   pick               Int       @default(0)
   rtc                Int       @default(0)
+  bor                Int       @default(0)
   return             Int       @default(0)
   rtc_check          Boolean   @default(false)
   return_check       Boolean   @default(false)
@@ -516,6 +518,8 @@ model goods_out_item {
   adjust_lot_logs             adjust_lot_log[]
   packProductBoxItems         pack_product_box_item[]
   goodsOutItemLocationReturns goods_out_item_location_return[]
+  goodsOutItemLocationRtcs    goods_out_item_location_rtc[]
+  goodsOutItemLocationBors    goods_out_item_location_bor[]
 
   @@map("goods_out_items")
 }
@@ -900,6 +904,40 @@ model goods_out_item_location_return {
   location       location       @relation("LocationToGoodsOutItemReturn", fields: [location_id], references: [id])
 
   @@unique([goods_out_item_id, location_id], name: "uniq_goi_return_location")
+}
+
+model goods_out_item_location_rtc {
+  id Int @id @default(autoincrement())
+
+  goods_out_item_id Int
+  location_id       Int
+
+  rtc Int @default(0)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  goods_out_item goods_out_item @relation(fields: [goods_out_item_id], references: [id])
+  location       location       @relation(fields: [location_id], references: [id])
+
+  @@unique([goods_out_item_id, location_id], name: "uniq_goi_rtc_location")
+}
+
+model goods_out_item_location_bor {
+  id Int @id @default(autoincrement())
+
+  goods_out_item_id Int
+  location_id       Int
+
+  bor Int @default(0)
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  goods_out_item goods_out_item @relation(fields: [goods_out_item_id], references: [id])
+  location       location       @relation(fields: [location_id], references: [id])
+
+  @@unique([goods_out_item_id, location_id], name: "uniq_goi_bor_location")
 }
 
 model barcode_count_department {

@@ -1,6 +1,5 @@
 import { prisma } from "../../lib/prisma";
 import { Prisma } from "@prisma/client";
-import { badRequest } from "../appError";
 import { NormalizedInboundItem, toExpDate } from "./inbound.normalize.helper";
 import { handleInboundTransfer } from "./inbound.transfer.helper";
 import { rtcAdjustmentMatchKey } from "./inbound.key.helper";
@@ -37,8 +36,6 @@ export async function handleRTCReturnTransfer(input: {
 
   const outboundNo = extractOutboundNoFromOrigin(origin);
 
-  // ✅ RTC ที่ไม่มี outbound ref
-  // -> เข้า inbound ปกติ
   if (!outboundNo) {
     const inbound = await handleInboundTransfer({
       picking_id,
@@ -90,15 +87,10 @@ export async function handleRTCReturnTransfer(input: {
   });
 
   if (!outbound) {
-    // ✅ RTC ที่ไม่ match outbound
-    // -> เข้า inbound/goods_in ปกติ
-
     const inbound = await handleInboundTransfer({
       number,
       origin,
       mergedItems,
-
-      // fallback
       picking_id: null,
       location_id: null,
       location: null,
@@ -120,13 +112,146 @@ export async function handleRTCReturnTransfer(input: {
     };
   }
 
-  /**
-   * ==========================================
-   * CASE 1: outbound.in_process === true
-   * -> เอา RTC เข้า inbound/goods_in เพื่อทำ pick/receive ปกติ
-   * ==========================================
-   */
-  if (Boolean(outbound.in_process)) {
+  const packing = await prisma.pack_product_outbound.findFirst({
+    where: {
+      outbound_id: Number(outbound.id),
+    },
+    select: {
+      id: true,
+      outbound_id: true,
+      pack_product_id: true,
+    },
+  });
+
+  if (packing) {
+    const payload = {
+      source: "rtc",
+      mode: "packing_rtc_detected",
+      rtc_no: number,
+      outbound_id: outbound.id,
+      outbound_no: outbound.no,
+      origin,
+      invoice,
+      pack_product_id: packing.pack_product_id,
+      pack_product_name: null,
+      items: mergedItems,
+    };
+
+    try {
+      io.to(`pack_product:${packing.pack_product_id}`).emit(
+        "packing:rtc_detected",
+        payload,
+      );
+      io.to(`outbound:${outbound.no}`).emit("packing:rtc_detected", payload);
+      io.emit("packing:rtc_detected", payload);
+    } catch {}
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const dbItems = await tx.goods_out_item.findMany({
+      where: {
+        outbound_id: outbound.id,
+        deleted_at: null,
+      },
+      orderBy: [{ sequence: "asc" }, { id: "asc" }],
+    });
+
+    const adjustmentLines =
+      await getOutboundLotAdjustmentLinesByGoodsOutItemIds(
+        tx,
+        dbItems.map((x) => x.id),
+      );
+
+    const adjustmentByItemId = new Map<number, typeof adjustmentLines>();
+
+    for (const row of adjustmentLines as any[]) {
+      const itemId = Number(row.goods_out_item_id ?? 0);
+      const arr = adjustmentByItemId.get(itemId) ?? [];
+      arr.push(row);
+      adjustmentByItemId.set(itemId, arr);
+    }
+
+    const hasPicked =
+      dbItems.some((x: any) => Number(x.pick ?? 0) > 0) ||
+      (adjustmentLines as any[]).some((x: any) => Number(x.pick ?? 0) > 0);
+
+    /**
+     * ✅ Important rule:
+     * - true  = RTC came while outbound already has pick.
+     *           Keep outbound/goods_out_item/batch as-is.
+     *           Do not reduce qty/pack here.
+     *           Actual delete/reduce will be done later in return confirm.
+     * - false = no pick yet.
+     *           Create inbound/goods_in and mark inbound completed.
+     */
+    const shouldKeepOutboundForReturn = hasPicked;
+
+    if (!hasPicked) {
+      const inbound = await handleInboundTransfer({
+        picking_id,
+        number,
+        location_id,
+        location,
+        location_dest_id,
+        location_dest,
+        department_id,
+        department,
+        reference:
+          reference != null ? String(reference) : `[RTC-NO-PICK] ${number}`,
+        origin,
+        invoice,
+        mergedItems,
+      });
+
+      const completedInbound = await completeInboundIfCreated(inbound);
+
+      await tx.goods_out_item.updateMany({
+        where: {
+          outbound_id: Number(outbound.id),
+          deleted_at: null,
+        } as any,
+        data: {
+          deleted_at: new Date(),
+          updated_at: new Date(),
+        } as any,
+      });
+
+      await tx.batch_outbound.deleteMany({
+        where: {
+          outbound_id: Number(outbound.id),
+        },
+      });
+
+      await tx.pack_product_outbound.deleteMany({
+        where: {
+          outbound_id: Number(outbound.id),
+        },
+      });
+
+      await tx.outbound.update({
+        where: {
+          id: Number(outbound.id),
+        },
+        data: {
+          deleted_at: new Date(),
+          updated_at: new Date(),
+        } as any,
+      });
+
+      return {
+        source: "rtc",
+        rtc_no: number,
+        outbound_id: outbound.id,
+        outbound_no: outbound.no,
+        mode: "inbound_completed_no_pick_and_soft_delete_outbound",
+        reason: "all_pick_is_zero",
+        data: completedInbound,
+        outbound_action: "soft_delete",
+        batch_action: "remove_relation",
+        pack_product_action: "remove_relation",
+      };
+    }
+
     const inbound = await handleInboundTransfer({
       picking_id,
       number,
@@ -137,173 +262,90 @@ export async function handleRTCReturnTransfer(input: {
       department_id,
       department,
       reference:
-        reference != null ? String(reference) : `[RTC-NO-REF] ${number}`,
+        reference != null ? String(reference) : `[RTC-DURING-PICK] ${number}`,
       origin,
       invoice,
       mergedItems,
     });
 
-    const result = {
-      source: "rtc",
-      rtc_no: number,
-      outbound_id: outbound.id,
-      outbound_no: outbound.no,
-      mode: "inbound_upsert",
-      data: inbound,
-    };
-
-    try {
-      io.to(`outbound:${result.outbound_no}`).emit(
-        "outbound:rtc_adjusted",
-        result,
-      );
-      io.to(`outbound-id:${result.outbound_id}`).emit(
-        "outbound:rtc_adjusted",
-        result,
-      );
-      io.emit("outbound:rtc_adjusted", result);
-    } catch {}
-
-    return result;
-  }
-
-  /**
-   * ==========================================
-   * CASE 2: outbound.in_process === false
-   * -> เช็ค pick ก่อน
-   *    - goods_out_item.pick
-   *    - outbound_lot_adjustment_line.pick
-   * -> ถ้ามี pick ที่ไหน > 0 => rtc_check_only
-   * -> ถ้า pick ทั้งหมด = 0 => process เดิม
-   * ==========================================
-   */
-  const result = await prisma.$transaction(async (tx) => {
-    const dbItems = await tx.goods_out_item.findMany({
-      where: {
-        outbound_id: outbound.id,
-        deleted_at: null,
-      },
-      select: {
-        id: true,
-        outbound_id: true,
-        product_id: true,
-        lot_id: true,
-        lot_serial: true,
-        qty: true,
-        pick: true,
-        pack: true,
-        code: true,
-        name: true,
-        updated_at: true,
-        rtc_check: true as any,
-      },
-    });
-
-    const itemMap = new Map<string, (typeof dbItems)[number]>();
-    for (const row of dbItems) {
-      const key = `${row.product_id ?? "null"}__${row.lot_id ?? "null"}`;
-      if (!itemMap.has(key)) {
-        itemMap.set(key, row);
-      }
-    }
-
-    const adjustmentLines =
-      await getOutboundLotAdjustmentLinesByGoodsOutItemIds(
-        tx,
-        dbItems.map((x) => x.id),
-      );
-
-    const adjustmentByItemId = new Map<number, typeof adjustmentLines>();
-    for (const row of adjustmentLines as any[]) {
-      const itemId = Number(row.goods_out_item_id ?? 0);
-      const arr = adjustmentByItemId.get(itemId) ?? [];
-      arr.push(row);
-      adjustmentByItemId.set(itemId, arr);
-    }
-
-    const affected: Array<{
-      rtc_no: string;
-      outbound_no: string;
-      goods_out_item_id: number;
-      adjustment_line_id?: number | null;
-      product_id: number | null;
-      lot_id: number | null;
-      lot_serial: string | null;
-      exp?: string | null;
-      old_qty: number;
-      rtc_qty: number;
-      new_qty: number;
-      action:
-        | "decrement"
-        | "soft_delete"
-        | "skip_picked"
-        | "rtc_check_only"
-        | "adjustment_soft_delete";
-    }> = [];
-
-    const ignored: Array<{
-      product_id: number | null;
-      lot_id: number | null;
-      lot_serial: string | null;
-      qty: number;
-      reason: string;
-    }> = [];
+    const affected: any[] = [];
+    const ignored: any[] = [];
+    const packingBoxAffected: any[] = [];
 
     for (const item of mergedItems) {
-      const product_id = item.product_id ?? null;
-      const lot_id = item.lot_id ?? null;
-      const rtcQty = Math.max(0, Math.floor(Number(item.qty ?? 0)));
+      const productId =
+        item.product_id != null ? Number(item.product_id) : null;
+
+      const lotId = item.lot_id != null ? Number(item.lot_id) : null;
+
+      const lotSerial = String(item.lot_serial ?? "").trim();
+
+      const rtcQty = Math.max(
+        0,
+        Number(
+          (item as any).quantity ??
+            item.qty ??
+            (item as any).product_uom_qty ??
+            0,
+        ),
+      );
+
       const rtcExp = toExpDate(item.expire_date ?? null) ?? null;
 
-      if (product_id == null) {
+      if (!productId || rtcQty <= 0) {
         ignored.push({
-          product_id: null,
-          lot_id,
-          lot_serial: item.lot_serial ?? null,
-          qty: rtcQty,
-          reason: "missing_product_id",
+          reason: "invalid_product_or_qty",
+          item,
         });
         continue;
       }
 
-      if (rtcQty <= 0) {
-        ignored.push({
-          product_id,
-          lot_id,
-          lot_serial: item.lot_serial ?? null,
-          qty: rtcQty,
-          reason: "invalid_qty",
-        });
-        continue;
-      }
+      const match = dbItems.find((go: any) => {
+        if (Number(go.product_id) !== Number(productId)) {
+          return false;
+        }
 
-      const key = `${product_id}__${lot_id ?? "null"}`;
-      const match = itemMap.get(key);
+        if (lotId != null && go.lot_id != null) {
+          return Number(go.lot_id) === Number(lotId);
+        }
+
+        if (lotSerial) {
+          return (
+            String(go.lot_serial ?? "")
+              .trim()
+              .toLowerCase() === lotSerial.toLowerCase()
+          );
+        }
+
+        return true;
+      });
 
       if (!match) {
         ignored.push({
-          product_id,
-          lot_id,
-          lot_serial: item.lot_serial ?? null,
-          qty: rtcQty,
           reason: "goods_out_item_not_found",
+          product_id: productId,
+          lot_id: lotId,
+          lot_serial: lotSerial || null,
+          qty: rtcQty,
         });
+
         continue;
       }
 
-      const currentPick = Math.max(0, Math.floor(Number(match.pick ?? 0)));
-      const currentQty = Math.max(0, Math.floor(Number(match.qty ?? 0)));
+      const currentQty = Math.max(0, Number(match.qty ?? 0));
 
-      // หา adjustment line ที่ตรงละเอียด
+      const currentPack = Math.max(0, Number(match.pack ?? 0));
+
+      const currentPick = Math.max(0, Number(match.pick ?? 0));
+
+      const currentRtc = Math.max(0, Number(match.rtc ?? 0));
+
       const candidateAdjustmentLines = adjustmentByItemId.get(match.id) ?? [];
 
-      // IMPORTANT:
-      // outbound_lot_adjustment_line ไม่มี exp ใน schema
-      // จึงต้อง match โดยไม่ใช้ exp เพื่อไม่ให้กระทบ flow เดิม
       const rtcAdjKey = rtcAdjustmentMatchKey({
-        product_id,
-        lot_id,
-        lot_serial: item.lot_serial ?? null,
+        product_id: productId,
+        lot_id: lotId,
+        lot_serial: lotSerial || null,
         exp: null,
       });
 
@@ -315,24 +357,52 @@ export async function handleRTCReturnTransfer(input: {
             lot_serial: adj.lot_serial ?? null,
             exp: null,
           });
+
           return adjKey === rtcAdjKey;
         }) ?? null;
 
       const adjustmentPick = Math.max(
         0,
-        Math.floor(Number(matchedAdjustmentLine?.pick ?? 0)),
+        Number(matchedAdjustmentLine?.pick ?? 0),
       );
 
       /**
-       * ✅ NEW RULE
-       * ถ้ามี pick ฝั่ง item หรือ adjustment line > 0
-       * -> set rtc_check = true อย่างเดียว
+       * ==========================================
+       * RTC during PICK / PACK
+       * -> behave same as PD
+       * -> keep outbound alive
+       * -> DO NOT reduce qty yet
+       * ==========================================
        */
-      if (currentPick > 0 || adjustmentPick > 0) {
+      const isDuringPickOrPack =
+        currentPick > 0 || adjustmentPick > 0 || currentPack > 0;
+
+      if (isDuringPickOrPack) {
+        const maxRtc = Math.max(0, currentQty - currentRtc);
+
+        if (rtcQty > maxRtc) {
+          ignored.push({
+            reason: "rtc_qty_exceeded",
+            product_id: productId,
+            goods_out_item_id: match.id,
+            current_qty: currentQty,
+            current_rtc: currentRtc,
+            rtc_qty: rtcQty,
+            max_rtc: maxRtc,
+          });
+
+          continue;
+        }
+
         await tx.goods_out_item.update({
-          where: { id: match.id },
+          where: {
+            id: Number(match.id),
+          },
           data: {
-            rtc_check: true,
+            rtc: {
+              increment: rtcQty,
+            },
+            rtc_check: false,
             updated_at: new Date(),
           } as any,
         });
@@ -342,154 +412,197 @@ export async function handleRTCReturnTransfer(input: {
           outbound_no: outbound.no,
           goods_out_item_id: match.id,
           adjustment_line_id: matchedAdjustmentLine?.id ?? null,
-          product_id: match.product_id ?? null,
-          lot_id: match.lot_id ?? null,
-          lot_serial: item.lot_serial ?? match.lot_serial ?? null,
+          product_id: productId,
+          lot_id: lotId,
+          lot_serial: match.lot_serial ?? lotSerial ?? null,
           exp: rtcExp ? rtcExp.toISOString() : null,
+
           old_qty: currentQty,
+          old_pack: currentPack,
+          old_pick: currentPick,
+          old_rtc: currentRtc,
+
+          adjustment_pick: adjustmentPick,
+
           rtc_qty: rtcQty,
+
           new_qty: currentQty,
-          action: "rtc_check_only",
+          new_pack: currentPack,
+          new_pick: currentPick,
+          new_rtc: currentRtc + rtcQty,
+
+          during_pick: true,
+
+          action: "rtc_waiting_return_pick",
         });
 
         continue;
       }
 
       /**
-       * ✅ OLD RULE
-       * pick == 0 ทั้ง item และ adjustment
+       * ==========================================
+       * RTC normal flow
+       * -> reduce qty immediately
+       * ==========================================
        */
-      const nextQty = currentQty - rtcQty;
+
+      const qtyReduce = Math.min(currentQty, rtcQty);
+
+      const packReduce = Math.min(currentPack, rtcQty);
+
+      const nextQty = Math.max(0, currentQty - qtyReduce);
+
+      const nextPack = Math.max(0, currentPack - packReduce);
+
+      const boxResult =
+        packReduce > 0
+          ? await reducePackingBoxItemsForRtcTx(tx, {
+              goods_out_item_id: Number(match.id),
+              reduce_qty: packReduce,
+            })
+          : [];
+
+      packingBoxAffected.push(...boxResult);
 
       if (nextQty <= 0) {
         await tx.goods_out_item.update({
-          where: { id: match.id },
+          where: {
+            id: Number(match.id),
+          },
           data: {
+            qty: 0,
+            pack: nextPack,
             deleted_at: new Date(),
             updated_at: new Date(),
-          },
+          } as any,
         });
 
-        affected.push({
-          rtc_no: number,
-          outbound_no: outbound.no,
-          goods_out_item_id: match.id,
-          adjustment_line_id: null,
-          product_id: match.product_id ?? null,
-          lot_id: match.lot_id ?? null,
-          lot_serial: match.lot_serial ?? null,
-          exp: null,
-          old_qty: currentQty,
-          rtc_qty: rtcQty,
-          new_qty: currentQty,
-          action: "soft_delete",
-        });
-
-        // ถ้ามี matched adjustment line ของ item นี้และตรงชุดเดียวกัน -> soft delete ด้วย
-        if (matchedAdjustmentLine?.id) {
+        if (matchedAdjustmentLine?.id && adjustmentPick <= 0) {
           await tx.outbound_lot_adjustment_line.update({
-            where: { id: matchedAdjustmentLine.id },
+            where: {
+              id: matchedAdjustmentLine.id,
+            },
             data: {
               deleted_at: new Date(),
               updated_at: new Date(),
             } as any,
           });
-
-          affected.push({
-            rtc_no: number,
-            outbound_no: outbound.no,
-            goods_out_item_id: match.id,
-            adjustment_line_id: matchedAdjustmentLine.id,
-            product_id: match.product_id ?? null,
-            lot_id: matchedAdjustmentLine.lot_id ?? null,
-            lot_serial: matchedAdjustmentLine.lot_serial ?? null,
-            exp: rtcExp ? rtcExp.toISOString() : null,
-            old_qty: 0,
-            rtc_qty: rtcQty,
-            new_qty: 0,
-            action: "adjustment_soft_delete",
-          });
         }
+
+        affected.push({
+          rtc_no: number,
+          outbound_no: outbound.no,
+          goods_out_item_id: match.id,
+          adjustment_line_id: matchedAdjustmentLine?.id ?? null,
+          product_id: productId,
+          lot_id: lotId,
+          lot_serial: match.lot_serial ?? lotSerial ?? null,
+          exp: rtcExp ? rtcExp.toISOString() : null,
+
+          old_qty: currentQty,
+          old_pack: currentPack,
+          old_pick: currentPick,
+          old_rtc: currentRtc,
+
+          adjustment_pick: adjustmentPick,
+
+          rtc_qty: rtcQty,
+
+          new_qty: 0,
+          new_pack: nextPack,
+          new_rtc: currentRtc,
+
+          during_pick: false,
+
+          action: "rtc_soft_delete_item",
+        });
 
         continue;
       }
 
       await tx.goods_out_item.update({
-        where: { id: match.id },
+        where: {
+          id: Number(match.id),
+        },
         data: {
           qty: nextQty,
+          pack: nextPack,
           updated_at: new Date(),
-        },
+        } as any,
       });
 
       affected.push({
         rtc_no: number,
         outbound_no: outbound.no,
         goods_out_item_id: match.id,
-        adjustment_line_id: null,
-        product_id: match.product_id ?? null,
-        lot_id: match.lot_id ?? null,
-        lot_serial: match.lot_serial ?? null,
-        exp: null,
+        adjustment_line_id: matchedAdjustmentLine?.id ?? null,
+        product_id: productId,
+        lot_id: lotId,
+        lot_serial: match.lot_serial ?? lotSerial ?? null,
+        exp: rtcExp ? rtcExp.toISOString() : null,
+
         old_qty: currentQty,
+        old_pack: currentPack,
+        old_pick: currentPick,
+        old_rtc: currentRtc,
+
+        adjustment_pick: adjustmentPick,
+
         rtc_qty: rtcQty,
+
         new_qty: nextQty,
-        action: "decrement",
+        new_pack: nextPack,
+        new_rtc: currentRtc,
+
+        during_pick: false,
+
+        action: "rtc_reduce_qty",
       });
-
-      // ถ้ามี matched adjustment line และ pick=0 อยู่แล้ว -> soft delete ได้เช่นกัน
-      if (matchedAdjustmentLine?.id) {
-        await tx.outbound_lot_adjustment_line.update({
-          where: { id: matchedAdjustmentLine.id },
-          data: {
-            deleted_at: new Date(),
-            updated_at: new Date(),
-          } as any,
-        });
-
-        affected.push({
-          rtc_no: number,
-          outbound_no: outbound.no,
-          goods_out_item_id: match.id,
-          adjustment_line_id: matchedAdjustmentLine.id,
-          product_id: match.product_id ?? null,
-          lot_id: matchedAdjustmentLine.lot_id ?? null,
-          lot_serial: matchedAdjustmentLine.lot_serial ?? null,
-          exp: rtcExp ? rtcExp.toISOString() : null,
-          old_qty: 0,
-          rtc_qty: rtcQty,
-          new_qty: 0,
-          action: "adjustment_soft_delete",
-        });
-      }
     }
-
-    await tx.outbound.update({
-      where: { id: outbound.id },
-      data: {
-        updated_at: new Date(),
-      },
-    });
 
     const remainingActiveItems = await tx.goods_out_item.count({
       where: {
-        outbound_id: outbound.id,
+        outbound_id: Number(outbound.id),
         deleted_at: null,
+        qty: { gt: 0 },
       },
     });
 
     let outbound_action: "keep" | "soft_delete" = "keep";
+    let batch_action: "keep" | "remove_relation" = "keep";
+    let pack_product_action: "keep" | "remove_relation" = "keep";
 
-    if (remainingActiveItems === 0) {
-      await tx.outbound.update({
-        where: { id: outbound.id },
-        data: {
-          deleted_at: new Date(),
-          updated_at: new Date(),
+    if (!shouldKeepOutboundForReturn && remainingActiveItems === 0) {
+      await tx.batch_outbound.deleteMany({
+        where: {
+          outbound_id: Number(outbound.id),
         },
       });
 
+      await tx.pack_product_outbound.deleteMany({
+        where: {
+          outbound_id: Number(outbound.id),
+        },
+      });
+
+      await tx.outbound.update({
+        where: { id: Number(outbound.id) },
+        data: {
+          deleted_at: new Date(),
+          updated_at: new Date(),
+        } as any,
+      });
+
       outbound_action = "soft_delete";
+      batch_action = "remove_relation";
+      pack_product_action = "remove_relation";
+    } else {
+      await tx.outbound.update({
+        where: { id: Number(outbound.id) },
+        data: {
+          updated_at: new Date(),
+        } as any,
+      });
     }
 
     return {
@@ -497,11 +610,20 @@ export async function handleRTCReturnTransfer(input: {
       rtc_no: number,
       outbound_id: outbound.id,
       outbound_no: outbound.no,
-      mode: "outbound_adjust",
+      mode: shouldKeepOutboundForReturn
+        ? "inbound_return_during_pick_keep_outbound"
+        : "outbound_adjust",
+      reason: shouldKeepOutboundForReturn
+        ? "pick_exists_wait_return_confirm"
+        : undefined,
+      data: inbound,
       affected,
       ignored,
+      packing_box_affected: packingBoxAffected,
       remaining_active_items: remainingActiveItems,
       outbound_action,
+      batch_action,
+      pack_product_action,
     };
   });
 
@@ -563,16 +685,91 @@ export function extractOutboundNoFromOrigin(origin: any): string | null {
   if (!s) return null;
 
   // ✅ WH/DO/xxxx
-  const whMatch = s.match(/WH\/DO\/[^\s]+/i);
+  const whMatch = s.match(/WH\/(?:DO|BO)\/[^\s]+/i);
   if (whMatch?.[0]) {
     return whMatch[0].trim().toUpperCase();
   }
 
   // ✅ DO-xxxx / DOxxxx
-  const doMatch = s.match(/\b(DO[A-Z0-9-]+)\b/i);
+  const doMatch = s.match(/\b((?:DO|BO)[A-Z0-9-]+)\b/i);
   if (doMatch?.[1]) {
     return doMatch[1].trim().toUpperCase();
   }
 
   return null;
+}
+
+async function reducePackingBoxItemsForRtcTx(
+  tx: any,
+  args: {
+    goods_out_item_id: number;
+    reduce_qty: number;
+  },
+) {
+  let remaining = Math.max(0, Math.floor(Number(args.reduce_qty ?? 0)));
+  if (remaining <= 0) return [];
+
+  const boxItems = await tx.pack_product_box_item.findMany({
+    where: {
+      goods_out_item_id: args.goods_out_item_id,
+      deleted_at: null,
+    } as any,
+    orderBy: [{ id: "asc" }],
+  });
+
+  const affected: any[] = [];
+
+  for (const boxItem of boxItems) {
+    if (remaining <= 0) break;
+
+    const currentQty = Math.max(0, Math.floor(Number(boxItem.quantity ?? 0)));
+    if (currentQty <= 0) continue;
+
+    const reduceQty = Math.min(currentQty, remaining);
+    const nextQty = currentQty - reduceQty;
+
+    if (nextQty <= 0) {
+      await tx.pack_product_box_item.delete({
+        where: { id: Number(boxItem.id) },
+      });
+    } else {
+      await tx.pack_product_box_item.update({
+        where: { id: Number(boxItem.id) },
+        data: {
+          quantity: nextQty,
+          updated_at: new Date(),
+        } as any,
+      });
+    }
+
+    affected.push({
+      pack_product_box_item_id: boxItem.id,
+      old_quantity: currentQty,
+      reduced_qty: reduceQty,
+      new_quantity: nextQty,
+      action: nextQty <= 0 ? "delete" : "decrement",
+    });
+
+    remaining -= reduceQty;
+  }
+
+  return affected;
+}
+
+async function completeInboundIfCreated(inbound: any) {
+  const inboundId = Number(inbound?.id ?? inbound?.data?.id ?? 0);
+  if (!inboundId) return inbound;
+
+  const completed = await prisma.inbound.update({
+    where: { id: inboundId },
+    data: {
+      status: "completed",
+      updated_at: new Date(),
+    } as any,
+  });
+
+  return {
+    ...inbound,
+    status: completed.status,
+  };
 }

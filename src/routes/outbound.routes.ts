@@ -34,6 +34,8 @@ import {
   scanOutboundReturn,
   scanBarcodeOutboundReturn,
   confirmOutboundReturn,
+  scanOutboundRtcReturnPick,
+  confirmRTCtoStock,
 } from "../controllers/outbound.scan.controller";
 import {
   scanPackProductBarcode,
@@ -46,6 +48,7 @@ import {
   getPackProductSummary,
   getPackProducts,
   movePdPackingToLocation,
+  moveRtcPackingToLocation,
 } from "../controllers/pack_product.controller";
 
 const router = Router();
@@ -91,6 +94,10 @@ router.post(
   "/pack-products/:packProductId/pd/move-to-pack-location",
   movePdPackingToLocation,
 );
+router.post(
+  "/pack-products/:packProductId/rtc/move-to-location",
+  moveRtcPackingToLocation,
+);
 // summary ต้องมาก่อน :id ถ้าใช้ pattern นี้
 router.get("/pack-products/:packProductId/summary", getPackProductSummary);
 router.get("/pack-products/:id", getPackProductById);
@@ -130,10 +137,7 @@ router.delete(
   removeOutboundItemBarcode,
 );
 
-router.post(
-  "/pack-products/:packProductId/finalize",
-  finalizePackProduct,
-);
+router.post("/pack-products/:packProductId/finalize", finalizePackProduct);
 
 router.delete(
   "/pack-products/:packProductId/boxes/:boxId/items/:packBoxItemId",
@@ -149,10 +153,12 @@ router.post("/:no/scan/location", scanOutboundLocation);
 router.post("/:no/scan/barcode", scanOutboundPick);
 router.post("/:no/scan/return", scanOutboundReturn);
 router.post("/:no/scan/barcode/return", scanBarcodeOutboundReturn);
+router.post("/:no/scan/barcode/return-pick", scanOutboundRtcReturnPick);
 
 // 3) Confirm Pick -> Decrement Stock (DELTA)
 // POST /api/outbounds/:no/scan/confirm
 router.post("/:no/scan/confirm", confirmOutboundPickToStock);
 router.post("/:no/scan/confirm/return", confirmOutboundReturn);
+router.post("/:no/confirm-rtc-to-stock", confirmRTCtoStock);
 
 export default router;

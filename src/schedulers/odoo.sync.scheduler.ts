@@ -11,13 +11,13 @@ import { logger } from "../lib/logger";
 const TZ = "Asia/Bangkok";
 /**
  * Scheduler for automatic Odoo sync
- * 
+ *
  * Runs all master data sync every day at 23:59 (11:59 PM)
  * - Departments (wms.wms_mdt_department)
  * - Goods/SKU (wms.wms_mdt_goods)
  * - Barcodes (wms.wms_mdt_barcode)
  * - Zone Types (wms.wms_mdt_zone_type)
- * 
+ *
  * Runs stock sync at 00:01 (12:01 AM) - หลังเที่ยงคืน
  * - Odoo Stock Balance
  * - WMS Stock Snapshot
@@ -31,7 +31,8 @@ export function initializeScheduler() {
 
       try {
         logger.info("Syncing departments...");
-        const deptResult = await departmentSyncService.syncDepartments("system");
+        const deptResult =
+          await departmentSyncService.syncDepartments("system");
         logger.info(
           `Department sync: Fetched=${deptResult.recordsFetched}, ` +
             `Created=${deptResult.recordsCreated}, Updated=${deptResult.recordsUpdated}, ` +
@@ -52,7 +53,10 @@ export function initializeScheduler() {
 
         logger.info("Syncing barcodes...");
         const odooBarcodes = await odooDbService.getBarcodes();
-        const barcodeResult = await barcodeSyncService.syncBarcodes(odooBarcodes, "system");
+        const barcodeResult = await barcodeSyncService.syncBarcodes(
+          odooBarcodes,
+          "system",
+        );
         logger.info(
           `Barcode sync: Processed=${barcodeResult.total_processed}, ` +
             `Created=${barcodeResult.created}, Updated=${barcodeResult.updated}`,
@@ -60,7 +64,10 @@ export function initializeScheduler() {
 
         logger.info("Syncing zone types...");
         const odooZoneTypes = await odooDbService.getZoneTypes();
-        const zoneTypeResult = await zoneTypeSyncService.syncZoneTypes(odooZoneTypes, "system");
+        const zoneTypeResult = await zoneTypeSyncService.syncZoneTypes(
+          odooZoneTypes,
+          "system",
+        );
         logger.info(
           `Zone Type sync: Processed=${zoneTypeResult.total_processed}, ` +
             `Created=${zoneTypeResult.created}, Updated=${zoneTypeResult.updated}`,
@@ -90,7 +97,8 @@ export function initializeScheduler() {
         );
 
         logger.info("Creating WMS stock snapshot...");
-        const wmsSnapshotResult = await stockSyncService.createWmsSnapshot("system");
+        const wmsSnapshotResult =
+          await stockSyncService.createWmsSnapshot("system");
         logger.info(
           `WMS Snapshot: Date=${wmsSnapshotResult.snapshot_date}, Snapshot=${wmsSnapshotResult.total_snapshot}`,
         );
@@ -105,16 +113,20 @@ export function initializeScheduler() {
     { timezone: TZ },
   );
 
-  // ✅ Daily report snapshot (stocks -> wms_stock_daily) - 00:03
+  // ✅ Daily report snapshot (stocks -> wms_stock_daily) - every hour at minute 03
   cron.schedule(
-    "3 0 * * *",
+    "3 * * * *",
     async () => {
-      logger.info("Starting scheduled WMS DAILY report snapshot (stocks -> wms_stock_daily)...");
+      logger.info(
+        "Starting hourly WMS DAILY report snapshot (stocks -> wms_stock_daily)...",
+      );
 
       try {
-        const dailyResult = await wmsDailySnapshotService.createDailySnapshot("cron");
+        const dailyResult =
+          await wmsDailySnapshotService.createDailySnapshot("cron-hourly");
+
         logger.info(
-          `✅ WMS DAILY snapshot: Date=${dailyResult.snapshot_date}, Total=${dailyResult.total_snapshot}`,
+          `✅ WMS DAILY snapshot refreshed: Date=${dailyResult.snapshot_date}, Total=${dailyResult.total_snapshot}`,
         );
       } catch (error) {
         logger.error("❌ WMS DAILY snapshot failed", {
@@ -129,5 +141,7 @@ export function initializeScheduler() {
   logger.info(`- Timezone: ${TZ}`);
   logger.info("- Master data sync will run daily at 23:59");
   logger.info("- Stock sync will run daily at 00:01 (post-midnight)");
-  logger.info("- WMS DAILY report snapshot will run daily at 00:03 (stocks -> wms_stock_daily)");
+  logger.info(
+    "- WMS DAILY report snapshot will run hourly at minute 03 (stocks -> wms_stock_daily)",
+  );
 }

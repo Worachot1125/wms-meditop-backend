@@ -114,6 +114,7 @@ export const receiveFromOdoo = asyncHandler(
         const reference = (transfer as any).reference;
         const origin = (transfer as any).origin;
         const invoice = (transfer as any).invoice;
+        const in_type = (transfer as any).in_type;
         const items = (transfer as any).items;
 
         if (!number) throw badRequest("ไม่พบเลข number/no ใน transfer");
@@ -173,7 +174,6 @@ export const receiveFromOdoo = asyncHandler(
           continue;
         }
 
-        // ✅ RTC -> logic เดิม
         if (isRTCNumber(number)) {
           const rtc = await handleRTCReturnTransfer({
             picking_id,

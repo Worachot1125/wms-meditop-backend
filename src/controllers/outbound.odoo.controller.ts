@@ -2425,11 +2425,14 @@ export const getOdooOutboundsByBatchName = asyncHandler(
     const rawName = Array.isArray(req.params.name)
       ? req.params.name[0]
       : req.params.name;
+
     const name = decodeURIComponent(String(rawName ?? "")).trim();
     if (!name) throw badRequest("กรุณาระบุ batch name");
 
     const page = Math.max(1, Number(req.query.page ?? 1));
     const limit = Math.min(1000, Math.max(1, Number(req.query.limit ?? 200)));
+    const skip = (page - 1) * limit;
+
     const search =
       typeof req.query.search === "string" ? req.query.search.trim() : "";
     const code =
@@ -2438,13 +2441,17 @@ export const getOdooOutboundsByBatchName = asyncHandler(
       typeof req.query.product_id === "string"
         ? req.query.product_id.trim()
         : "";
+
     const parsedProductId = product_id ? Number(product_id) : null;
 
     if (product_id && !Number.isFinite(parsedProductId)) {
       throw badRequest("product_id ต้องเป็นตัวเลข");
     }
 
-    const skip = (page - 1) * limit;
+    const normalizeRefKey = (value: unknown) =>
+      String(value ?? "")
+        .trim()
+        .toLowerCase();
 
     const departmentWhere: Prisma.outboundWhereInput = req.departmentAccess
       .isPrivileged
@@ -2590,6 +2597,7 @@ export const getOdooOutboundsByBatchName = asyncHandler(
             },
             orderBy: [{ sequence: "asc" }, { id: "asc" }],
           },
+
           outboundLotAdjustments: {
             where: { deleted_at: null },
             select: {
@@ -2634,8 +2642,16 @@ export const getOdooOutboundsByBatchName = asyncHandler(
       return ia - ib;
     });
 
-    // ✅ NEW: collect outbound origin/invoice refs for PD inbound matching
     const outboundRefs = Array.from(
+      new Set(
+        outbounds
+          .flatMap((o: any) => [o.no, o.origin, o.invoice, o.reference])
+          .map((v) => String(v ?? "").trim())
+          .filter(Boolean),
+      ),
+    );
+
+    const pdRefs = Array.from(
       new Set(
         outbounds
           .flatMap((o: any) => [o.origin, o.invoice])
@@ -2644,14 +2660,13 @@ export const getOdooOutboundsByBatchName = asyncHandler(
       ),
     );
 
-    // ✅ NEW: get inbound PD where inbound.origin matches outbound.origin OR outbound.invoice
     const pdInbounds =
-      outboundRefs.length > 0
+      pdRefs.length > 0
         ? await prisma.inbound.findMany({
             where: {
               deleted_at: null,
               in_type: "PD",
-              OR: outboundRefs.map((ref) => ({
+              OR: pdRefs.map((ref) => ({
                 origin: {
                   equals: ref,
                   mode: "insensitive",
@@ -2668,18 +2683,129 @@ export const getOdooOutboundsByBatchName = asyncHandler(
           })
         : [];
 
-    // ✅ NEW: map by inbound.origin
     const pdInboundMap = new Map<string, any[]>();
 
     for (const inbound of pdInbounds as any[]) {
-      const key = String(inbound.origin ?? "")
-        .trim()
-        .toLowerCase();
+      const key = normalizeRefKey(inbound.origin);
       if (!key) continue;
 
       if (!pdInboundMap.has(key)) pdInboundMap.set(key, []);
       pdInboundMap.get(key)!.push(inbound);
     }
+
+    const rtcInbounds =
+      outboundRefs.length > 0
+        ? await prisma.inbound.findMany({
+            where: {
+              deleted_at: null,
+              in_type: "RTC",
+              OR: [
+                ...outboundRefs.map((ref) => ({
+                  origin: {
+                    contains: ref,
+                    mode: "insensitive",
+                  },
+                })),
+                ...outboundRefs.map((ref) => ({
+                  reference: {
+                    contains: ref,
+                    mode: "insensitive",
+                  },
+                })),
+                ...outboundRefs.map((ref) => ({
+                  invoice: {
+                    contains: ref,
+                    mode: "insensitive",
+                  },
+                })),
+                ...outboundRefs.map((ref) => ({
+                  no: {
+                    contains: ref,
+                    mode: "insensitive",
+                  },
+                })),
+              ],
+            } as any,
+            include: {
+              goods_ins: {
+                where: { deleted_at: null },
+                orderBy: [{ sequence: "asc" }, { id: "asc" }],
+              },
+            },
+            orderBy: { id: "desc" },
+          })
+        : [];
+
+    const rtcInboundMap = new Map<string, any[]>();
+
+    const putRtcInboundMap = (keyRaw: unknown, inbound: any) => {
+      const key = normalizeRefKey(keyRaw);
+      if (!key) return;
+
+      if (!rtcInboundMap.has(key)) rtcInboundMap.set(key, []);
+      rtcInboundMap.get(key)!.push(inbound);
+    };
+
+    for (const inbound of rtcInbounds as any[]) {
+      const inboundKeys = [
+        inbound.no,
+        inbound.origin,
+        inbound.reference,
+        inbound.invoice,
+      ]
+        .map(normalizeRefKey)
+        .filter(Boolean);
+
+      for (const key of inboundKeys) {
+        putRtcInboundMap(key, inbound);
+      }
+
+      const haystack = inboundKeys.join(" ");
+
+      for (const outbound of outbounds as any[]) {
+        const outboundNoKey = normalizeRefKey(outbound.no);
+        const outboundOriginKey = normalizeRefKey(outbound.origin);
+        const outboundInvoiceKey = normalizeRefKey(outbound.invoice);
+        const outboundReferenceKey = normalizeRefKey(outbound.reference);
+
+        const candidateKeys = [
+          outboundNoKey,
+          outboundOriginKey,
+          outboundInvoiceKey,
+          outboundReferenceKey,
+        ].filter(Boolean);
+
+        for (const key of candidateKeys) {
+          if (haystack.includes(key)) {
+            putRtcInboundMap(key, inbound);
+          }
+        }
+      }
+    }
+
+    const mapInboundItems = (inbound: any) =>
+      Array.isArray(inbound.goods_ins)
+        ? inbound.goods_ins.map((gi: any) => ({
+            id: gi.id,
+            inbound_id: gi.inbound_id,
+            sequence: gi.sequence ?? null,
+            product_id: gi.product_id,
+            code: gi.code,
+            name: gi.name,
+            unit: gi.unit,
+            tracking: gi.tracking ?? null,
+            lot_id: gi.lot_id,
+            lot_serial: gi.lot_serial,
+            barcode_id: gi.barcode_id ?? null,
+            barcode_text: gi.barcode_text ?? null,
+            qty: gi.quantity ?? gi.qty ?? null,
+            quantity: gi.quantity ?? null,
+            quantity_count: gi.quantity_count ?? null,
+            status: gi.status ?? null,
+            created_at: gi.created_at ?? null,
+            updated_at: gi.updated_at ?? null,
+          }))
+        : [];
 
     const deptMap = await buildDepartmentCodeMapFromOutbounds(outbounds as any);
 
@@ -2699,13 +2825,10 @@ export const getOdooOutboundsByBatchName = asyncHandler(
           outbound as any,
         );
 
-        // ✅ NEW: attach PD inbounds only if inbound.origin matches this outbound.origin or outbound.invoice
-        const outboundOriginKey = String(outbound.origin ?? "")
-          .trim()
-          .toLowerCase();
-        const outboundInvoiceKey = String(outbound.invoice ?? "")
-          .trim()
-          .toLowerCase();
+        const outboundNoKey = normalizeRefKey(outbound.no);
+        const outboundOriginKey = normalizeRefKey(outbound.origin);
+        const outboundInvoiceKey = normalizeRefKey(outbound.invoice);
+        const outboundReferenceKey = normalizeRefKey(outbound.reference);
 
         const pdInboundsByOrigin = outboundOriginKey
           ? (pdInboundMap.get(outboundOriginKey) ?? [])
@@ -2741,40 +2864,97 @@ export const getOdooOutboundsByBatchName = asyncHandler(
             updated_at: pd.updated_at ?? null,
             matched_outbound_by:
               outboundOriginKey &&
-              String(pd.origin ?? "")
-                .trim()
-                .toLowerCase() === outboundOriginKey
+              normalizeRefKey(pd.origin) === outboundOriginKey
                 ? "origin"
                 : outboundInvoiceKey &&
-                    String(pd.origin ?? "")
-                      .trim()
-                      .toLowerCase() === outboundInvoiceKey
+                    normalizeRefKey(pd.origin) === outboundInvoiceKey
                   ? "invoice"
                   : null,
             matched_outbound_value: String(pd.origin ?? "").trim() || null,
-            items: Array.isArray(pd.goods_ins)
-              ? pd.goods_ins.map((gi: any) => ({
-                  id: gi.id,
-                  inbound_id: gi.inbound_id,
-                  sequence: gi.sequence ?? null,
-                  product_id: gi.product_id,
-                  code: gi.code,
-                  name: gi.name,
-                  unit: gi.unit,
-                  tracking: gi.tracking ?? null,
-                  lot_id: gi.lot_id,
-                  lot_serial: gi.lot_serial,
-                  barcode_id: gi.barcode_id ?? null,
-                  barcode_text: gi.barcode_text ?? null,
-                  qty: gi.quantity ?? gi.qty ?? null,
-                  quantity: gi.quantity ?? null,
-                  quantity_count: gi.quantity_count ?? null,
-                  status: gi.status ?? null,
-                  created_at: gi.created_at ?? null,
-                  updated_at: gi.updated_at ?? null,
-                }))
-              : [],
+            items: mapInboundItems(pd),
           }),
+        );
+
+        const rtcCandidates = [
+          ...(outboundNoKey ? (rtcInboundMap.get(outboundNoKey) ?? []) : []),
+          ...(outboundOriginKey
+            ? (rtcInboundMap.get(outboundOriginKey) ?? [])
+            : []),
+          ...(outboundInvoiceKey
+            ? (rtcInboundMap.get(outboundInvoiceKey) ?? [])
+            : []),
+          ...(outboundReferenceKey
+            ? (rtcInboundMap.get(outboundReferenceKey) ?? [])
+            : []),
+        ];
+
+        const rtcInboundUniqueMap = new Map<number, any>();
+
+        for (const rtc of rtcCandidates) {
+          rtcInboundUniqueMap.set(Number(rtc.id), rtc);
+        }
+
+        formatted.rtc_inbounds = [...rtcInboundUniqueMap.values()].map(
+          (rtc: any) => {
+            const rtcOriginKey = normalizeRefKey(rtc.origin);
+            const rtcInvoiceKey = normalizeRefKey(rtc.invoice);
+            const rtcReferenceKey = normalizeRefKey(rtc.reference);
+            const rtcNoKey = normalizeRefKey(rtc.no);
+            const rtcHaystack = [
+              rtcOriginKey,
+              rtcInvoiceKey,
+              rtcReferenceKey,
+              rtcNoKey,
+            ].join(" ");
+
+            let matchedBy: string | null = null;
+            let matchedValue: string | null = null;
+
+            if (outboundNoKey && rtcHaystack.includes(outboundNoKey)) {
+              matchedBy = "outbound_no";
+              matchedValue = String(outbound.no ?? "").trim();
+            } else if (
+              outboundOriginKey &&
+              rtcHaystack.includes(outboundOriginKey)
+            ) {
+              matchedBy = "origin";
+              matchedValue = String(outbound.origin ?? "").trim();
+            } else if (
+              outboundInvoiceKey &&
+              rtcHaystack.includes(outboundInvoiceKey)
+            ) {
+              matchedBy = "invoice";
+              matchedValue = String(outbound.invoice ?? "").trim();
+            } else if (
+              outboundReferenceKey &&
+              rtcHaystack.includes(outboundReferenceKey)
+            ) {
+              matchedBy = "reference";
+              matchedValue = String(outbound.reference ?? "").trim();
+            }
+
+            return {
+              id: rtc.id,
+              no: rtc.no,
+              picking_id: rtc.picking_id ?? null,
+              in_type: rtc.in_type,
+              origin: rtc.origin,
+              invoice: rtc.invoice ?? null,
+              reference: rtc.reference ?? null,
+              status: rtc.status,
+              location_id: rtc.location_id ?? null,
+              location: rtc.location ?? null,
+              location_dest_id: rtc.location_dest_id ?? null,
+              location_dest: rtc.location_dest ?? null,
+              department_id: rtc.department_id ?? null,
+              department: rtc.department ?? null,
+              created_at: rtc.created_at,
+              updated_at: rtc.updated_at ?? null,
+              matched_outbound_by: matchedBy,
+              matched_outbound_value: matchedValue,
+              items: mapInboundItems(rtc),
+            };
+          },
         );
 
         const visibleGoodsOuts = Array.isArray(outbound.goods_outs)
