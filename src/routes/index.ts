@@ -30,6 +30,7 @@ import stockDairyRoutes from "./stockdairy.routes"
 import swapRoutes from "./swap.routes"
 import reportAllRoutes from "./reportall.route"
 import goodsRoutes from "./goods.routes";
+import localPrintRoutes from "./local_print.routes";
 import {
   cancelAdjustment,
   confirmAdjustment,
@@ -88,5 +89,5 @@ router.use("/reports", stockDairyRoutes);
 router.use("/swaps", swapRoutes);
 router.use("/all", reportAllRoutes);
 router.use("/goods", goodsRoutes);
-
+router.use("/local-print", localPrintRoutes);
 export default router;
