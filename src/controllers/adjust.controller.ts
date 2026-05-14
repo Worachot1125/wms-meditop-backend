@@ -2246,390 +2246,316 @@ const buildCombinedAdjustmentSearchWhere = (
   };
 };
 
+// ============================================================
+// Helpers: Adjustment location attach
+// ============================================================
+
+const toDateKey = (value: any) => {
+  if (!value) return "NOEXP";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "NOEXP";
+  return d.toISOString().slice(0, 10);
+};
+
+const buildAdjustLocationKey = (x: {
+  product_id?: number | null;
+  lot_id?: number | null;
+  expiration_date?: Date | string | null;
+}) => {
+  return [
+    x.product_id ?? "NULL",
+    x.lot_id ?? "NULL",
+    toDateKey(x.expiration_date),
+  ].join("|");
+};
+
+const buildProductLotKey = (
+  productId?: number | null,
+  lotId?: number | null,
+) => `${productId ?? "NULL"}|${lotId ?? "NULL"}`;
+
+const getAdjustmentItemsFromRow = (row: any) => {
+  if (Array.isArray(row?.adjustment_items)) return row.adjustment_items;
+  if (Array.isArray(row?.items)) return row.items;
+  return [];
+};
+
+const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
+  const rows = Array.isArray(rowsInput) ? rowsInput : [];
+
+  const allItems = rows.flatMap((row: any) =>
+    getAdjustmentItemsFromRow(row).map((item: any) => ({
+      adjustment_id: row.id,
+      ...item,
+    })),
+  );
+
+  if (allItems.length === 0) return rows;
+
+  const productLotPairs = allItems
+    .map((item: any) => ({
+      product_id: item.product_id ?? null,
+      lot_id: item.lot_id ?? null,
+    }))
+    .filter((x: any) => x.product_id != null && x.lot_id != null);
+
+  const uniquePairMap = new Map<string, { product_id: number; lot_id: number }>();
+
+  for (const pair of productLotPairs) {
+    const key = buildProductLotKey(pair.product_id, pair.lot_id);
+    if (!uniquePairMap.has(key)) {
+      uniquePairMap.set(key, {
+        product_id: Number(pair.product_id),
+        lot_id: Number(pair.lot_id),
+      });
+    }
+  }
+
+  const uniquePairs = Array.from(uniquePairMap.values());
+
+  const wmsRows =
+    uniquePairs.length > 0
+      ? await prisma.wms_mdt_goods.findMany({
+          where: {
+            OR: uniquePairs.map((x) => ({
+              product_id: x.product_id,
+              lot_id: x.lot_id,
+            })),
+          },
+          select: {
+            product_id: true,
+            lot_id: true,
+            expiration_date: true,
+          },
+        })
+      : [];
+
+  const wmsExpMap = new Map<string, Date | null>();
+
+  for (const row of wmsRows) {
+    wmsExpMap.set(
+      buildProductLotKey(row.product_id, row.lot_id),
+      row.expiration_date ?? null,
+    );
+  }
+
+  const itemKeyMap = new Map<number, string>();
+
+  for (const item of allItems) {
+    const itemId = Number(item.id ?? 0);
+    if (!itemId) continue;
+
+    const expValue =
+      item.expiration_date ??
+      item.exp ??
+      item.expired_date ??
+      item.expiry_date ??
+      (item.product_id != null && item.lot_id != null
+        ? wmsExpMap.get(buildProductLotKey(item.product_id, item.lot_id)) ??
+          null
+        : null);
+
+    const key = buildAdjustLocationKey({
+      product_id: item.product_id,
+      lot_id: item.lot_id,
+      expiration_date: expValue,
+    });
+
+    itemKeyMap.set(itemId, key);
+  }
+
+  const stockWherePairs = Array.from(itemKeyMap.values()).map((key) => {
+    const [productId, lotId, expKey] = key.split("|");
+
+    return {
+      product_id: Number(productId),
+      lot_id: lotId === "NULL" ? null : Number(lotId),
+      expKey,
+    };
+  });
+
+  const stockRows =
+    stockWherePairs.length > 0
+      ? await prisma.stock.findMany({
+          where: {
+            quantity: {
+              gt: 0,
+            },
+            OR: stockWherePairs.map((x) => ({
+              product_id: x.product_id,
+              ...(x.lot_id != null ? { lot_id: x.lot_id } : {}),
+            })),
+          },
+          select: {
+            product_id: true,
+            lot_id: true,
+            expiration_date: true,
+            location_id: true,
+            location_name: true,
+            quantity: true,
+          },
+          orderBy: [{ location_name: "asc" }],
+        })
+      : [];
+
+  const stockMap = new Map<
+    string,
+    Array<{
+      location_id: number | null;
+      location_name: string;
+      qty: number;
+    }>
+  >();
+
+  for (const stock of stockRows) {
+    const key = buildAdjustLocationKey({
+      product_id: stock.product_id,
+      lot_id: stock.lot_id,
+      expiration_date: stock.expiration_date,
+    });
+
+    const locationName = String(stock.location_name ?? "").trim();
+    if (!locationName) continue;
+
+    if (!stockMap.has(key)) stockMap.set(key, []);
+
+    const list = stockMap.get(key)!;
+    const found = list.find((x) => x.location_name === locationName);
+
+    if (found) {
+      found.qty += Number(stock.quantity ?? 0);
+    } else {
+      list.push({
+        location_id: stock.location_id ?? null,
+        location_name: locationName,
+        qty: Number(stock.quantity ?? 0),
+      });
+    }
+  }
+
+  const adjustmentIds = rows
+    .map((row: any) => Number(row.id ?? 0))
+    .filter((id) => id > 0);
+
+  const confirmRows =
+    adjustmentIds.length > 0
+      ? await prisma.adjust_location_confirm.findMany({
+          where: {
+            adjustment_id: {
+              in: adjustmentIds,
+            },
+            deleted_at: null,
+          },
+          select: {
+            adjustment_id: true,
+            adjustment_item_id: true,
+            location_id: true,
+            location_name: true,
+            confirmed_qty: true,
+            user_ref: true,
+            created_at: true,
+            updated_at: true,
+          },
+          orderBy: [{ id: "asc" }],
+        })
+      : [];
+
+  const confirmMap = new Map<
+    number,
+    Array<{
+      location_id: number | null;
+      location_name: string;
+      confirmed_qty: number;
+      user_ref: string | null;
+      created_at: Date | null;
+      updated_at: Date | null;
+    }>
+  >();
+
+  for (const row of confirmRows) {
+    const itemId = Number(row.adjustment_item_id ?? 0);
+    if (!itemId) continue;
+
+    if (!confirmMap.has(itemId)) confirmMap.set(itemId, []);
+
+    confirmMap.get(itemId)!.push({
+      location_id: row.location_id ?? null,
+      location_name: row.location_name,
+      confirmed_qty: Number(row.confirmed_qty ?? 0),
+      user_ref: row.user_ref ?? null,
+      created_at: row.created_at ?? null,
+      updated_at: row.updated_at ?? null,
+    });
+  }
+
+  return rows.map((row: any) => {
+    const originalItems = getAdjustmentItemsFromRow(row);
+
+    const nextItems = originalItems.map((item: any) => {
+      const itemId = Number(item.id ?? 0);
+      const key = itemKeyMap.get(itemId);
+
+      return {
+        ...item,
+        location_names: key ? stockMap.get(key) ?? [] : [],
+        confirmed_locations: confirmMap.get(itemId) ?? [],
+      };
+    });
+
+    return {
+      ...row,
+      adjustment_items: Array.isArray(row.adjustment_items)
+        ? nextItems
+        : row.adjustment_items,
+      items: Array.isArray(row.items) ? nextItems : row.items,
+    };
+  });
+};
+
 /**
  * GET /api/Adjust
  */
 export const listCombinedAdjustments = asyncHandler(
   async (req: Request, res: Response) => {
     const page = Math.max(1, Number(req.query.page ?? 1));
-
-    const rawLimit = req.query.limit ?? req.query.pageSize ?? 10;
-    const limit = Math.min(300, Math.max(1, Number(rawLimit)));
+    const limit = Math.max(1, Number(req.query.limit ?? 20));
+    const skip = (page - 1) * limit;
 
     const search = String(req.query.search ?? "").trim();
+    const status = String(req.query.status ?? "").trim();
 
-    const statusCsv = String(req.query.status ?? "").trim();
-    const statuses = statusCsv
-      ? statusCsv
-          .split(",")
-          .map((s) => s.trim().toLowerCase())
-          .filter(Boolean)
-      : [];
-
-    const allowedStatuses = ["pending", "completed"] as const;
-
-    if (
-      statuses.length > 0 &&
-      statuses.some(
-        (s) => !allowedStatuses.includes(s as (typeof allowedStatuses)[number]),
-      )
-    ) {
-      throw badRequest("status ต้องเป็น pending หรือ completed");
-    }
-
-    const mode = String(req.query.level ?? "")
-      .trim()
-      .toLowerCase();
-
-    const allowedModes = ["manual", "auto"] as const;
-
-    if (mode && !allowedModes.includes(mode as (typeof allowedModes)[number])) {
-      throw badRequest("level ต้องเป็น manual หรือ auto");
-    }
-
-    const selectedDepartments = parseDepartmentNames(req.query.department);
-
-    let selectedDepartmentWhereAdjust: Prisma.adjustmentWhereInput = {};
-    let selectedDepartmentWhereOutbound: Prisma.outboundWhereInput = {};
-
-    if (selectedDepartments.length > 0) {
-      const deptRows = await prisma.department.findMany({
-        where: {
-          OR: [
-            {
-              short_name: {
-                in: selectedDepartments,
-                mode: "insensitive",
-              },
-            },
-            {
-              full_name: {
-                in: selectedDepartments,
-                mode: "insensitive",
-              },
-            },
-          ],
-        },
-        select: {
-          odoo_id: true,
-          short_name: true,
-          full_name: true,
-        },
-      });
-
-      const selectedDeptIds = deptRows
-        .map((d) => d.odoo_id)
-        .filter((id): id is number => typeof id === "number")
-        .map((id) => String(id));
-
-      selectedDepartmentWhereAdjust = {
-        OR: [
-          {
-            department: {
-              in: selectedDepartments,
-              mode: "insensitive",
-            },
-          },
-          ...(selectedDeptIds.length > 0
-            ? [
-                {
-                  department_id: {
-                    in: selectedDeptIds,
-                  },
-                },
-              ]
-            : []),
-        ],
-      };
-
-      selectedDepartmentWhereOutbound = {
-        OR: [
-          {
-            department: {
-              in: selectedDepartments,
-              mode: "insensitive",
-            },
-          },
-          ...(selectedDeptIds.length > 0
-            ? [
-                {
-                  department_id: {
-                    in: selectedDeptIds,
-                  },
-                },
-              ]
-            : []),
-        ],
-      };
-    }
-
-    const selectedAdjustmentColumns = parseAdjustmentSearchColumns(
-      req.query.columns,
-    );
-
-    const selectedOutboundColumns = parseSpecialOutboundSearchColumns(
-      req.query.columns,
-    );
-
-    const { adjustmentWhere, outboundWhere } =
-      buildCombinedAdjustmentSearchWhere(
-        search,
-        selectedAdjustmentColumns,
-        selectedOutboundColumns,
-      );
-
-    const finalAdjustmentWhere: Prisma.adjustmentWhereInput = {
-      AND: [
-        adjustmentWhere,
-        selectedDepartmentWhereAdjust,
-        { deleted_at: null },
-      ],
+    const where: any = {
+      deleted_at: null,
+      ...(status ? { status } : {}),
+      ...(search
+        ? {
+            OR: [
+              { no: { contains: search, mode: "insensitive" } },
+              { remark: { contains: search, mode: "insensitive" } },
+            ],
+          }
+        : {}),
     };
 
-    const finalOutboundWhere: Prisma.outboundWhereInput = {
-      AND: [
-        outboundWhere,
-        selectedDepartmentWhereOutbound,
-        { deleted_at: null },
-      ],
-    };
-
-    const [adjustmentRows, outboundRows] = await Promise.all([
+    const [total, rows] = await Promise.all([
+      prisma.adjustment.count({ where }),
       prisma.adjustment.findMany({
-        where: finalAdjustmentWhere,
-        orderBy: [{ date: "desc" }, { id: "desc" }],
+        where,
         include: {
           items: {
-            where: { deleted_at: null },
-            select: { location: true },
-            take: 200,
-          },
-        },
-      }),
-
-      prisma.outbound.findMany({
-        where: finalOutboundWhere,
-        include: {
-          goods_outs: {
-            where: { deleted_at: null },
-            include: {
-              barcode_ref: { where: { deleted_at: null } },
+            where: {
+              deleted_at: null,
             },
-            orderBy: { sequence: "asc" },
+            orderBy: [{ id: "asc" }],
           },
         },
-        orderBy: [{ created_at: "desc" }, { id: "desc" }],
+        orderBy: [{ created_at: "desc" }],
+        skip,
+        take: limit,
       }),
     ]);
 
-    const deptShortMapAdjust = await buildDepartmentShortNameMapFromAdjustments(
-      adjustmentRows as any,
-    );
-
-    const formattedAdjustments = adjustmentRows
-      .filter((r: any) => !hasSVInNo(r.no))
-      .map((r: any) => {
-        const location = computeLocationDisplay(
-          (r.items ?? []).map((it: any) => it.location),
-        );
-
-        const { items, ...rest } = r;
-
-        let department = r.department;
-
-        const deptId = Number(r.department_id);
-        if (Number.isFinite(deptId)) {
-          const short = deptShortMapAdjust.get(deptId);
-          if (short) department = short;
-        }
-
-        const isSystemGenerated = Boolean(r.is_system_generated);
-        const adjustmentMode = isSystemGenerated ? "auto" : "manual";
-
-        return {
-          ...rest,
-          department,
-          location,
-          source: "adjust",
-          mode: adjustmentMode,
-          adjustment_level: r.level ?? null,
-          is_system_generated: isSystemGenerated,
-          status: String(r.status ?? "").toLowerCase(),
-          type: r.type ?? null,
-          out_type: null,
-          date: r.date,
-        };
-      });
-
-    const deptShortMap = await buildDepartmentShortNameMapFromOutbounds(
-      outboundRows as any,
-    );
-
-    const formattedOutbounds = await Promise.all(
-      outboundRows.map(async (outbound: any) => {
-        const formatted: any = formatOdooOutbound(outbound);
-
-        const shortName = resolveDepartmentShortNameForOutbound(
-          deptShortMap,
-          outbound,
-        );
-        if (shortName) formatted.department = shortName;
-
-        const itemsKey = (outbound.goods_outs || []).map((it: any) => ({
-          product_id: it.product_id,
-          lot_serial: it.lot_serial,
-          lot_name: it.lot_serial,
-        }));
-
-        const inputMap = await buildInputNumberMapFromItems(itemsKey);
-
-        const lockNoMap = await buildLockNoMapFromItems(
-          itemsKey.map((x: any) => ({
-            product_id: x.product_id,
-            lot_name: x.lot_name,
-          })),
-        );
-
-        formatted.items = (outbound.goods_outs || []).map((gi: any) => {
-          const lockLocations = resolveLockLocationsFromMap(
-            lockNoMap,
-            gi.product_id,
-            gi.lot_serial,
-          );
-
-          return {
-            id: gi.id,
-            outbound_id: gi.outbound_id,
-            sequence: gi.sequence,
-            product_id: gi.product_id,
-            code: gi.code,
-            name: gi.name,
-            unit: gi.unit,
-            tracking: gi.tracking,
-            lot_id: gi.lot_id,
-            lot_serial: gi.lot_serial,
-            qty: gi.qty,
-            pick: gi.pick,
-            pack: gi.pack,
-            status: gi.status,
-            barcode_id: gi.barcode_id,
-            user_pick: gi.user_pick,
-            user_pack: gi.user_pack,
-            barcode_text: gi.barcode_text ?? null,
-            input_number: resolveInputNumberFromMap(
-              inputMap,
-              gi.product_id,
-              gi.lot_serial,
-            ),
-            lock_no: lockLocations.map(
-              (x: any) => `${x.location_name} (จำนวน ${x.qty})`,
-            ),
-            lock_locations: lockLocations,
-            barcode: gi.barcode_ref
-              ? {
-                  barcode: gi.barcode_ref.barcode,
-                  lot_start: gi.barcode_ref.lot_start,
-                  lot_stop: gi.barcode_ref.lot_stop,
-                  exp_start: gi.barcode_ref.exp_start,
-                  exp_stop: gi.barcode_ref.exp_stop,
-                  barcode_length: gi.barcode_ref.barcode_length,
-                }
-              : null,
-          };
-        });
-
-        const resolvedType = resolveReportTypeFromNo(
-          formatted.no,
-          formatted.out_type ?? null,
-        );
-
-        return {
-          ...formatted,
-          source: "outbound",
-          mode: "auto",
-          is_system_generated: true,
-          status: "completed",
-          in_process: outbound.in_process,
-          type: resolvedType,
-          out_type: resolvedType,
-          date: formatted.date ?? formatted.created_at ?? outbound.created_at,
-        };
-      }),
-    );
-
-    const getCombinedMode = (row: any): "manual" | "auto" | "" => {
-      if (row.source === "adjust") {
-        return row.is_system_generated === true ? "auto" : "manual";
-      }
-
-      if (row.source === "outbound") {
-        return "auto";
-      }
-
-      return "";
-    };
-
-    const getCombinedStatus = (row: any): "pending" | "completed" | "" => {
-      if (row.source === "adjust") {
-        const st = String(row.status ?? "").toLowerCase();
-        if (st === "completed") return "completed";
-        return "pending";
-      }
-
-      if (row.source === "outbound") {
-        return "completed";
-      }
-
-      return "";
-    };
-
-    let mergedAll = [...formattedAdjustments, ...formattedOutbounds];
-
-    if (mode) {
-      mergedAll = mergedAll.filter((row: any) => getCombinedMode(row) === mode);
-    }
-
-    const statusCounts = {
-      manual: {
-        pending: 0,
-        completed: 0,
-      },
-      auto: {
-        pending: 0,
-        completed: 0,
-      },
-    };
-
-    mergedAll.forEach((row: any) => {
-      const currentMode = getCombinedMode(row);
-      const currentStatus = getCombinedStatus(row);
-
-      if (!currentMode || !currentStatus) return;
-
-      statusCounts[currentMode][currentStatus]++;
-    });
-
-    let merged = mergedAll;
-
-    if (statuses.length) {
-      merged = merged.filter((row: any) =>
-        statuses.includes(getCombinedStatus(row)),
-      );
-    }
-
-    merged.sort((a: any, b: any) => {
-      const da = new Date(a?.date ?? 0).getTime();
-      const db = new Date(b?.date ?? 0).getTime();
-
-      if (db !== da) return db - da;
-
-      return Number(b?.id ?? 0) - Number(a?.id ?? 0);
-    });
-
-    const total = merged.length;
-    const totalPages = Math.max(1, Math.ceil(total / limit));
-    const start = (page - 1) * limit;
-    const data = merged.slice(start, start + limit);
+    const data = await attachAdjustmentLocations(rows);
 
     return res.json({
       data,
@@ -2637,10 +2563,7 @@ export const listCombinedAdjustments = asyncHandler(
         page,
         limit,
         total,
-        totalPages,
-        statusCounts,
-        department:
-          selectedDepartments.length > 0 ? selectedDepartments.join(",") : null,
+        total_page: Math.ceil(total / limit),
       },
     });
   },
@@ -2651,168 +2574,50 @@ export const listCombinedAdjustments = asyncHandler(
  */
 export const getAdjustmentDetail = asyncHandler(
   async (req: Request, res: Response) => {
-    const id = Number(req.params.id);
-    if (!id) throw badRequest("Invalid id");
+    const rawNo = String(
+      req.params.no ??
+        req.params.id ??
+        req.query.no ??
+        req.query.id ??
+        req.body?.no ??
+        req.body?.id ??
+        "",
+    ).trim();
 
-    const data = await prisma.adjustment.findFirst({
-      where: { id, deleted_at: null },
+    if (!rawNo) {
+      throw badRequest("ไม่พบเลข Adjustment");
+    }
+
+    const decoded = decodeURIComponent(rawNo).trim();
+    const numericId = Number(decoded);
+
+    const row = await prisma.adjustment.findFirst({
+      where: {
+        deleted_at: null,
+        OR: [
+          { no: decoded },
+          ...(Number.isFinite(numericId) ? [{ id: numericId }] : []),
+        ],
+      },
       include: {
         items: {
-          where: { deleted_at: null },
-          orderBy: [{ sequence: "asc" }, { id: "asc" }],
+          where: {
+            deleted_at: null,
+          },
+          orderBy: [{ id: "asc" }],
         },
       },
     });
 
-    if (!data) throw badRequest("Adjustment not found");
-
-    // ✅ ใช้ product_id เป็น key หลักในการหา barcode
-    const productIds = Array.from(
-      new Set(
-        (data.items ?? []).map((it: any) => it.product_id).filter(Boolean),
-      ),
-    ) as number[];
-
-    const barcodes =
-      productIds.length > 0
-        ? await prisma.barcode.findMany({
-            where: {
-              deleted_at: null,
-              product_id: { in: productIds },
-            },
-            select: {
-              id: true,
-              product_id: true,
-              barcode: true,
-
-              // optional ที่มีจริง
-              product_code: true,
-              product_name: true,
-              tracking: true,
-              barcode_length: true,
-              lot_start: true,
-              lot_stop: true,
-              exp_start: true,
-              exp_stop: true,
-              active: true,
-              internal_use: true,
-              barcode_last_modified_date: true,
-            },
-            orderBy: [{ id: "desc" }], // เอาตัวล่าสุดก่อน
-          })
-        : [];
-
-    // product_id -> barcode row (เอาตัวแรกที่เจอหลัง order desc = ล่าสุด)
-    const barcodeRowByProductId = new Map<number, any>();
-    for (const b of barcodes as any[]) {
-      const pid = b?.product_id;
-      if (pid == null) continue;
-      if (!barcodeRowByProductId.has(Number(pid))) {
-        barcodeRowByProductId.set(Number(pid), b);
-      }
+    if (!row) {
+      throw badRequest(`ไม่พบ Adjustment: ${decoded}`);
     }
 
-    // ✅ ดึง exp จาก wms_mdt_goods โดยเช็ค product_id + lot_id
-    const goodsKeys = Array.from(
-      new Set(
-        (data.items ?? [])
-          .filter((it: any) => it.product_id != null && it.lot_id != null)
-          .map((it: any) => `${Number(it.product_id)}__${Number(it.lot_id)}`),
-      ),
-    );
+    const [data] = await attachAdjustmentLocations([row]);
 
-    const goodsRows =
-      goodsKeys.length > 0
-        ? await prisma.wms_mdt_goods.findMany({
-            where: {
-              OR: (data.items ?? [])
-                .filter((it: any) => it.product_id != null && it.lot_id != null)
-                .map((it: any) => ({
-                  product_id: Number(it.product_id),
-                  lot_id: Number(it.lot_id),
-                })),
-            },
-            select: {
-              id: true,
-              product_id: true,
-              lot_id: true,
-              lot_name: true,
-              expiration_date: true,
-              zone_type: true,
-            },
-            orderBy: [{ id: "desc" }],
-          })
-        : [];
-
-    // ✅ product_id + lot_id -> goods row (ใช้ exp)
-    const goodsRowByProductLot = new Map<string, any>();
-
-    // ✅ product_id -> goods row (ใช้ zone_type)
-    const goodsRowByProductId = new Map<number, any>();
-
-    for (const g of goodsRows as any[]) {
-      const pid = g?.product_id;
-      const lid = g?.lot_id;
-
-      // exp
-      if (pid != null && lid != null) {
-        const key = `${Number(pid)}__${Number(lid)}`;
-
-        if (!goodsRowByProductLot.has(key)) {
-          goodsRowByProductLot.set(key, g);
-        }
-      }
-
-      // zone_type
-      if (pid != null && !goodsRowByProductId.has(Number(pid))) {
-        goodsRowByProductId.set(Number(pid), g);
-      }
-    }
-
-    // ✅ เพิ่มข้อมูล barcode + exp จาก wms_mdt_goods ให้ FE
-    const items = (data.items ?? []).map((it: any) => {
-      const ref =
-        it.product_id != null
-          ? barcodeRowByProductId.get(Number(it.product_id))
-          : null;
-
-      const goodsRef =
-        it.product_id != null && it.lot_id != null
-          ? goodsRowByProductLot.get(
-              `${Number(it.product_id)}__${Number(it.lot_id)}`,
-            )
-          : null;
-
-      const zoneRef =
-        it.product_id != null
-          ? goodsRowByProductId.get(Number(it.product_id))
-          : null;
-
-      return {
-        ...it,
-
-        // คง logic เดิม
-        barcode_text: ref?.barcode ? String(ref.barcode).trim() : null,
-
-        // เพิ่ม barcode ref
-        barcode_ref: ref
-          ? {
-              barcode_id: ref.id,
-              barcode: ref.barcode ?? null,
-              lot_start: ref.lot_start ?? null,
-              lot_stop: ref.lot_stop ?? null,
-              exp_start: ref.exp_start ?? null,
-              exp_stop: ref.exp_stop ?? null,
-            }
-          : null,
-
-        // ✅ เพิ่ม exp จาก wms_mdt_goods
-        exp: goodsRef?.expiration_date ?? null,
-        zone_type: goodsRef?.zone_type ?? null,
-      };
+    return res.json({
+      data,
     });
-
-    return res.json({ data: { ...data, items } });
   },
 );
 

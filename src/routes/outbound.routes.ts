@@ -25,6 +25,8 @@ import {
   revertOutboundLotAdjustment,
   updateGoodsOutItemRtc,
   scanOutboundItemCheckBarcode,
+  getAutoLocationPackCandidates,
+  applyAutoLocationPack,
 } from "../controllers/outbound.odoo.controller";
 
 import {
@@ -94,9 +96,19 @@ router.post(
   "/pack-products/:packProductId/pd/move-to-pack-location",
   movePdPackingToLocation,
 );
+
 router.post(
   "/pack-products/:packProductId/rtc/move-to-location",
   moveRtcPackingToLocation,
+);
+router.post(
+  "/auto-location-pack/candidates",
+  getAutoLocationPackCandidates,
+);
+
+router.post(
+  "/auto-location-pack/apply",
+  applyAutoLocationPack,
 );
 // summary ต้องมาก่อน :id ถ้าใช้ pattern นี้
 router.get("/pack-products/:packProductId/summary", getPackProductSummary);

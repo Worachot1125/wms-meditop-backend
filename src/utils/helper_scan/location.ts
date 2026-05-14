@@ -1,6 +1,6 @@
-import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { badRequest, notFound } from "../appError";
+import dayjs from "dayjs";
 
 export async function resolveLocationByFullNameBasic(full_name: string) {
   const loc = await prisma.location.findFirst({
@@ -106,3 +106,24 @@ export async function handleScanLocationCommon<
 
   return payload;
 }
+
+// ============================================================
+// AUTO LOCATION PACK
+// ============================================================
+export const buildAutoLocationPackKey = (x: {
+  product_id?: number | null;
+  code?: string | null;
+  lot_serial?: string | null;
+  exp?: Date | string | null;
+}) => {
+  const expText = x.exp
+    ? new Date(x.exp).toISOString().slice(0, 10)
+    : "NOEXP";
+
+  return [
+    x.product_id ?? "NULL",
+    String(x.code ?? "").trim(),
+    String(x.lot_serial ?? "").trim(),
+    expText,
+  ].join("|");
+};

@@ -101,6 +101,7 @@ import type {
   NormalizedLotAdjustmentLine,
   GoodsOutItemRowForAdjustment,
 } from "../utils/outbound/outbound.adjustment";
+import { buildAutoLocationPackKey } from "../utils/helper_scan/location";
 
 // ================================
 // ✅ RECEIVE OUTBOUND FROM ODOO
@@ -5585,6 +5586,551 @@ export const updateGoodsOutItemRtc = asyncHandler(
 
     return res.json({
       message: "อัปเดต rtc สำเร็จ",
+      data: result,
+    });
+  },
+);
+
+const buildProductLotKey = (productId?: number | null, lotId?: number | null) =>
+  `${productId ?? "NULL"}|${lotId ?? "NULL"}`;
+
+// ============================================================
+// GET CANDIDATES
+// ============================================================
+
+export const getAutoLocationPackCandidates = asyncHandler(
+  async (req: Request, res: Response) => {
+    const outboundNos = Array.isArray(req.body?.outbound_nos)
+      ? req.body.outbound_nos
+          .map((x: any) => String(x ?? "").trim())
+          .filter(Boolean)
+      : [];
+
+    if (outboundNos.length === 0) {
+      throw badRequest("ไม่พบ outbound_nos");
+    }
+
+    const outbounds = await prisma.outbound.findMany({
+      where: {
+        no: {
+          in: outboundNos,
+        },
+        deleted_at: null,
+      },
+
+      include: {
+        goods_outs: {
+          where: {
+            deleted_at: null,
+          },
+        },
+      },
+    });
+
+    if (outbounds.length === 0) {
+      return res.json({
+        data: [],
+      });
+    }
+
+    // ========================================================
+    // remaining outbound items
+    // ========================================================
+
+    const remainRows: Array<{
+      outbound_no: string;
+      goods_out_item_id: number;
+      product_id: number | null;
+      code: string | null;
+      name: string | null;
+      lot_serial: string | null;
+      exp: Date | null;
+      remaining: number;
+      key: string;
+    }> = [];
+
+    const productLotPairs = outbounds.flatMap((ob) =>
+      ob.goods_outs
+        .map((item) => ({
+          product_id: item.product_id,
+          lot_id: item.lot_id,
+        }))
+        .filter((x) => x.product_id != null && x.lot_id != null),
+    );
+
+    const wmsRows = await prisma.wms_mdt_goods.findMany({
+      where: {
+        OR: productLotPairs.map((x) => ({
+          product_id: x.product_id!,
+          lot_id: x.lot_id!,
+        })),
+      },
+      select: {
+        product_id: true,
+        lot_id: true,
+        expiration_date: true,
+        lot_name: true,
+        product_code: true,
+      },
+    });
+
+    const wmsExpMap = new Map<string, Date | null>();
+
+    for (const row of wmsRows) {
+      wmsExpMap.set(
+        buildProductLotKey(row.product_id, row.lot_id),
+        row.expiration_date ?? null,
+      );
+    }
+
+    for (const ob of outbounds) {
+      for (const item of ob.goods_outs) {
+        const qty = Number(item.qty ?? 0);
+        const pick = Number(item.pick ?? 0);
+        const remaining = qty - pick;
+
+        if (remaining <= 0) continue;
+
+        const productId = item.product_id ?? null;
+        const lotId = item.lot_id ?? null;
+
+        const expValue =
+          productId != null && lotId != null
+            ? (wmsExpMap.get(buildProductLotKey(productId, lotId)) ?? null)
+            : null;
+
+        const key = buildAutoLocationPackKey({
+          product_id: productId,
+          code: item.code,
+          lot_serial: item.lot_serial,
+          exp: expValue,
+        });
+
+        remainRows.push({
+          outbound_no: ob.no,
+          goods_out_item_id: item.id,
+          product_id: productId,
+          code: item.code,
+          name: item.name,
+          lot_serial: item.lot_serial,
+          exp: expValue,
+          remaining,
+          key,
+        });
+      }
+    }
+
+    if (remainRows.length === 0) {
+      return res.json({
+        data: [],
+      });
+    }
+
+    // ========================================================
+    // load Location_Pack stocks
+    // ========================================================
+
+    const locationPackStocks = await prisma.stock.findMany({
+      where: {
+        quantity: {
+          gt: 0,
+        },
+        location_name: {
+          contains: "_Location_Pack",
+        },
+      },
+    });
+
+    // ========================================================
+    // group stock qty
+    // ========================================================
+
+    const stockMap = new Map<
+      string,
+      {
+        qty: number;
+        stocks: typeof locationPackStocks;
+      }
+    >();
+
+    for (const stock of locationPackStocks) {
+      const key = buildAutoLocationPackKey({
+        product_id: stock.product_id,
+        code: stock.product_code,
+        lot_serial: stock.lot_name,
+        exp: stock.expiration_date,
+      });
+
+      const existing = stockMap.get(key);
+
+      if (!existing) {
+        stockMap.set(key, {
+          qty: Number(stock.quantity),
+          stocks: [stock],
+        });
+      } else {
+        existing.qty += Number(stock.quantity);
+        existing.stocks.push(stock);
+      }
+    }
+
+    // ========================================================
+    // merge result
+    // ========================================================
+
+    const resultMap = new Map<
+      string,
+      {
+        key: string;
+        product_id: number | null;
+        code: string | null;
+        name: string | null;
+        lot_serial: string | null;
+        exp: Date | null;
+        available_qty: number;
+        required_qty: number;
+        docs: Array<{
+          outbound_no: string;
+          goods_out_item_id: number;
+          qty: number;
+          pick: number;
+          remaining: number;
+        }>;
+      }
+    >();
+
+    for (const row of remainRows) {
+      const stockInfo = stockMap.get(row.key);
+
+      if (!stockInfo || stockInfo.qty <= 0) {
+        continue;
+      }
+
+      const existing = resultMap.get(row.key);
+
+      if (!existing) {
+        resultMap.set(row.key, {
+          key: row.key,
+          product_id: row.product_id,
+          code: row.code,
+          name: row.name,
+          lot_serial: row.lot_serial,
+          exp: row.exp,
+          available_qty: stockInfo.qty,
+          required_qty: row.remaining,
+
+          docs: [
+            {
+              outbound_no: row.outbound_no,
+              goods_out_item_id: row.goods_out_item_id,
+              qty: row.remaining,
+              pick: 0,
+              remaining: row.remaining,
+            },
+          ],
+        });
+      } else {
+        existing.required_qty += row.remaining;
+
+        existing.docs.push({
+          outbound_no: row.outbound_no,
+          goods_out_item_id: row.goods_out_item_id,
+          qty: row.remaining,
+          pick: 0,
+          remaining: row.remaining,
+        });
+      }
+    }
+
+    return res.json({
+      data: Array.from(resultMap.values()),
+    });
+  },
+);
+
+// ============================================================
+// APPLY AUTO LOCATION PACK
+// ============================================================
+
+export const applyAutoLocationPack = asyncHandler(
+  async (req: Request, res: Response) => {
+    const itemKey = String(req.body?.item_key ?? "").trim();
+    const mode = String(req.body?.mode ?? "AUTO").trim().toUpperCase();
+    const outboundNo = req.body?.outbound_no
+      ? String(req.body.outbound_no).trim()
+      : null;
+
+    const sourceLocationName = String(
+      req.body?.source_location_name ?? "",
+    ).trim();
+
+    const outboundNos = Array.isArray(req.body?.outbound_nos)
+      ? req.body.outbound_nos
+          .map((x: any) => String(x ?? "").trim())
+          .filter(Boolean)
+      : [];
+
+    if (!itemKey) throw badRequest("ไม่พบ item_key");
+    if (!["AUTO", "DOC"].includes(mode)) throw badRequest("mode ไม่ถูกต้อง");
+    if (!sourceLocationName) throw badRequest("กรุณาเลือก Location_Pack");
+    if (mode === "DOC" && !outboundNo) throw badRequest("กรุณาระบุ outbound_no");
+
+    // ✅ กัน AUTO ไปโดนเอกสารอื่นนอก Batch
+    // FE ควรส่ง outbound_nos มาด้วยตอน apply
+    if (mode === "AUTO" && outboundNos.length === 0) {
+      throw badRequest("AUTO ต้องส่ง outbound_nos ของ Batch มาด้วย");
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const pickedLoc = await tx.location.findFirst({
+        where: {
+          full_name: sourceLocationName,
+          deleted_at: null,
+        },
+        select: {
+          id: true,
+          full_name: true,
+        },
+      });
+
+      if (!pickedLoc) {
+        throw badRequest(`ไม่พบ Location: ${sourceLocationName}`);
+      }
+
+      // ======================================================
+      // Load stock เฉพาะ Location_Pack ที่ user เลือกเท่านั้น
+      // ======================================================
+      const stocks = await tx.stock.findMany({
+        where: {
+          quantity: {
+            gt: 0,
+          },
+          location_name: sourceLocationName,
+        },
+        orderBy: [{ id: "asc" }],
+      });
+
+      const matchedStocks = stocks.filter((s) => {
+        const key = buildAutoLocationPackKey({
+          product_id: s.product_id,
+          code: s.product_code,
+          lot_serial: s.lot_name,
+          exp: s.expiration_date,
+        });
+
+        return key === itemKey;
+      });
+
+      if (matchedStocks.length === 0) {
+        throw badRequest("ไม่พบ stock Location_Pack ที่ตรงกับสินค้า");
+      }
+
+      let totalAvailable = matchedStocks.reduce(
+        (sum, s) => sum + Number(s.quantity ?? 0),
+        0,
+      );
+
+      if (totalAvailable <= 0) {
+        throw badRequest("stock Location_Pack ไม่เพียงพอ");
+      }
+
+      // ======================================================
+      // Load goods_out_item เฉพาะ Doc ที่เกี่ยวข้อง
+      // ======================================================
+      const goodsOutItems = await tx.goods_out_item.findMany({
+        where: {
+          deleted_at: null,
+          outbound: {
+            deleted_at: null,
+            ...(mode === "DOC"
+              ? { no: outboundNo! }
+              : { no: { in: outboundNos } }),
+          },
+        },
+        include: {
+          outbound: true,
+        },
+        orderBy: [{ id: "asc" }],
+      });
+
+      if (goodsOutItems.length === 0) {
+        throw badRequest("ไม่พบ goods_out_item");
+      }
+
+      // ======================================================
+      // Resolve exp จาก wms_mdt_goods ด้วย product_id + lot_id
+      // ======================================================
+      const productLotPairs = goodsOutItems
+        .map((item) => ({
+          product_id: item.product_id,
+          lot_id: item.lot_id,
+        }))
+        .filter((x) => x.product_id != null && x.lot_id != null);
+
+      const wmsRows =
+        productLotPairs.length > 0
+          ? await tx.wms_mdt_goods.findMany({
+              where: {
+                OR: productLotPairs.map((x) => ({
+                  product_id: x.product_id!,
+                  lot_id: x.lot_id!,
+                })),
+              },
+              select: {
+                product_id: true,
+                lot_id: true,
+                expiration_date: true,
+              },
+            })
+          : [];
+
+      const wmsExpMap = new Map<string, Date | null>();
+
+      for (const row of wmsRows) {
+        wmsExpMap.set(
+          buildProductLotKey(row.product_id, row.lot_id),
+          row.expiration_date ?? null,
+        );
+      }
+
+      const matchedItems = goodsOutItems
+        .filter((item) => {
+          const expValue =
+            item.product_id != null && item.lot_id != null
+              ? wmsExpMap.get(buildProductLotKey(item.product_id, item.lot_id)) ??
+                null
+              : null;
+
+          const key = buildAutoLocationPackKey({
+            product_id: item.product_id,
+            code: item.code,
+            lot_serial: item.lot_serial,
+            exp: expValue,
+          });
+
+          return key === itemKey;
+        })
+        .map((item) => {
+          const qty = Number(item.qty ?? 0);
+          const pick = Number(item.pick ?? 0);
+
+          return {
+            item,
+            remaining: Math.max(0, qty - pick),
+          };
+        })
+        .filter((x) => x.remaining > 0);
+
+      if (matchedItems.length === 0) {
+        throw badRequest("ไม่พบ goods_out_item ที่ต้อง Pick");
+      }
+
+      const updatedItems: any[] = [];
+      const stockCuts: any[] = [];
+
+      // ======================================================
+      // Apply pick + location_pick + cut stock
+      // ======================================================
+      for (const row of matchedItems) {
+        if (totalAvailable <= 0) break;
+
+        const useQty = Math.min(totalAvailable, row.remaining);
+        if (useQty <= 0) continue;
+
+        const updated = await tx.goods_out_item.update({
+          where: {
+            id: row.item.id,
+          },
+          data: {
+            pick: {
+              increment: useQty,
+            },
+            pick_time: new Date(),
+          },
+        });
+
+        updatedItems.push(updated);
+
+        // ✅ สำคัญ: ทำให้ FE แสดง Pick ใต้ Location_Pack ที่เลือกถูกต้อง
+        const existingPick = await tx.goods_out_item_location_pick.findFirst({
+          where: {
+            goods_out_item_id: row.item.id,
+            location_id: pickedLoc.id,
+          },
+        });
+
+        if (existingPick) {
+          await tx.goods_out_item_location_pick.update({
+            where: {
+              id: existingPick.id,
+            },
+            data: {
+              qty_pick: {
+                increment: useQty,
+              },
+              updated_at: new Date(),
+            },
+          });
+        } else {
+          await tx.goods_out_item_location_pick.create({
+            data: {
+              goods_out_item_id: row.item.id,
+              location_id: pickedLoc.id,
+              qty_pick: useQty,
+            },
+          });
+        }
+
+        totalAvailable -= useQty;
+
+        let remainCut = useQty;
+
+        for (const stock of matchedStocks) {
+          if (remainCut <= 0) break;
+
+          const stockQty = Number(stock.quantity ?? 0);
+          if (stockQty <= 0) continue;
+
+          const cutQty = Math.min(stockQty, remainCut);
+          if (cutQty <= 0) continue;
+
+          await tx.stock.update({
+            where: {
+              id: stock.id,
+            },
+            data: {
+              quantity: {
+                decrement: cutQty,
+              },
+            },
+          });
+
+          stockCuts.push({
+            stock_id: stock.id,
+            location_name: stock.location_name,
+            cut_qty: cutQty,
+          });
+
+          remainCut -= cutQty;
+          stock.quantity = new Prisma.Decimal(stockQty - cutQty);
+        }
+      }
+
+      return {
+        success: true,
+        mode,
+        source_location_name: sourceLocationName,
+        updated_count: updatedItems.length,
+        total_picked: updatedItems.reduce(
+          (sum, item) => sum + Number(item.pick ?? 0),
+          0,
+        ),
+        remaining_location_pack_qty: totalAvailable,
+        stock_cuts: stockCuts,
+      };
+    });
+
+    return res.json({
       data: result,
     });
   },
