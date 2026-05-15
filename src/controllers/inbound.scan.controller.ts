@@ -173,7 +173,6 @@ async function assertInboundScanZoneTypeAllowed(input: {
   };
 }
 
-
 async function buildInboundDetail(inboundId: number, inboundNo: string) {
   const inboundHeader = await prisma.inbound.findUnique({
     where: { id: inboundId },
@@ -500,7 +499,6 @@ function parseScannedBarcodeByMasterMeta(input: {
   };
 }
 
-
 async function findCandidateGoodsInsByResolvedMasterBarcode(
   inboundId: number,
   masterBarcodeText: string,
@@ -697,7 +695,6 @@ export const scanInboundBarcode = asyncHandler(
 
     const scoreCandidate = (item: (typeof candidates)[number]) => {
       if (item.product_id == null) return -1;
-      
 
       const itemLot = normalizeScanText(item.lot_serial ?? "");
       const itemExpKey = toDateOnlyKey(item.exp ?? null);
@@ -1320,6 +1317,24 @@ export const confirmInboundToStock = asyncHandler(
     };
 
     const result = await prisma.$transaction(async (tx) => {
+      const locked = await tx.inbound.updateMany({
+        where: {
+          id: inbound.id,
+          deleted_at: null,
+          status: {
+            not: "completed",
+          },
+        },
+        data: {
+          status: "completed",
+          updated_at: new Date(),
+        },
+      });
+
+      if (locked.count === 0) {
+        throw badRequest("Inbound นี้ถูกยืนยันไปแล้ว");
+      }
+
       const goodsIns = (await tx.goods_in.findMany({
         where: { inbound_id: inbound.id, deleted_at: null },
         select: {
@@ -1709,21 +1724,6 @@ export const confirmInboundToStock = asyncHandler(
         nextInboundStatus = STATUS_COMPLETED;
       }
 
-      const inboundRow = await tx.inbound.findUnique({
-        where: { id: inbound.id },
-        select: { id: true, status: true },
-      });
-
-      if (inboundRow && String(inboundRow.status ?? "") !== nextInboundStatus) {
-        await tx.inbound.update({
-          where: { id: inbound.id },
-          data: {
-            status: nextInboundStatus,
-            updated_at: new Date(),
-          },
-        });
-      }
-
       let upserted = 0;
       let skipped = 0;
 
@@ -1944,9 +1944,19 @@ export const confirmInboundToStock = asyncHandler(
         upserted,
         skipped,
         isAdj,
-        inbound_status: nextInboundStatus,
+        inbound_status: STATUS_COMPLETED,
       };
     });
+
+    try {
+      io.to(`inbound:${no}`).emit("inbound:confirmed", {
+        no,
+        confirmed_by: user_ref,
+        confirmed_at: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error("emit inbound:confirmed error", error);
+    }
 
     return res.json({
       message: isAdj

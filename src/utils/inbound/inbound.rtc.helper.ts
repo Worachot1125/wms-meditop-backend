@@ -131,7 +131,7 @@ export async function handleRTCReturnTransfer(input: {
       rtc_no: number,
       outbound_id: outbound.id,
       outbound_no: outbound.no,
-      out_type: (outbound as any).out_type, 
+      out_type: (outbound as any).out_type,
       origin,
       invoice,
       pack_product_id: packing.pack_product_id,
@@ -179,14 +179,19 @@ export async function handleRTCReturnTransfer(input: {
 
     /**
      * ✅ Important rule:
-     * - true  = RTC came while outbound already has pick.
-     *           Keep outbound/goods_out_item/batch as-is.
-     *           Do not reduce qty/pack here.
-     *           Actual delete/reduce will be done later in return confirm.
-     * - false = no pick yet.
-     *           Create inbound/goods_in and mark inbound completed.
+     * RTC/BOR that arrives while the outbound is still in picking must behave like
+     * a demand adjustment, not like a return-to-stock flow.
+     *
+     * Example:
+     * - DO-1 A qty 2 pick 1
+     * - DO-2 A qty 2 pick 0
+     * - RTC/BOR for DO-1 A qty 2
+     * Result:
+     * - DO-1 is removed from the batch
+     * - the pending pick 1 is moved to DO-2
+     * - no RTC return screen is required because stock was not confirmed yet
      */
-    const shouldKeepOutboundForReturn = hasPicked;
+    const shouldKeepOutboundForReturn = false;
 
     if (!hasPicked) {
       const inbound = await handleInboundTransfer({
@@ -370,83 +375,13 @@ export async function handleRTCReturnTransfer(input: {
 
       /**
        * ==========================================
-       * RTC during PICK / PACK
-       * -> behave same as PD
-       * -> keep outbound alive
-       * -> DO NOT reduce qty yet
+       * RTC/BOR during PICK
+       * -> reduce/delete this DO immediately
+       * -> move pending pick to another active DO in the same batch
+       * -> DO NOT increase rtc / DO NOT wait for return-to-stock
        * ==========================================
        */
-      const isDuringPickOrPack =
-        currentPick > 0 || adjustmentPick > 0 || currentPack > 0;
-
-      if (isDuringPickOrPack) {
-        const maxRtc = Math.max(0, currentQty - currentRtc);
-
-        if (rtcQty > maxRtc) {
-          ignored.push({
-            reason: "rtc_qty_exceeded",
-            product_id: productId,
-            goods_out_item_id: match.id,
-            current_qty: currentQty,
-            current_rtc: currentRtc,
-            rtc_qty: rtcQty,
-            max_rtc: maxRtc,
-          });
-
-          continue;
-        }
-
-        await tx.goods_out_item.update({
-          where: {
-            id: Number(match.id),
-          },
-          data: {
-            rtc: {
-              increment: rtcQty,
-            },
-            rtc_check: false,
-            updated_at: new Date(),
-          } as any,
-        });
-
-        affected.push({
-          rtc_no: number,
-          outbound_no: outbound.no,
-          goods_out_item_id: match.id,
-          adjustment_line_id: matchedAdjustmentLine?.id ?? null,
-          product_id: productId,
-          lot_id: lotId,
-          lot_serial: match.lot_serial ?? lotSerial ?? null,
-          exp: rtcExp ? rtcExp.toISOString() : null,
-
-          old_qty: currentQty,
-          old_pack: currentPack,
-          old_pick: currentPick,
-          old_rtc: currentRtc,
-
-          adjustment_pick: adjustmentPick,
-
-          rtc_qty: rtcQty,
-
-          new_qty: currentQty,
-          new_pack: currentPack,
-          new_pick: currentPick,
-          new_rtc: currentRtc + rtcQty,
-
-          during_pick: true,
-
-          action: "rtc_waiting_return_pick",
-        });
-
-        continue;
-      }
-
-      /**
-       * ==========================================
-       * RTC normal flow
-       * -> reduce qty immediately
-       * ==========================================
-       */
+      const isDuringPick = currentPick > 0 || adjustmentPick > 0;
 
       const qtyReduce = Math.min(currentQty, rtcQty);
 
@@ -455,6 +390,39 @@ export async function handleRTCReturnTransfer(input: {
       const nextQty = Math.max(0, currentQty - qtyReduce);
 
       const nextPack = Math.max(0, currentPack - packReduce);
+
+      const nextPickAllowed = Math.max(0, Math.min(currentPick, nextQty));
+      const pickToMove = Math.max(0, currentPick - nextPickAllowed);
+
+      const movedPickResult =
+        pickToMove > 0
+          ? await movePendingPickToOtherBatchItemsTx({
+              tx,
+              sourceItem: {
+                id: Number(match.id),
+                outbound_id: Number(outbound.id),
+                product_id: productId,
+                lot_id: lotId,
+                lot_serial: match.lot_serial ?? lotSerial ?? null,
+              },
+              moveQty: pickToMove,
+            })
+          : {
+              moved_qty: 0,
+              remaining_qty: 0,
+              targets: [],
+            };
+
+      if (movedPickResult.remaining_qty > 0) {
+        ignored.push({
+          reason: "not_enough_other_do_to_move_pick",
+          product_id: productId,
+          goods_out_item_id: match.id,
+          pick_to_move: pickToMove,
+          moved_qty: movedPickResult.moved_qty,
+          remaining_qty: movedPickResult.remaining_qty,
+        });
+      }
 
       const boxResult =
         packReduce > 0
@@ -473,6 +441,7 @@ export async function handleRTCReturnTransfer(input: {
           },
           data: {
             qty: 0,
+            pick: nextPickAllowed,
             pack: nextPack,
             deleted_at: new Date(),
             updated_at: new Date(),
@@ -512,11 +481,19 @@ export async function handleRTCReturnTransfer(input: {
 
           new_qty: 0,
           new_pack: nextPack,
+          new_pick: nextPickAllowed,
           new_rtc: currentRtc,
 
-          during_pick: false,
+          moved_pick: movedPickResult.moved_qty,
+          moved_pick_targets: movedPickResult.targets,
+          move_pick_remaining: movedPickResult.remaining_qty,
 
-          action: "rtc_soft_delete_item",
+          during_pick: isDuringPick,
+
+          action:
+            movedPickResult.moved_qty > 0
+              ? "rtc_soft_delete_item_and_move_pick"
+              : "rtc_soft_delete_item",
         });
 
         continue;
@@ -528,6 +505,7 @@ export async function handleRTCReturnTransfer(input: {
         },
         data: {
           qty: nextQty,
+          pick: nextPickAllowed,
           pack: nextPack,
           updated_at: new Date(),
         } as any,
@@ -554,11 +532,19 @@ export async function handleRTCReturnTransfer(input: {
 
         new_qty: nextQty,
         new_pack: nextPack,
+        new_pick: nextPickAllowed,
         new_rtc: currentRtc,
 
-        during_pick: false,
+        moved_pick: movedPickResult.moved_qty,
+        moved_pick_targets: movedPickResult.targets,
+        move_pick_remaining: movedPickResult.remaining_qty,
 
-        action: "rtc_reduce_qty",
+        during_pick: isDuringPick,
+
+        action:
+          movedPickResult.moved_qty > 0
+            ? "rtc_reduce_qty_and_move_pick"
+            : "rtc_reduce_qty",
       });
     }
 
@@ -612,11 +598,9 @@ export async function handleRTCReturnTransfer(input: {
       rtc_no: number,
       outbound_id: outbound.id,
       outbound_no: outbound.no,
-      mode: shouldKeepOutboundForReturn
-        ? "inbound_return_during_pick_keep_outbound"
-        : "outbound_adjust",
-      reason: shouldKeepOutboundForReturn
-        ? "pick_exists_wait_return_confirm"
+      mode: "outbound_adjust",
+      reason: hasPicked
+        ? "pick_exists_adjust_and_move_pending_pick"
         : undefined,
       data: inbound,
       affected,
@@ -774,4 +758,210 @@ async function completeInboundIfCreated(inbound: any) {
     ...inbound,
     status: completed.status,
   };
+}
+
+async function movePendingPickToOtherBatchItemsTx(params: {
+  tx: any;
+  sourceItem: {
+    id: number;
+    outbound_id: number;
+    product_id: number | null;
+    lot_id?: number | null;
+    lot_serial?: string | null;
+  };
+  moveQty: number;
+}): Promise<{
+  moved_qty: number;
+  remaining_qty: number;
+  targets: Array<{
+    goods_out_item_id: number;
+    outbound_no: string | null;
+    moved_qty: number;
+  }>;
+}> {
+  const { tx, sourceItem } = params;
+  let remaining = Math.max(0, Math.floor(Number(params.moveQty ?? 0)));
+
+  const result = {
+    moved_qty: 0,
+    remaining_qty: remaining,
+    targets: [] as Array<{
+      goods_out_item_id: number;
+      outbound_no: string | null;
+      moved_qty: number;
+    }>,
+  };
+
+  if (remaining <= 0) return result;
+  if (!sourceItem.product_id) return result;
+
+  const sourceBatch = await tx.batch_outbound.findFirst({
+    where: {
+      outbound_id: sourceItem.outbound_id,
+    },
+    select: {
+      name: true,
+    },
+  });
+
+  const batchName = String(sourceBatch?.name ?? "").trim();
+  if (!batchName) return result;
+
+  const batchOutbounds = await tx.batch_outbound.findMany({
+    where: {
+      name: batchName,
+      outbound_id: {
+        not: sourceItem.outbound_id,
+      },
+    },
+    select: {
+      outbound_id: true,
+      outbound: {
+        select: {
+          id: true,
+          no: true,
+          deleted_at: true,
+        },
+      },
+    },
+    orderBy: {
+      id: "asc",
+    },
+  });
+
+  const targetOutboundIds = batchOutbounds
+    .filter((x: any) => !x.outbound?.deleted_at)
+    .map((x: any) => Number(x.outbound_id))
+    .filter((x: number) => x > 0);
+
+  if (targetOutboundIds.length === 0) return result;
+
+  const targets = await tx.goods_out_item.findMany({
+    where: {
+      id: {
+        not: sourceItem.id,
+      },
+      outbound_id: {
+        in: targetOutboundIds,
+      },
+      deleted_at: null,
+      product_id: sourceItem.product_id,
+      ...(sourceItem.lot_id != null
+        ? { lot_id: sourceItem.lot_id }
+        : { lot_serial: sourceItem.lot_serial ?? null }),
+    },
+    include: {
+      outbound: {
+        select: {
+          no: true,
+        },
+      },
+    },
+    orderBy: [{ outbound_id: "asc" }, { id: "asc" }],
+  });
+
+  for (const target of targets) {
+    if (remaining <= 0) break;
+
+    const targetQty = Math.max(0, Math.floor(Number(target.qty ?? 0)));
+    const targetPick = Math.max(0, Math.floor(Number(target.pick ?? 0)));
+    const capacity = Math.max(0, targetQty - targetPick);
+
+    if (capacity <= 0) continue;
+
+    const take = Math.min(remaining, capacity);
+
+    await tx.goods_out_item.update({
+      where: {
+        id: Number(target.id),
+      },
+      data: {
+        pick: {
+          increment: take,
+        },
+        updated_at: new Date(),
+      },
+    });
+
+    await moveLocationPicksToTargetTx({
+      tx,
+      sourceGoodsOutItemId: sourceItem.id,
+      targetGoodsOutItemId: Number(target.id),
+      moveQty: take,
+    });
+
+    remaining -= take;
+    result.moved_qty += take;
+
+    result.targets.push({
+      goods_out_item_id: Number(target.id),
+      outbound_no: target.outbound?.no ?? null,
+      moved_qty: take,
+    });
+  }
+
+  result.remaining_qty = remaining;
+  return result;
+}
+
+async function moveLocationPicksToTargetTx(params: {
+  tx: any;
+  sourceGoodsOutItemId: number;
+  targetGoodsOutItemId: number;
+  moveQty: number;
+}) {
+  const { tx, sourceGoodsOutItemId, targetGoodsOutItemId } = params;
+  let remaining = Math.max(0, Math.floor(Number(params.moveQty ?? 0)));
+
+  if (remaining <= 0) return;
+
+  const sourceLocPicks = await tx.goods_out_item_location_pick.findMany({
+    where: {
+      goods_out_item_id: sourceGoodsOutItemId,
+      qty_pick: {
+        gt: 0,
+      },
+    },
+    orderBy: [{ id: "asc" }],
+  });
+
+  for (const src of sourceLocPicks) {
+    if (remaining <= 0) break;
+
+    const srcPick = Math.max(0, Math.floor(Number(src.qty_pick ?? 0)));
+    const take = Math.min(remaining, srcPick);
+    if (take <= 0) continue;
+
+    await tx.goods_out_item_location_pick.upsert({
+      where: {
+        goods_out_item_id_location_id: {
+          goods_out_item_id: targetGoodsOutItemId,
+          location_id: Number(src.location_id),
+        },
+      },
+      create: {
+        goods_out_item_id: targetGoodsOutItemId,
+        location_id: Number(src.location_id),
+        qty_pick: take,
+      },
+      update: {
+        qty_pick: {
+          increment: take,
+        },
+        updated_at: new Date(),
+      },
+    });
+
+    await tx.goods_out_item_location_pick.update({
+      where: {
+        id: Number(src.id),
+      },
+      data: {
+        qty_pick: Math.max(0, srcPick - take),
+        updated_at: new Date(),
+      },
+    });
+
+    remaining -= take;
+  }
 }

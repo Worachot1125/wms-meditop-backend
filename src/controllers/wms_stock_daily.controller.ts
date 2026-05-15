@@ -1867,106 +1867,86 @@ export const getTransactionReportPaginated = asyncHandler(
       return [...normalRows, ...returnRows];
     });
 
-    const outboundRows: ReportRow[] = outbounds.flatMap((doc: any) => {
-      const formatted = formatOdooOutbound(doc);
+    const outboundRows: ReportRow[] = outbounds
+      .flatMap((doc: any) => {
+        const formatted = formatOdooOutbound(doc);
 
-      const rawGoodsOuts = Array.isArray(doc.goods_outs) ? doc.goods_outs : [];
+        // ✅ กัน formatter คืน null
+        if (!formatted) {
+          return [];
+        }
 
-      const baseItems =
-        formatted.items && formatted.items.length > 0
-          ? formatted.items
-          : rawGoodsOuts.map((item: any) => ({
-              id: item.id,
-              product_id: item.product_id ?? null,
-              code: item.code ?? null,
-              name: item.name ?? null,
-              unit: item.unit ?? null,
-              lot_id: item.lot_id ?? null,
-              lot_serial: item.lot_serial ?? item.lot ?? null,
-              lot: item.lot ?? item.lot_serial ?? null,
-              qty: item.qty ?? item.quantity ?? 0,
-              quantity: item.quantity ?? item.qty ?? 0,
-              pick: item.pick ?? 0,
-              pack: item.pack ?? 0,
-              return: item.return ?? 0,
-              barcode_id: item.barcode_id ?? null,
-              barcode_text: item.barcode_text ?? null,
-              barcode: item.barcode_ref ?? null,
-              barcode_ref: item.barcode_ref ?? null,
-              deleted_at: item.deleted_at ?? null,
-            }));
+        const rawGoodsOuts = Array.isArray(doc.goods_outs)
+          ? doc.goods_outs
+          : [];
 
-      const items = baseItems.map((item: any) => ({
-        ...item,
-        exp: getExp(item.product_id, item.lot_id) ?? item.exp ?? null,
-        zone_type: getZoneType(item.code) ?? item.zone_type ?? null,
-      }));
+        const baseItems =
+          Array.isArray(formatted.items) && formatted.items.length > 0
+            ? formatted.items
+            : rawGoodsOuts.map((item: any) => ({
+                id: item.id,
+                product_id: item.product_id ?? null,
+                code: item.code ?? null,
+                name: item.name ?? null,
+                unit: item.unit ?? null,
+                lot_id: item.lot_id ?? null,
+                lot_serial: item.lot_serial ?? item.lot ?? null,
+                lot: item.lot ?? item.lot_serial ?? null,
+                qty: item.qty ?? item.quantity ?? 0,
+                quantity: item.quantity ?? item.qty ?? 0,
+                pick: item.pick ?? 0,
+                pack: item.pack ?? 0,
+                return: item.return ?? 0,
+                barcode_id: item.barcode_id ?? null,
+                barcode_text: item.barcode_text ?? null,
+                barcode: item.barcode_ref ?? null,
+                barcode_ref: item.barcode_ref ?? null,
+                deleted_at: item.deleted_at ?? null,
+              }));
 
-      const resolvedType = resolveReportTypeFromNo(
-        formatted.no,
-        formatted.out_type ?? "OUT",
-      );
+        const items = baseItems.map((item: any) => ({
+          ...item,
+          exp: getExp(item.product_id, item.lot_id) ?? item.exp ?? null,
+          zone_type: getZoneType(item.code) ?? item.zone_type ?? null,
+        }));
 
-      const department = getDepartmentName(
-        doc.department_id,
-        formatted.department,
-      );
+        const resolvedType = resolveReportTypeFromNo(
+          formatted.no,
+          formatted.out_type ?? "OUT",
+        );
 
-      if (items.length === 0) {
-        return [
-          {
+        const department = getDepartmentName(
+          doc.department_id,
+          formatted.department,
+        );
+
+        const normalRows: ReportRow[] = items.map(
+          (item: any, index: number) => ({
             source: "outbound",
-            id: `outbound-${formatted.id}-empty`,
+            id: makeRowId("outbound", formatted.id, item, index),
             no: formatted.no,
             created_at: formatted.created_at,
             type: resolvedType,
             location: formatted.location ?? null,
             location_dest: formatted.location_dest ?? null,
             user_ref: null,
-            code: null,
-            name: null,
-            document: {
-              ...formatted,
-              out_type: resolvedType,
-              type: resolvedType,
-              department,
-              items: [],
-            },
-          },
-        ];
-      }
+            code: getItemCode(item),
+            name: getItemName(item),
+            document: withSingleItemDocument(
+              {
+                ...formatted,
+                out_type: resolvedType,
+                type: resolvedType,
+                department,
+              },
+              item,
+            ),
+          }),
+        );
 
-      const normalRows: ReportRow[] = items.map((item: any, index: number) => ({
-        source: "outbound",
-        id: makeRowId("outbound", formatted.id, item, index),
-        no: formatted.no,
-        created_at: formatted.created_at,
-        type: resolvedType,
-        location: formatted.location ?? null,
-        location_dest: formatted.location_dest ?? null,
-        user_ref: null,
-        code: getItemCode(item),
-        name: getItemName(item),
-        document: withSingleItemDocument(
-          {
-            ...formatted,
-            out_type: resolvedType,
-            type: resolvedType,
-            department,
-          },
-          item,
-        ),
-      }));
-
-      // ของเดิม returnRows ใช้ต่อได้
-      const returnRows: ReportRow[] = (doc.goods_outs ?? [])
-        .map((goi: any, index: number) => {
-          // ...โค้ด returnRows เดิมของคุณ
-        })
-        .filter((x: ReportRow | null): x is ReportRow => x !== null);
-
-      return [...normalRows, ...returnRows];
-    });
+        return normalRows.filter(Boolean);
+      })
+      .filter(Boolean);
 
     const transferDocRows: ReportRow[] = transferDocs.flatMap((doc: any) => {
       const department = getDepartmentName(doc.department_id, doc.department);
@@ -2420,7 +2400,7 @@ export const getTransactionReportPaginated = asyncHandler(
     const total = rows.length;
     const totalPages = Math.ceil(total / limit);
     const skip = (page - 1) * limit;
-    const data = rows.slice(skip, skip + limit);
+    const data = rows.slice(skip, skip + limit).filter(Boolean);
 
     return res.json({
       data,

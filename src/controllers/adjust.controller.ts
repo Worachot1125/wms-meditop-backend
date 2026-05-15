@@ -2269,10 +2269,8 @@ const buildAdjustLocationKey = (x: {
   ].join("|");
 };
 
-const buildProductLotKey = (
-  productId?: number | null,
-  lotId?: number | null,
-) => `${productId ?? "NULL"}|${lotId ?? "NULL"}`;
+const buildProductLotKey = (productId?: number | null, lotId?: number | null) =>
+  `${productId ?? "NULL"}|${lotId ?? "NULL"}`;
 
 const getAdjustmentItemsFromRow = (row: any) => {
   if (Array.isArray(row?.adjustment_items)) return row.adjustment_items;
@@ -2292,51 +2290,48 @@ const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
 
   if (allItems.length === 0) return rows;
 
-  const productLotPairs = allItems
-    .map((item: any) => ({
-      product_id: item.product_id ?? null,
-      lot_id: item.lot_id ?? null,
-    }))
-    .filter((x: any) => x.product_id != null && x.lot_id != null);
-
-  const uniquePairMap = new Map<string, { product_id: number; lot_id: number }>();
-
-  for (const pair of productLotPairs) {
-    const key = buildProductLotKey(pair.product_id, pair.lot_id);
-    if (!uniquePairMap.has(key)) {
-      uniquePairMap.set(key, {
-        product_id: Number(pair.product_id),
-        lot_id: Number(pair.lot_id),
-      });
-    }
-  }
-
-  const uniquePairs = Array.from(uniquePairMap.values());
+  const productIds = Array.from(
+    new Set(
+      allItems
+        .map((item: any) => Number(item.product_id))
+        .filter((id) => Number.isFinite(id) && id > 0),
+    ),
+  );
 
   const wmsRows =
-    uniquePairs.length > 0
+    productIds.length > 0
       ? await prisma.wms_mdt_goods.findMany({
           where: {
-            OR: uniquePairs.map((x) => ({
-              product_id: x.product_id,
-              lot_id: x.lot_id,
-            })),
+            product_id: {
+              in: productIds,
+            },
           },
           select: {
             product_id: true,
             lot_id: true,
             expiration_date: true,
+            zone_type: true,
           },
+          orderBy: [{ id: "desc" }],
         })
       : [];
 
   const wmsExpMap = new Map<string, Date | null>();
+  const wmsZoneMap = new Map<string, string | null>();
+  const wmsZoneByProductMap = new Map<number, string | null>();
 
   for (const row of wmsRows) {
-    wmsExpMap.set(
-      buildProductLotKey(row.product_id, row.lot_id),
-      row.expiration_date ?? null,
-    );
+    const productId = Number(row.product_id);
+    const productLotKey = buildProductLotKey(row.product_id, row.lot_id);
+
+    wmsExpMap.set(productLotKey, row.expiration_date ?? null);
+    wmsZoneMap.set(productLotKey, row.zone_type ?? null);
+
+    // Fallback by product_id only.
+    // This helps when adjustment_item.lot_id is null or not matched with wms_mdt_goods.lot_id.
+    if (Number.isFinite(productId) && !wmsZoneByProductMap.has(productId)) {
+      wmsZoneByProductMap.set(productId, row.zone_type ?? null);
+    }
   }
 
   const itemKeyMap = new Map<number, string>();
@@ -2345,14 +2340,15 @@ const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
     const itemId = Number(item.id ?? 0);
     if (!itemId) continue;
 
+    const productLotKey = buildProductLotKey(item.product_id, item.lot_id);
+
     const expValue =
       item.expiration_date ??
       item.exp ??
       item.expired_date ??
       item.expiry_date ??
       (item.product_id != null && item.lot_id != null
-        ? wmsExpMap.get(buildProductLotKey(item.product_id, item.lot_id)) ??
-          null
+        ? wmsExpMap.get(productLotKey) ?? null
         : null);
 
     const key = buildAdjustLocationKey({
@@ -2495,8 +2491,19 @@ const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
       const itemId = Number(item.id ?? 0);
       const key = itemKeyMap.get(itemId);
 
+      const productId = Number(item.product_id);
+      const productLotKey = buildProductLotKey(item.product_id, item.lot_id);
+
+      const zoneType =
+        wmsZoneMap.get(productLotKey) ??
+        (Number.isFinite(productId)
+          ? wmsZoneByProductMap.get(productId)
+          : null) ??
+        null;
+
       return {
         ...item,
+        zone_type: zoneType,
         location_names: key ? stockMap.get(key) ?? [] : [],
         confirmed_locations: confirmMap.get(itemId) ?? [],
       };

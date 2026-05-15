@@ -21,6 +21,8 @@ import {
   isNullLikeExp,
 } from "../utils/helper_scan/barcode";
 
+import { sendQueuedOutboundLotAdjustmentsToOdoo } from "../utils/helper_scan/change_lot";
+
 /**
  * =========================
  * Helpers
@@ -2661,20 +2663,22 @@ async function resolveBorSerVirtualLocation(
 }
 
 export const confirmOutboundPickToStock = asyncHandler(
-  async (req: Request, res: Response) => {
-    const no = String(req.params.no || "").trim();
+  async (req: Request<{ no: string }>, res: Response) => {
+    const no = decodeURIComponent(String(req.params.no || "")).trim();
 
-    if (!no) throw badRequest("no is required");
+    if (!no) {
+      throw badRequest("ไม่พบเลข Outbound");
+    }
 
-    const user_ref = String(
-      req.body?.user_ref ?? req.body?.user_pick ?? "",
-    ).trim();
+    const user_ref_raw = (req.body as any)?.user_ref;
+    const user_ref =
+      user_ref_raw == null ? null : String(user_ref_raw).trim() || null;
 
     const outbound = await prisma.outbound.findFirst({
       where: {
         no,
         deleted_at: null,
-      } as any,
+      },
       select: {
         id: true,
         no: true,
@@ -2682,241 +2686,48 @@ export const confirmOutboundPickToStock = asyncHandler(
     });
 
     if (!outbound) {
-      throw notFound("outbound not found");
-    }
-
-    const bodyLocations = Array.isArray(req.body?.locations)
-      ? req.body.locations
-      : [];
-
-    if (!bodyLocations.length) {
-      throw badRequest("locations is required");
+      throw badRequest("ไม่พบ Outbound");
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      const mergedLineMap = new Map<
-        string,
-        {
-          itemId: number;
-          locId: number;
-          locName: string;
-          pick?: number;
-        }
-      >();
+      const items = await tx.goods_out_item.findMany({
+        where: {
+          outbound_id: outbound.id,
+          deleted_at: null,
+        },
+        select: {
+          id: true,
+          qty: true,
+          pick: true,
+          confirmed_pick: true,
+        },
+      });
 
-      for (const loc of bodyLocations) {
-        const location_full_name = String(loc?.location_full_name ?? "").trim();
-
-        if (!location_full_name) continue;
-
-        const locObj = await resolveLocationByFullNameBasic(location_full_name);
-        const lines = Array.isArray(loc?.lines) ? loc.lines : [];
-
-        for (const line of lines) {
-          const itemId = Number(line?.goods_out_item_id ?? 0);
-          if (!itemId) continue;
-
-          const key = `${itemId}_${locObj.id}`;
-          const incomingPick = Math.max(
-            0,
-            Math.floor(Number((line as any)?.pick ?? 0)),
-          );
-
-          const prev = mergedLineMap.get(key);
-
-          mergedLineMap.set(key, {
-            itemId,
-            locId: Number(locObj.id),
-            locName: String(locObj.full_name ?? "").trim(),
-            pick: Math.max(Number(prev?.pick ?? 0), incomingPick),
-          });
-        }
+      if (items.length === 0) {
+        throw badRequest("ไม่พบรายการสินค้าใน Outbound");
       }
 
-      const mergedLines = Array.from(mergedLineMap.values());
-
-      if (!mergedLines.length) {
-        throw badRequest("ไม่พบรายการ location/item สำหรับ confirm");
-      }
-
-      let decremented = 0;
       let updatedItems = 0;
-      let skipped = 0;
 
-      const touchedItemIds = new Set<number>();
-
-      for (const line of mergedLines) {
-        const item: any = await tx.goods_out_item.findFirst({
-          where: {
-            id: Number(line.itemId),
-            outbound_id: Number(outbound.id),
-            deleted_at: null,
-          } as any,
-          select: {
-            id: true,
-            outbound_id: true,
-            product_id: true,
-            code: true,
-            name: true,
-            unit: true,
-            lot_id: true,
-            lot_serial: true,
-            qty: true,
-            pick: true,
-            confirmed_pick: true,
-            barcode_text: true,
-            status: true,
-          } as any,
-        });
-
-        if (!item) {
-          throw badRequest(`ไม่พบ goods_out_item id=${line.itemId}`);
-        }
-
-        touchedItemIds.add(Number(item.id));
-
-        const locationPick = await (
-          tx as any
-        ).goods_out_item_location_pick.findUnique({
-          where: {
-            goods_out_item_id_location_id: {
-              goods_out_item_id: Number(item.id),
-              location_id: Number(line.locId),
-            },
-          },
-          select: {
-            goods_out_item_id: true,
-            location_id: true,
-            qty_pick: true,
-          },
-        });
-
-        const dbPickedAtLoc = Math.max(
-          0,
-          Math.floor(Number(locationPick?.qty_pick ?? 0)),
-        );
-
-        const requestedPickFromBody = Math.max(
-          0,
-          Math.floor(Number(line.pick ?? 0)),
-        );
-
-        const pickedAtLoc =
-          requestedPickFromBody > 0 ? requestedPickFromBody : dbPickedAtLoc;
-
-        if (pickedAtLoc <= 0) {
-          skipped++;
-          continue;
-        }
-
-        const alreadyConfirmedAtLoc = await (
-          tx as any
-        ).goods_out_item_location_confirm.findFirst({
-          where: {
-            goods_out_item_id: Number(item.id),
-            location_id: Number(line.locId),
-          },
-          select: {
-            id: true,
-            confirmed_pick: true,
-          },
-        });
-
-        const confirmedAtLoc = Math.max(
-          0,
-          Math.floor(Number(alreadyConfirmedAtLoc?.confirmed_pick ?? 0)),
-        );
-
-        const unconfirmedAtLoc = Math.max(0, pickedAtLoc - confirmedAtLoc);
-
-        if (unconfirmedAtLoc <= 0) {
-          skipped++;
-          continue;
-        }
-
-        const stock = await tx.stock.findFirst({
-          where: {
-            product_id: Number(item.product_id || 0),
-            location_id: Number(line.locId),
-            lot_id: item.lot_id ?? null,
-          } as any,
-          orderBy: [{ id: "asc" }],
-        });
-
-        if (!stock) {
-          throw badRequest(
-            `ไม่พบ stock location=${line.locName}, product=${item.code}`,
-          );
-        }
-
-        const currentQty = Number(stock.quantity ?? 0);
-
-        if (currentQty < unconfirmedAtLoc) {
-          throw badRequest(
-            `stock location=${line.locName} ไม่พอ current=${currentQty}, need=${unconfirmedAtLoc}`,
-          );
-        }
-
-        await tx.stock.update({
-          where: {
-            id: Number(stock.id),
-          },
-          data: {
-            quantity: {
-              decrement: unconfirmedAtLoc,
-            },
-            updated_at: new Date(),
-          } as any,
-        });
-
-        decremented++;
-
-        const nextConfirmedAtLoc = confirmedAtLoc + unconfirmedAtLoc;
-
-        if (alreadyConfirmedAtLoc?.id) {
-          await (tx as any).goods_out_item_location_confirm.update({
-            where: {
-              id: Number(alreadyConfirmedAtLoc.id),
-            },
-            data: {
-              confirmed_pick: nextConfirmedAtLoc,
-              updated_at: new Date(),
-            },
-          });
-        } else {
-          await (tx as any).goods_out_item_location_confirm.create({
-            data: {
-              goods_out_item_id: Number(item.id),
-              location_id: Number(line.locId),
-              confirmed_pick: nextConfirmedAtLoc,
-            },
-          });
-        }
-
-        const currentConfirmedPick = Math.max(
+      for (const item of items) {
+        const qty = Math.max(0, Math.floor(Number(item.qty ?? 0)));
+        const pick = Math.max(0, Math.floor(Number(item.pick ?? 0)));
+        const confirmedPick = Math.max(
           0,
           Math.floor(Number(item.confirmed_pick ?? 0)),
         );
 
-        const nextConfirmedPick = currentConfirmedPick + unconfirmedAtLoc;
-
-        const totalPick = Math.max(0, Math.floor(Number(item.pick ?? 0)));
-        const requiredQty = Math.max(0, Math.floor(Number(item.qty ?? 0)));
-
-        const itemCompleted =
-          requiredQty > 0
-            ? nextConfirmedPick >= requiredQty
-            : nextConfirmedPick >= totalPick && totalPick > 0;
+        if (pick <= 0 || confirmedPick >= pick) {
+          continue;
+        }
 
         await tx.goods_out_item.update({
-          where: {
-            id: Number(item.id),
-          },
+          where: { id: item.id },
           data: {
-            confirmed_pick: nextConfirmedPick,
-            in_process: itemCompleted,
-            status: itemCompleted ? "completed" : "process",
-            user_pick: user_ref || null,
+            confirmed_pick: pick,
+            in_process: pick >= qty,
+            status: pick >= qty ? "completed" : "process",
+            user_pick: user_ref,
             pick_time: new Date(),
             updated_at: new Date(),
           } as any,
@@ -2925,76 +2736,75 @@ export const confirmOutboundPickToStock = asyncHandler(
         updatedItems++;
       }
 
-      const remainingNotCompleted = await tx.goods_out_item.count({
+      const notCompletedCount = await tx.goods_out_item.count({
         where: {
-          outbound_id: Number(outbound.id),
+          outbound_id: outbound.id,
           deleted_at: null,
-          OR: [{ status: { not: "completed" } }, { in_process: false }],
+          OR: [
+            { status: { not: "completed" } },
+            { in_process: false },
+          ],
         } as any,
       });
 
-      const outboundCompleted = remainingNotCompleted === 0;
+      const outboundCompleted = notCompletedCount === 0;
 
       await tx.outbound.update({
-        where: {
-          id: Number(outbound.id),
-        },
+        where: { id: outbound.id },
         data: {
           in_process: outboundCompleted,
           updated_at: new Date(),
         } as any,
       });
 
-      const batchLock = await tx.batch_outbound.findUnique({
+      await tx.batch_outbound.updateMany({
         where: {
-          outbound_id: Number(outbound.id),
+          outbound_id: outbound.id,
         },
-        select: {
-          id: true,
-          status: true,
-        },
+        data: {
+          status: outboundCompleted ? "completed" : "process",
+          released_at: outboundCompleted ? new Date() : null,
+          updated_at: new Date(),
+        } as any,
       });
-
-      if (batchLock) {
-        await tx.batch_outbound.update({
-          where: {
-            outbound_id: Number(outbound.id),
-          },
-          data: {
-            status: outboundCompleted ? "completed" : "process",
-            released_at: outboundCompleted ? new Date() : null,
-            updated_at: new Date(),
-          } as any,
-        });
-      }
 
       return {
         updatedItems,
-        decremented,
-        skipped,
-        touchedItemIds: Array.from(touchedItemIds),
         outboundCompleted,
       };
     });
 
+    // ✅ สำคัญ: ส่ง queue เปลี่ยน lot กลับ Odoo หลัง DB transaction สำเร็จ
+    // helper นี้จะจัดการ outbound_lot_adjustment, adjust_lot_log, env Odoo ให้เอง
+    const odooLotAdjustment =
+      await sendQueuedOutboundLotAdjustmentsToOdoo({
+        outbound: {
+          id: outbound.id,
+          no: outbound.no,
+        },
+        reqOriginalUrl: req.originalUrl,
+      });
+
     emitOutboundRealtime(
-      no,
+      outbound.no,
       "outbound:confirm_pick",
       {
         message: "confirm pick สำเร็จ",
-        outbound_no: no,
-        user_pick: user_ref || null,
+        outbound_no: outbound.no,
+        user_ref,
         ...result,
+        odoo_lot_adjustment: odooLotAdjustment,
       },
-      Number(outbound.id),
+      outbound.id,
     );
 
     return res.json({
       success: true,
       message: "confirm pick สำเร็จ",
-      outbound_no: no,
-      user_pick: user_ref || null,
+      outbound_no: outbound.no,
+      user_ref,
       ...result,
+      odoo_lot_adjustment: odooLotAdjustment,
     });
   },
 );
