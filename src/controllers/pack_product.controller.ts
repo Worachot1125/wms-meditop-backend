@@ -2393,6 +2393,23 @@ export const finalizePackProduct = asyncHandler(
     });
 
     await emitPackProductSocketUpdate(packProductId);
+    const outboundNos = [
+      ...new Set(
+        allItems
+          .map((x: any) => String(x.outbound_no ?? "").trim())
+          .filter(Boolean),
+      ),
+    ];
+
+    for (const outboundNo of outboundNos) {
+      io.to(`outbound:${outboundNo}`).emit("outbound:delivery_confirmed", {
+        no: outboundNo,
+        pack_product_id: packProductId,
+        pack_product_name: result.name,
+        batch_name: result.batch_name,
+        confirmed_by: userRef,
+      });
+    }
 
     return res.json({
       message: "finalize pack_product สำเร็จ",
@@ -2816,28 +2833,15 @@ export const movePdPackingToLocation = asyncHandler(
 
 export const moveRtcPackingToLocation = asyncHandler(
   async (req: Request, res: Response) => {
-    const packProductId = Number(req.params.packProductId || 0);
     const outboundNo = String(req.body?.outbound_no || "").trim();
     const locationFullName = String(req.body?.location_full_name || "").trim();
 
-    if (!packProductId) throw badRequest("packProductId is required");
     if (!outboundNo) throw badRequest("outbound_no is required");
     if (!locationFullName) throw badRequest("location_full_name is required");
 
     const location = await resolveLocationByFullNameBasic(locationFullName);
 
     const result = await prisma.$transaction(async (tx) => {
-      const packProduct = await tx.pack_product.findFirst({
-        where: {
-          id: packProductId,
-          deleted_at: null,
-        } as any,
-      });
-
-      if (!packProduct) {
-        throw badRequest(`ไม่พบ pack_product id=${packProductId}`);
-      }
-
       const outbound = await tx.outbound.findFirst({
         where: {
           no: outboundNo,
@@ -2849,19 +2853,6 @@ export const moveRtcPackingToLocation = asyncHandler(
         throw badRequest(`ไม่พบ outbound: ${outboundNo}`);
       }
 
-      const link = await tx.pack_product_outbound.findFirst({
-        where: {
-          pack_product_id: packProductId,
-          outbound_id: Number(outbound.id),
-        } as any,
-      });
-
-      if (!link) {
-        throw badRequest(
-          `outbound ${outboundNo} ไม่ได้อยู่ใน pack_product นี้`,
-        );
-      }
-
       const items = await tx.goods_out_item.findMany({
         where: {
           outbound_id: Number(outbound.id),
@@ -2871,7 +2862,7 @@ export const moveRtcPackingToLocation = asyncHandler(
       });
 
       if (!items.length) {
-        throw badRequest("ไม่พบสินค้าใน outbound สำหรับ RTC packing");
+        throw badRequest("ไม่พบสินค้าใน outbound สำหรับ RTC/BOR packing");
       }
 
       const moved: any[] = [];
@@ -2883,23 +2874,24 @@ export const moveRtcPackingToLocation = asyncHandler(
         }
 
         const rtcQty = Math.max(0, Math.floor(Number(item.rtc ?? 0)));
+        const borQty = Math.max(0, Math.floor(Number(item.bor ?? 0)));
+        const returnQty = Math.max(0, Math.floor(Number(item.return ?? 0)));
         const packQty = Math.max(0, Math.floor(Number(item.pack ?? 0)));
         const pickQty = Math.max(0, Math.floor(Number(item.pick ?? 0)));
         const baseQty = Math.max(0, Math.floor(Number(item.qty ?? 0)));
 
-        /**
-         * RTC during packing:
-         * - Prefer rtc qty.
-         * - Fallback to pack/pick/qty for safety.
-         */
         const moveQty =
           rtcQty > 0
             ? rtcQty
-            : packQty > 0
-              ? packQty
-              : pickQty > 0
-                ? pickQty
-                : baseQty;
+            : borQty > 0
+              ? borQty
+              : returnQty > 0
+                ? returnQty
+                : packQty > 0
+                  ? packQty
+                  : pickQty > 0
+                    ? pickQty
+                    : baseQty;
 
         if (moveQty <= 0) continue;
 
@@ -2972,16 +2964,22 @@ export const moveRtcPackingToLocation = asyncHandler(
           lot_serial: item.lot_serial,
           qty: moveQty,
           rtc_qty: rtcQty,
+          bor_qty: borQty,
+          return_qty: returnQty,
           pack_qty: packQty,
           pick_qty: pickQty,
           used_qty_source:
             rtcQty > 0
               ? "rtc"
-              : packQty > 0
-                ? "pack"
-                : pickQty > 0
-                  ? "pick"
-                  : "qty",
+              : borQty > 0
+                ? "bor"
+                : returnQty > 0
+                  ? "return"
+                  : packQty > 0
+                    ? "pack"
+                    : pickQty > 0
+                      ? "pick"
+                      : "qty",
           location_id: Number(location.id),
           location_full_name: location.full_name,
           lot_name: fallback.lot_name,
@@ -2990,13 +2988,9 @@ export const moveRtcPackingToLocation = asyncHandler(
       }
 
       if (!moved.length) {
-        throw badRequest("ไม่พบจำนวนสินค้าที่สามารถย้าย RTC ไป Location");
+        throw badRequest("ไม่พบจำนวนสินค้าที่สามารถย้าย RTC/BOR ไป Location");
       }
 
-      /**
-       * Delete real tables / relation tables.
-       * These tables do not use deleted_at.
-       */
       if (itemIds.length > 0) {
         await tx.goods_out_item_location_pick.deleteMany({
           where: {
@@ -3026,20 +3020,16 @@ export const moveRtcPackingToLocation = asyncHandler(
       const deletedPackProductOutbound =
         await tx.pack_product_outbound.deleteMany({
           where: {
-            pack_product_id: Number(packProductId),
             outbound_id: Number(outbound.id),
           } as any,
         });
 
-      /**
-       * Soft delete goods_out_item and outbound.
-       */
       await tx.goods_out_item.updateMany({
         where: {
           id: { in: itemIds },
         } as any,
         data: {
-          rtc_check: true,
+          rtc_check: false,
           deleted_at: new Date(),
           updated_at: new Date(),
         } as any,
@@ -3055,54 +3045,13 @@ export const moveRtcPackingToLocation = asyncHandler(
         } as any,
       });
 
-      /**
-       * Soft delete pack_product only when no outbound link remains.
-       */
-      const remainingPackLinks = await tx.pack_product_outbound.count({
-        where: {
-          pack_product_id: Number(packProductId),
-        } as any,
-      });
-
-      const isLastOutboundInPack = remainingPackLinks === 0;
-
-      let packProductAction: "keep" | "soft_delete" = "keep";
-
-      if (isLastOutboundInPack) {
-        await tx.pack_product.update({
-          where: {
-            id: packProductId,
-          },
-          data: {
-            deleted_at: new Date(),
-            updated_at: new Date(),
-          } as any,
-        });
-
-        packProductAction = "soft_delete";
-      } else {
-        await tx.pack_product.update({
-          where: {
-            id: packProductId,
-          },
-          data: {
-            updated_at: new Date(),
-          } as any,
-        });
-      }
-
       return {
-        pack_product_id: packProductId,
-        pack_product_name: packProduct.name,
-        pack_product_action: packProductAction,
-        remaining_pack_outbounds: remainingPackLinks,
         outbound_id: Number(outbound.id),
         outbound_no: outbound.no,
+        out_type: outbound.out_type,
         location_id: Number(location.id),
         location_full_name: location.full_name,
-        is_last_outbound_in_pack: isLastOutboundInPack,
-        deleted_pack_product_outbound_count:
-          deletedPackProductOutbound.count,
+        deleted_pack_product_outbound_count: deletedPackProductOutbound.count,
         moved,
         deleted: {
           batch_outbound: true,
@@ -3114,24 +3063,19 @@ export const moveRtcPackingToLocation = asyncHandler(
         soft_deleted: {
           outbound: true,
           goods_out_item: true,
-          pack_product: packProductAction === "soft_delete",
         },
       };
     });
 
-    io.to(`pack_product:${packProductId}`).emit("pack_product:updated", {
-      pack_product_id: packProductId,
-      reason: "rtc_move_to_location",
-      data: result,
+    io.emit("packing:rtc_bor_moved", {
+      ...result,
+      message: "ย้ายสินค้า RTC/BOR ไป Location และลบ Packing Flow สำเร็จ",
     });
-
-    io.emit("packing:rtc_moved", result);
 
     return res.json({
       success: true,
-      message: "ย้ายสินค้า RTC ไป Location และลบ Packing Flow สำเร็จ",
+      message: "ย้ายสินค้า RTC/BOR ไป Location และลบ Packing Flow สำเร็จ",
       data: result,
     });
   },
 );
-

@@ -2348,7 +2348,7 @@ const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
       item.expired_date ??
       item.expiry_date ??
       (item.product_id != null && item.lot_id != null
-        ? wmsExpMap.get(productLotKey) ?? null
+        ? (wmsExpMap.get(productLotKey) ?? null)
         : null);
 
     const key = buildAdjustLocationKey({
@@ -2504,7 +2504,7 @@ const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
       return {
         ...item,
         zone_type: zoneType,
-        location_names: key ? stockMap.get(key) ?? [] : [],
+        location_names: key ? (stockMap.get(key) ?? []) : [],
         confirmed_locations: confirmMap.get(itemId) ?? [],
       };
     });
@@ -2525,29 +2525,62 @@ const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
 export const listCombinedAdjustments = asyncHandler(
   async (req: Request, res: Response) => {
     const page = Math.max(1, Number(req.query.page ?? 1));
-    const limit = Math.max(1, Number(req.query.limit ?? 20));
-    const skip = (page - 1) * limit;
+
+    const rawLimit = req.query.limit ?? req.query.pageSize ?? 20;
+    const limit = Math.min(300, Math.max(1, Number(rawLimit)));
 
     const search = String(req.query.search ?? "").trim();
-    const status = String(req.query.status ?? "").trim();
 
-    const where: any = {
+    const statusCsv = String(req.query.status ?? "").trim();
+    const statuses = statusCsv
+      ? statusCsv
+          .split(",")
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean)
+      : [];
+
+    const allowedStatuses = ["pending", "completed"] as const;
+
+    if (
+      statuses.length > 0 &&
+      statuses.some(
+        (s) => !allowedStatuses.includes(s as (typeof allowedStatuses)[number]),
+      )
+    ) {
+      throw badRequest("status ต้องเป็น pending หรือ completed");
+    }
+
+    const mode = String(req.query.level ?? req.query.mode ?? "")
+      .trim()
+      .toLowerCase();
+
+    const allowedModes = ["manual", "auto"] as const;
+
+    if (mode && !allowedModes.includes(mode as (typeof allowedModes)[number])) {
+      throw badRequest("level ต้องเป็น manual หรือ auto");
+    }
+
+    const selectedAdjustmentColumns = parseAdjustmentSearchColumns(
+      req.query.columns,
+    );
+
+    const selectedOutboundColumns = parseSpecialOutboundSearchColumns(
+      req.query.columns,
+    );
+
+    const adjustmentWhere: any = {
       deleted_at: null,
-      ...(status ? { status } : {}),
-      ...(search
-        ? {
-            OR: [
-              { no: { contains: search, mode: "insensitive" } },
-              { remark: { contains: search, mode: "insensitive" } },
-            ],
-          }
-        : {}),
+      ...buildAdjustmentSearchWhere(search, selectedAdjustmentColumns),
     };
 
-    const [total, rows] = await Promise.all([
-      prisma.adjustment.count({ where }),
+    const outboundWhere = buildSpecialOutboundSearchWhere(
+      search,
+      selectedOutboundColumns,
+    );
+
+    const [adjustmentRowsRaw, outboundRows] = await Promise.all([
       prisma.adjustment.findMany({
-        where,
+        where: adjustmentWhere,
         include: {
           items: {
             where: {
@@ -2556,13 +2589,245 @@ export const listCombinedAdjustments = asyncHandler(
             orderBy: [{ id: "asc" }],
           },
         },
-        orderBy: [{ created_at: "desc" }],
-        skip,
-        take: limit,
+        orderBy: [{ created_at: "desc" }, { id: "desc" }],
+      }),
+
+      prisma.outbound.findMany({
+        where: outboundWhere,
+        include: {
+          goods_outs: {
+            where: { deleted_at: null },
+            include: {
+              barcode_ref: { where: { deleted_at: null } },
+            },
+            orderBy: [{ sequence: "asc" }, { id: "asc" }],
+          },
+        },
+        orderBy: [{ created_at: "desc" }, { id: "desc" }],
       }),
     ]);
 
-    const data = await attachAdjustmentLocations(rows);
+    const adjustmentRows = await attachAdjustmentLocations(adjustmentRowsRaw);
+
+    const deptShortMapAdjust = await buildDepartmentShortNameMapFromAdjustments(
+      adjustmentRows as any,
+    );
+
+    const formattedAdjustments = adjustmentRows
+      .filter((r: any) => !hasSVInNo(r.no))
+      .map((r: any) => {
+        let department = r.department;
+
+        const deptId = Number(r.department_id);
+        if (Number.isFinite(deptId)) {
+          const short = deptShortMapAdjust.get(deptId);
+          if (short) department = short;
+        }
+
+        const isSystemGenerated = Boolean(r.is_system_generated);
+        const adjustmentMode = isSystemGenerated ? "auto" : "manual";
+
+        return {
+          ...r,
+          department,
+          source: "adjust",
+
+          mode: adjustmentMode,
+          adjustment_level: r.level ?? null,
+          is_system_generated: isSystemGenerated,
+
+          status: String(r.status ?? "").toLowerCase(),
+          type: r.type ?? null,
+          out_type: null,
+          date: r.date ?? r.created_at,
+        };
+      });
+
+    const deptShortMap = await buildDepartmentShortNameMapFromOutbounds(
+      outboundRows as any,
+    );
+
+    const formattedOutbounds = await Promise.all(
+      outboundRows.map(async (outbound: any) => {
+        const formatted: any = formatOdooOutbound(outbound);
+
+        const shortName = resolveDepartmentShortNameForOutbound(
+          deptShortMap,
+          outbound,
+        );
+
+        if (shortName) formatted.department = shortName;
+
+        const itemsKey = (outbound.goods_outs || []).map((it: any) => ({
+          product_id: it.product_id,
+          lot_serial: it.lot_serial,
+          lot_name: it.lot_serial,
+        }));
+
+        const inputMap = await buildInputNumberMapFromItems(itemsKey);
+
+        const lockNoMap = await buildLockNoMapFromItems(
+          itemsKey.map((x: any) => ({
+            product_id: x.product_id,
+            lot_name: x.lot_name,
+          })),
+        );
+
+        formatted.items = (outbound.goods_outs || []).map((gi: any) => {
+          const lockLocations = resolveLockLocationsFromMap(
+            lockNoMap,
+            gi.product_id,
+            gi.lot_serial,
+          );
+
+          return {
+            id: gi.id,
+            outbound_id: gi.outbound_id,
+            sequence: gi.sequence,
+            product_id: gi.product_id,
+            code: gi.code,
+            name: gi.name,
+            unit: gi.unit,
+            tracking: gi.tracking,
+            lot_id: gi.lot_id,
+            lot_serial: gi.lot_serial,
+            qty: gi.qty,
+            pick: gi.pick,
+            pack: gi.pack,
+            status: gi.status,
+            barcode_id: gi.barcode_id,
+            user_pick: gi.user_pick,
+            user_pack: gi.user_pack,
+            barcode_text: gi.barcode_text ?? null,
+
+            input_number: resolveInputNumberFromMap(
+              inputMap,
+              gi.product_id,
+              gi.lot_serial,
+            ),
+
+            lock_no: lockLocations.map(
+              (x: any) => `${x.location_name} (จำนวน ${x.qty})`,
+            ),
+            lock_locations: lockLocations,
+
+            barcode: gi.barcode_ref
+              ? {
+                  barcode: gi.barcode_ref.barcode,
+                  lot_start: gi.barcode_ref.lot_start,
+                  lot_stop: gi.barcode_ref.lot_stop,
+                  exp_start: gi.barcode_ref.exp_start,
+                  exp_stop: gi.barcode_ref.exp_stop,
+                  barcode_length: gi.barcode_ref.barcode_length,
+                }
+              : null,
+
+            boxes:
+              gi.boxes
+                ?.filter((ib: any) => !ib.deleted_at)
+                .map((ib: any) => ({
+                  id: ib.box.id,
+                  box_code: ib.box.box_code,
+                  box_name: ib.box.box_name,
+                  quantity: ib.quantity ?? null,
+                })) ?? [],
+          };
+        });
+
+        const resolvedType = resolveReportTypeFromNo(
+          formatted.no,
+          formatted.out_type ?? null,
+        );
+
+        return {
+          ...formatted,
+          source: "outbound",
+
+          mode: "auto",
+          is_system_generated: true,
+          status: "completed",
+          in_process: outbound.in_process,
+
+          type: resolvedType,
+          out_type: resolvedType,
+          date: formatted.date ?? formatted.created_at ?? outbound.created_at,
+        };
+      }),
+    );
+
+    const getCombinedMode = (row: any): "manual" | "auto" | "" => {
+      if (row.source === "adjust") {
+        return row.is_system_generated === true ? "auto" : "manual";
+      }
+
+      if (row.source === "outbound") {
+        return "auto";
+      }
+
+      return "";
+    };
+
+    const getCombinedStatus = (row: any): "pending" | "completed" | "" => {
+      if (row.source === "adjust") {
+        const st = String(row.status ?? "").toLowerCase();
+        if (st === "completed") return "completed";
+        return "pending";
+      }
+
+      if (row.source === "outbound") {
+        return "completed";
+      }
+
+      return "";
+    };
+
+    let mergedAll = [...formattedAdjustments, ...formattedOutbounds];
+
+    if (mode) {
+      mergedAll = mergedAll.filter((row: any) => getCombinedMode(row) === mode);
+    }
+
+    const statusCounts = {
+      manual: {
+        pending: 0,
+        completed: 0,
+      },
+      auto: {
+        pending: 0,
+        completed: 0,
+      },
+    };
+
+    mergedAll.forEach((row: any) => {
+      const currentMode = getCombinedMode(row);
+      const currentStatus = getCombinedStatus(row);
+
+      if (!currentMode || !currentStatus) return;
+
+      statusCounts[currentMode][currentStatus]++;
+    });
+
+    let merged = mergedAll;
+
+    if (statuses.length) {
+      merged = merged.filter((row: any) =>
+        statuses.includes(getCombinedStatus(row)),
+      );
+    }
+
+    merged.sort((a: any, b: any) => {
+      const da = new Date(a?.date ?? a?.created_at ?? 0).getTime();
+      const db = new Date(b?.date ?? b?.created_at ?? 0).getTime();
+
+      if (db !== da) return db - da;
+
+      return Number(b?.id ?? 0) - Number(a?.id ?? 0);
+    });
+
+    const total = merged.length;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const start = (page - 1) * limit;
+    const data = merged.slice(start, start + limit);
 
     return res.json({
       data,
@@ -2570,7 +2835,9 @@ export const listCombinedAdjustments = asyncHandler(
         page,
         limit,
         total,
-        total_page: Math.ceil(total / limit),
+        total_page: totalPages,
+        totalPages,
+        statusCounts,
       },
     });
   },
@@ -3403,6 +3670,17 @@ export const confirmAdjustmentByLocation = asyncHandler(
       adj.id,
     );
 
+    emitAdjustmentRealtime(
+      no,
+      "adjustment:confirmed",
+      {
+        no,
+        confirmed_by: req.body?.user_ref ?? null,
+        confirmed: result,
+      },
+      adj.id,
+    );
+
     return res.json({
       success: true,
       no,
@@ -3547,34 +3825,6 @@ export const confirmAdjustmentCompleteByNo = asyncHandler(
 /** =========================================================
  * Helpers: รองรับ payload จาก FE (transfers) + ของเดิม (impact_lines)
  * ========================================================= */
-
-function normalizeTransfersPayload(body: any) {
-  const transfers = Array.isArray(body?.transfers) ? body.transfers : [];
-  if (transfers.length === 0) return [];
-
-  // ส่วนใหญ่ FE ส่ง 1 transfer ต่อ 1 complete
-  const t0 = transfers[0] ?? {};
-  const items = Array.isArray(t0?.items) ? t0.items : [];
-
-  return items
-    .map((it: any) => ({
-      // FE payload ตามรูป
-      product_id: it?.product_id ?? null,
-      sequence: it?.sequence ?? null,
-
-      lot_serial: it?.lot_serial ?? null,
-      expire_date: it?.expire_date ?? null,
-
-      qty_pick: it?.qty_pick ?? it?.qty ?? 0,
-
-      // location_dest ต้องมาจาก item เป็นหลัก (ถ้ามี) ไม่งั้น fallback จาก transfer
-      location_dest: it?.location_dest ?? t0?.location_dest ?? null,
-
-      // barcode list ตามรูป: [{ barcode_id, barcode }]
-      barcodes: Array.isArray(it?.barcodes) ? it.barcodes : [],
-    }))
-    .filter((x: any) => Number(parseIntSafe(x.qty_pick, 0)) > 0);
-}
 
 function normalizeLot(v: unknown): string {
   return String(v ?? "")

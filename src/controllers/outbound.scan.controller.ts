@@ -751,12 +751,13 @@ export const scanOutboundPick = asyncHandler(
     );
 
     let addQty = 1;
-    if (inputNumber) {
-      const q = req.body.qty_input;
-      if (q == null || !Number.isFinite(q) || Number(q) <= 0) {
-        throw badRequest("ต้องกรอก qty_input");
-      }
+
+    const q = req.body.qty_input;
+
+    if (q != null && Number.isFinite(Number(q)) && Number(q) > 0) {
       addQty = Math.floor(Number(q));
+    } else if (inputNumber) {
+      throw badRequest("ต้องกรอก qty_input");
     }
 
     const saved = await prisma.$transaction(async (tx) => {
@@ -2697,6 +2698,9 @@ export const confirmOutboundPickToStock = asyncHandler(
         },
         select: {
           id: true,
+          product_id: true,
+          lot_id: true,
+          lot_serial: true,
           qty: true,
           pick: true,
           confirmed_pick: true,
@@ -2708,6 +2712,7 @@ export const confirmOutboundPickToStock = asyncHandler(
       }
 
       let updatedItems = 0;
+      let stockUpdated = 0;
 
       for (const item of items) {
         const qty = Math.max(0, Math.floor(Number(item.qty ?? 0)));
@@ -2719,6 +2724,111 @@ export const confirmOutboundPickToStock = asyncHandler(
 
         if (pick <= 0 || confirmedPick >= pick) {
           continue;
+        }
+
+        const qtyToConfirm = pick - confirmedPick;
+
+        const pickRows = await tx.goods_out_item_location_pick.findMany({
+          where: {
+            goods_out_item_id: item.id,
+          },
+          include: {
+            location: {
+              select: {
+                id: true,
+                full_name: true,
+              },
+            },
+          },
+          orderBy: {
+            id: "asc",
+          },
+        });
+
+        if (pickRows.length === 0) {
+          throw badRequest(
+            `ไม่พบ location pick สำหรับตัด stock (item_id=${item.id})`,
+          );
+        }
+
+        let remainToCut = qtyToConfirm;
+
+        for (const pickRow of pickRows as any[]) {
+          if (remainToCut <= 0) break;
+
+          const locationName = String(
+            pickRow.location?.full_name ??
+              pickRow.location_name ??
+              pickRow.full_name ??
+              "",
+          ).trim();
+
+          if (!locationName) {
+            continue;
+          }
+
+          const stockWhere: any = {
+            active: true,
+            product_id: item.product_id,
+            location_name: locationName,
+            quantity: {
+              gt: 0,
+            },
+          };
+
+          if (item.lot_id != null) {
+            stockWhere.lot_id = item.lot_id;
+          } else if (item.lot_serial) {
+            stockWhere.lot_name = item.lot_serial;
+          }
+
+          const stockRows = await tx.stock.findMany({
+            where: stockWhere,
+            orderBy: {
+              quantity: "desc",
+            },
+            select: {
+              id: true,
+              bucket_key: true,
+              quantity: true,
+              product_id: true,
+              lot_id: true,
+              lot_name: true,
+              expiration_date: true,
+              location_id: true,
+              location_name: true,
+            },
+          });
+
+          for (const stock of stockRows as any[]) {
+            if (remainToCut <= 0) break;
+
+            const stockQty = Number(stock.quantity ?? 0);
+            if (stockQty <= 0) continue;
+
+            const cutQty = Math.min(remainToCut, stockQty);
+
+            await tx.stock.update({
+              where: {
+                bucket_key: stock.bucket_key,
+              },
+              data: {
+                quantity: {
+                  decrement: cutQty,
+                },
+                updated_at: new Date(),
+              },
+            });
+
+            remainToCut -= cutQty;
+            stockUpdated++;
+          }
+        }
+
+        if (remainToCut > 0) {
+          throw badRequest(
+            `stock ไม่พอสำหรับตัดออก (item_id=${item.id}, product_id=${item.product_id}, lot_id=${item.lot_id ?? "-"}, lot=${item.lot_serial ?? "-"}, ต้องตัด=${qtyToConfirm}, ขาด=${remainToCut})`,
+          );
         }
 
         await tx.goods_out_item.update({
@@ -2740,10 +2850,7 @@ export const confirmOutboundPickToStock = asyncHandler(
         where: {
           outbound_id: outbound.id,
           deleted_at: null,
-          OR: [
-            { status: { not: "completed" } },
-            { in_process: false },
-          ],
+          OR: [{ status: { not: "completed" } }, { in_process: false }],
         } as any,
       });
 
@@ -2770,20 +2877,18 @@ export const confirmOutboundPickToStock = asyncHandler(
 
       return {
         updatedItems,
+        stockUpdated,
         outboundCompleted,
       };
     });
 
-    // ✅ สำคัญ: ส่ง queue เปลี่ยน lot กลับ Odoo หลัง DB transaction สำเร็จ
-    // helper นี้จะจัดการ outbound_lot_adjustment, adjust_lot_log, env Odoo ให้เอง
-    const odooLotAdjustment =
-      await sendQueuedOutboundLotAdjustmentsToOdoo({
-        outbound: {
-          id: outbound.id,
-          no: outbound.no,
-        },
-        reqOriginalUrl: req.originalUrl,
-      });
+    const odooLotAdjustment = await sendQueuedOutboundLotAdjustmentsToOdoo({
+      outbound: {
+        id: outbound.id,
+        no: outbound.no,
+      },
+      reqOriginalUrl: req.originalUrl,
+    });
 
     emitOutboundRealtime(
       outbound.no,
@@ -2794,6 +2899,19 @@ export const confirmOutboundPickToStock = asyncHandler(
         user_ref,
         ...result,
         odoo_lot_adjustment: odooLotAdjustment,
+      },
+      outbound.id,
+    );
+
+    emitOutboundRealtime(
+      outbound.no,
+      "outbound:confirmed",
+      {
+        message: "Outbound นี้ถูกยืนยันแล้ว",
+        outbound_no: outbound.no,
+        confirmed_by: user_ref,
+        user_ref,
+        ...result,
       },
       outbound.id,
     );

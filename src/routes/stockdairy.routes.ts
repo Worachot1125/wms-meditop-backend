@@ -1,5 +1,6 @@
 import { Router } from "express";
 import {
+  createWmsDailySnapshotManual,
   getWmsStockDailyAll,
   getWmsStockDailyPaginated,
   getWmsStockDailyById,
@@ -9,6 +10,7 @@ import {
 
 const router = Router();
 
+router.post("/sync", createWmsDailySnapshotManual);
 router.get("/getAll", getWmsStockDailyAll);
 router.get("/get", getWmsStockDailyPaginated);
 router.get("/getAll/history", getTransactionReport)

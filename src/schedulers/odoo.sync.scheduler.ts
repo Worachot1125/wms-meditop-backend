@@ -115,7 +115,7 @@ export function initializeScheduler() {
 
   // ✅ Daily report snapshot (stocks -> wms_stock_daily) - every hour at minute 03
   cron.schedule(
-    "3 * * * *",
+    "*/20 * * * *",
     async () => {
       logger.info(
         "Starting hourly WMS DAILY report snapshot (stocks -> wms_stock_daily)...",

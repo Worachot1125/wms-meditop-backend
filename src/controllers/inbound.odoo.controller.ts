@@ -395,10 +395,12 @@ export const getOdooInboundByNo = asyncHandler(
     const rawNo = Array.isArray(req.params.no)
       ? req.params.no[0]
       : req.params.no;
+
     if (!rawNo) throw badRequest("กรุณาระบุเลข no");
+
     const no = decodeURIComponent(rawNo);
 
-    const inbound = await prisma.inbound.findUnique({
+    const inboundRaw = await prisma.inbound.findUnique({
       where: { no },
       include: {
         goods_ins: {
@@ -423,52 +425,170 @@ export const getOdooInboundByNo = asyncHandler(
       },
     });
 
+    const inbound = inboundRaw as any;
+
     if (!inbound) throw notFound(`ไม่พบ Inbound no: ${no}`);
     if (inbound.deleted_at) throw badRequest("Inbound นี้ถูกลบไปแล้ว");
 
     let departmentShortName: string | undefined;
+
     if (inbound.department_id) {
       const deptId = parseInt(inbound.department_id, 10);
+
       if (!isNaN(deptId)) {
         const dept = await prisma.department.findFirst({
           where: { odoo_id: deptId },
           select: { short_name: true },
         });
+
         departmentShortName = dept?.short_name;
       }
     }
 
-    const goodsList =
-      inbound.goods_ins
-        ?.filter((gi) => gi.product_id != null)
-        .map((gi) => ({
-          product_id: gi.product_id!,
-          lot_id: gi.lot_id ?? null,
-          lot_text: resolveLotText({
-            lot_serial: gi.lot_serial,
-            lot: gi.lot,
-          }),
-        })) || [];
+    const goodsIns = Array.isArray(inbound.goods_ins) ? inbound.goods_ins : [];
+
+    const goodsList = goodsIns
+      .filter((gi: any) => gi.product_id != null)
+      .map((gi: any) => ({
+        product_id: gi.product_id,
+        lot_id: gi.lot_id ?? null,
+        lot_text: resolveLotText({
+          lot_serial: gi.lot_serial,
+          lot: gi.lot,
+        }),
+      }));
 
     const inputNumberMap = await buildInputNumberMapByLotText(goodsList);
 
     const zoneTypeMap = await buildZoneTypeMapByProductId(
-      (inbound.goods_ins || []).map((gi) => ({
+      goodsIns.map((gi: any) => ({
         product_id: gi.product_id,
       })),
     );
 
-    const { map: barcodeMap } = await attachBarcodeByText(
-      inbound.goods_ins as any,
+    const productIds: number[] = Array.from(
+      new Set<number>(
+        goodsIns
+          .map((gi: any) => Number(gi.product_id))
+          .filter((x: number) => Number.isFinite(x)),
+      ),
     );
+
+    const stockRows =
+      productIds.length > 0
+        ? await prisma.stock.findMany({
+            where: {
+              active: true,
+              quantity: {
+                gt: 0,
+              },
+              product_id: {
+                in: productIds,
+              },
+            },
+            select: {
+              product_id: true,
+              lot_id: true,
+              lot_name: true,
+              expiration_date: true,
+              quantity: true,
+              location_id: true,
+              location_name: true,
+            },
+          })
+        : [];
+
+    const normText = (v: any) =>
+      String(v ?? "")
+        .trim()
+        .toLowerCase();
+
+    const normDate = (v: any) => {
+      if (!v) return "";
+
+      const d = new Date(v);
+
+      if (Number.isNaN(d.getTime())) {
+        return String(v).slice(0, 10);
+      }
+
+      return d.toISOString().slice(0, 10);
+    };
+
+    const sameInboundStock = (gi: any, st: any) => {
+      if (gi.product_id == null || st.product_id == null) return false;
+      if (Number(gi.product_id) !== Number(st.product_id)) return false;
+
+      const giLotId = gi.lot_id ?? null;
+      const stLotId = st.lot_id ?? null;
+
+      if (giLotId != null && stLotId != null) {
+        if (Number(giLotId) !== Number(stLotId)) return false;
+      } else {
+        const giLot = normText(gi.lot_serial ?? gi.lot);
+        const stLot = normText(st.lot_name);
+
+        if (giLot || stLot) {
+          if (giLot !== stLot) return false;
+        }
+      }
+
+      const giExp = normDate(gi.exp);
+      const stExp = normDate(st.expiration_date);
+
+      if (giExp || stExp) {
+        if (giExp !== stExp) return false;
+      }
+
+      return true;
+    };
+
+    const buildInboundLockLocations = (gi: any) => {
+      const map = new Map<
+        string,
+        {
+          location_id: number | null;
+          location_name: string | null;
+          qty: number;
+        }
+      >();
+
+      for (const st of stockRows as any[]) {
+        if (!sameInboundStock(gi, st)) continue;
+
+        const key = `${st.location_id ?? "null"}|${st.location_name ?? ""}`;
+        const qty = Number(st.quantity ?? 0);
+
+        const old = map.get(key);
+
+        if (old) {
+          old.qty += qty;
+        } else {
+          map.set(key, {
+            location_id: st.location_id ?? null,
+            location_name: st.location_name ?? null,
+            qty,
+          });
+        }
+      }
+
+      return Array.from(map.values()).sort((a, b) =>
+        String(a.location_name ?? "").localeCompare(
+          String(b.location_name ?? ""),
+        ),
+      );
+    };
+
+    const { map: barcodeMap } = await attachBarcodeByText(goodsIns as any);
 
     const formattedInbound = formatOdooInbound(inbound as any);
 
     return res.json({
       ...formattedInbound,
-      invoice: (inbound as any).invoice ?? null,
+      invoice: inbound.invoice ?? null,
       department: departmentShortName ?? formattedInbound.department,
-      items: (inbound.goods_ins || []).map((gi: any) => {
+
+      items: goodsIns.map((gi: any) => {
         const input_number = resolveInputNumber(
           inputNumberMap,
           gi.product_id,
@@ -490,6 +610,7 @@ export const getOdooInboundByNo = asyncHandler(
             id: cf.id,
             location_id: cf.location_id,
             confirmed_qty: cf.confirmed_qty ?? 0,
+            qty: cf.confirmed_qty ?? 0,
             created_at: cf.created_at,
             updated_at: cf.updated_at,
             location: cf.location
@@ -502,6 +623,12 @@ export const getOdooInboundByNo = asyncHandler(
               : null,
             location_name: cf.location?.full_name ?? null,
           }),
+        );
+
+        const lock_locations = buildInboundLockLocations(gi);
+
+        const lock_no = lock_locations.map(
+          (x) => `${x.location_name ?? "-"} (จำนวน ${x.qty})`,
         );
 
         return {
@@ -527,6 +654,12 @@ export const getOdooInboundByNo = asyncHandler(
 
           receive_locations,
           location_confirms: receive_locations,
+
+          lock_no,
+          lock_locations,
+
+          location_name: lock_no,
+          locations: lock_locations,
 
           odoo_line_key: gi.odoo_line_key,
           odoo_sequence: gi.odoo_sequence,

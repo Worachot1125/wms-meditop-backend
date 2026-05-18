@@ -1547,9 +1547,7 @@ export const scanTransferMovementLocation = asyncHandler(
     );
 
     if (validLocations.length === 0) {
-      throw badRequest(
-        `ไม่พบรายการในเอกสาร ${no} ที่ตรงกับ location ที่ส่งมา`,
-      );
+      throw badRequest(`ไม่พบรายการในเอกสาร ${no} ที่ตรงกับ location ที่ส่งมา`);
     }
 
     await prisma.$transaction(async (tx) => {
@@ -1579,8 +1577,6 @@ export const scanTransferMovementLocation = asyncHandler(
     return res.json(payload);
   },
 );
-
-
 
 // POST /api/transfer_movements/:no/scan/location/put
 export const scanTransferMovementPutLocation = asyncHandler(
@@ -1695,7 +1691,6 @@ export const scanTransferMovementNcrLocation = asyncHandler(
     });
   },
 );
-
 
 // POST /api/transfer_movements/:no/scan/barcode
 export const scanTransferMovementBarcode = asyncHandler(
@@ -1838,63 +1833,63 @@ export const scanTransferMovementBarcode = asyncHandler(
       };
 
       if (liveStatus !== "put") {
-  const currentPick = Math.max(
-    0,
-    Math.floor(Number(freshItem.qty_pick ?? 0)),
-  );
+        const currentPick = Math.max(
+          0,
+          Math.floor(Number(freshItem.qty_pick ?? 0)),
+        );
 
-  const nextPick = calcNext(currentPick);
-  const deltaPick = nextPick - currentPick;
+        const nextPick = calcNext(currentPick);
+        const deltaPick = nextPick - currentPick;
 
-  const updatedItem = await tx.transfer_movement_item.update({
-    where: { id: freshItem.id },
-    data: {
-      qty_pick: nextPick,
-      updated_at: new Date(),
-    },
-  });
-
-  if (deltaPick !== 0) {
-    const existingPick =
-      await tx.transfer_movement_item_location_pick_confirm.upsert({
-        where: {
-          uniq_mm_pick_location: {
-            transfer_movement_item_id: freshItem.id,
-            location_id: loc.id,
+        const updatedItem = await tx.transfer_movement_item.update({
+          where: { id: freshItem.id },
+          data: {
+            qty_pick: nextPick,
+            updated_at: new Date(),
           },
-        },
-        create: {
-          transfer_movement_item_id: freshItem.id,
-          location_id: loc.id,
-          confirmed_pick: 0,
-        },
-        update: {},
-      });
+        });
 
-    const currentPickAtLoc = Math.max(
-      0,
-      Math.floor(Number(existingPick.confirmed_pick ?? 0)),
-    );
+        if (deltaPick !== 0) {
+          const existingPick =
+            await tx.transfer_movement_item_location_pick_confirm.upsert({
+              where: {
+                uniq_mm_pick_location: {
+                  transfer_movement_item_id: freshItem.id,
+                  location_id: loc.id,
+                },
+              },
+              create: {
+                transfer_movement_item_id: freshItem.id,
+                location_id: loc.id,
+                confirmed_pick: 0,
+              },
+              update: {},
+            });
 
-    const nextPickAtLoc = Math.max(0, currentPickAtLoc + deltaPick);
+          const currentPickAtLoc = Math.max(
+            0,
+            Math.floor(Number(existingPick.confirmed_pick ?? 0)),
+          );
 
-    await tx.transfer_movement_item_location_pick_confirm.update({
-      where: { id: existingPick.id },
-      data: {
-        confirmed_pick: nextPickAtLoc,
-        updated_at: new Date(),
-      },
-    });
-  }
+          const nextPickAtLoc = Math.max(0, currentPickAtLoc + deltaPick);
 
-  return {
-    stage: "pick" as const,
-    updatedItem,
-    confirmedAtLocation: null as number | null,
-    putLocations: [] as any[],
-    totalPut: null as number | null,
-  };
-}
+          await tx.transfer_movement_item_location_pick_confirm.update({
+            where: { id: existingPick.id },
+            data: {
+              confirmed_pick: nextPickAtLoc,
+              updated_at: new Date(),
+            },
+          });
+        }
+
+        return {
+          stage: "pick" as const,
+          updatedItem,
+          confirmedAtLocation: null as number | null,
+          putLocations: [] as any[],
+          totalPut: null as number | null,
+        };
+      }
 
       const existing =
         await tx.transfer_movement_item_location_put_confirm.upsert({
@@ -2077,9 +2072,8 @@ async function resolveMovementLotFromWmsTx(
       matched?.lot_id != null && Number.isFinite(Number(matched.lot_id))
         ? Number(matched.lot_id)
         : null,
-    lot_name: matched?.lot_name != null
-      ? String(matched.lot_name)
-      : lotName || null,
+    lot_name:
+      matched?.lot_name != null ? String(matched.lot_name) : lotName || null,
     expiration_date:
       toSafeDateOrNull(matched?.expiration_date) ?? expDate ?? null,
   };
@@ -2259,6 +2253,18 @@ export const confirmTransferMovementPick = asyncHandler(
       };
     });
 
+    const user_ref =
+      String(
+        (req.body as any)?.user_ref ?? (req.body as any)?.confirmed_by ?? "",
+      ).trim() || null;
+
+    io.to(`transfer_movement:${no}`).emit("transfer_movement:confirm_pick", {
+      no,
+      transfer_movement_no: no,
+      confirmed_by: user_ref,
+      data: result,
+    });
+
     return res.json({
       message: "confirmPick สำเร็จ: ตัด stock ตาม location ที่ scan จริงแล้ว",
       transfer_movement_no: no,
@@ -2335,10 +2341,7 @@ export const confirmTransferMovementPut = asyncHandler(
           continue;
         }
 
-        const st = (it.status ?? "pick") as
-          | "pick"
-          | "put"
-          | "completed";
+        const st = (it.status ?? "pick") as "pick" | "put" | "completed";
 
         if (st === "completed") {
           skipped++;
@@ -2355,10 +2358,7 @@ export const confirmTransferMovementPut = asyncHandler(
           continue;
         }
 
-        const putQty = Math.max(
-          0,
-          Math.floor(Number(row.confirmed_put ?? 0)),
-        );
+        const putQty = Math.max(0, Math.floor(Number(row.confirmed_put ?? 0)));
 
         if (putQty <= 0) {
           skipped++;
@@ -2461,9 +2461,7 @@ export const confirmTransferMovementPut = asyncHandler(
         const maxQty = Math.max(0, Math.floor(Number(it.qty ?? 0)));
 
         const nextStatus =
-          maxQty > 0 && putSummary.totalPut >= maxQty
-            ? "completed"
-            : "put";
+          maxQty > 0 && putSummary.totalPut >= maxQty ? "completed" : "put";
 
         await tx.transfer_movement_item.update({
           where: { id: it.id },
@@ -2502,9 +2500,20 @@ export const confirmTransferMovementPut = asyncHandler(
       };
     });
 
+        const user_ref =
+      String(
+        (req.body as any)?.user_ref ?? (req.body as any)?.confirmed_by ?? "",
+      ).trim() || null;
+
+    io.to(`transfer_movement:${no}`).emit("transfer_movement:confirm_put", {
+      no,
+      transfer_movement_no: no,
+      confirmed_by: user_ref,
+      data: result,
+    });
+
     return res.json({
-      message:
-        "confirmPut สำเร็จ: เพิ่ม stock ตาม location ที่ scan จริงแล้ว",
+      message: "confirmPut สำเร็จ: เพิ่ม stock ตาม location ที่ scan จริงแล้ว",
       transfer_movement_no: no,
       ...result,
     });

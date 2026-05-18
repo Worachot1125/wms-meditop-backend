@@ -13,6 +13,7 @@ import { formatOdooOutbound } from "../utils/formatters/odoo_outbound.formatter"
 import { formatTransferDocItem } from "../utils/formatters/transfer_item.formatter";
 import { formatTransferMovement } from "../utils/formatters/transfer_movement.formatter";
 import { formatOdooAdjustment } from "../utils/formatters/adjustment.formatter";
+import { wmsDailySnapshotService } from "../services/stockdaily.snapshot.service";
 
 async function buildLocationMap(locationIds: number[]) {
   const uniqueIds = [...new Set(locationIds.filter((id) => !!id))];
@@ -2414,6 +2415,32 @@ export const getTransactionReportPaginated = asyncHandler(
         department:
           selectedDepartments.length > 0 ? selectedDepartments.join(",") : null,
       },
+    });
+  },
+);
+
+
+export const createWmsDailySnapshotManual = asyncHandler(
+  async (req: Request, res: Response) => {
+    const date =
+      req.body?.date ??
+      req.query?.date ??
+      undefined;
+
+    const triggeredBy =
+      req.body?.triggered_by ??
+      req.query?.triggered_by ??
+      "manual";
+
+    const result = await wmsDailySnapshotService.createDailySnapshot(
+      String(triggeredBy || "manual"),
+      date ? String(date) : undefined,
+    );
+
+    return res.json({
+      success: true,
+      message: "สร้าง WMS daily snapshot สำเร็จ",
+      data: result,
     });
   },
 );

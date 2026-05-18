@@ -649,7 +649,6 @@ export const scanTransferDocBarcode = asyncHandler(
     const location_full_name = String(req.body.location_full_name ?? "").trim();
     const user_ref = String(req.body.user_ref ?? "").trim() || null;
 
-
     if (!barcodeText) throw badRequest("กรุณาส่ง barcode");
     if (!location_full_name) throw badRequest("กรุณาส่ง location_full_name");
 
@@ -662,7 +661,6 @@ export const scanTransferDocBarcode = asyncHandler(
     if (doc.deleted_at) throw badRequest("TransferDoc นี้ถูกลบไปแล้ว");
 
     const loc = await resolveLocationByFullName(location_full_name);
-
 
     const parsed = await resolveBarcodeScan(barcodeText);
 
@@ -698,7 +696,6 @@ export const scanTransferDocBarcode = asyncHandler(
       return itemBase === barcodeBase;
     });
 
-
     let matchedItem: (typeof candidates)[number] | null = null;
 
     for (const item of candidates) {
@@ -722,8 +719,6 @@ export const scanTransferDocBarcode = asyncHandler(
 
       const expMatched = parsedExpKey ? itemExpKey === parsedExpKey : true;
 
-
-
       if (!lotMatched) continue;
       if (!expMatched) continue;
 
@@ -732,12 +727,10 @@ export const scanTransferDocBarcode = asyncHandler(
     }
 
     if (!matchedItem) {
-
       throw badRequest(
         `ไม่พบ transfer_doc_item ที่ตรงกับ barcode_text + lot_serial + exp`,
       );
     }
-
 
     if (matchedItem.product_id == null) {
       throw badRequest("transfer_doc_item.product_id เป็น null");
@@ -774,7 +767,6 @@ export const scanTransferDocBarcode = asyncHandler(
           in_process: true,
         },
       });
-
 
       if (!fresh) {
         throw badRequest("ไม่พบ transfer_doc_item ที่ต้องการอัปเดต");
@@ -815,7 +807,6 @@ export const scanTransferDocBarcode = asyncHandler(
       beforeLocCount = Number(existingConfirm?.confirmed_qty ?? 0);
       afterLocCount = beforeLocCount + appliedQty;
       afterCount = nextPick;
-
 
       await tx.transfer_doc_item.update({
         where: { id: fresh.id },
@@ -1618,6 +1609,15 @@ export const confirmTransferDocPick = asyncHandler(
         },
       });
     });
+
+    const user_ref =
+      String(body?.user_ref ?? body?.confirmed_by ?? "").trim() || null;
+
+    io.to(`transfer_doc:${no}`).emit("transfer_doc:confirm_pick", {
+      no,
+      confirmed_by: user_ref,
+    });
+
     return res.json({ success: true });
   },
 );
@@ -1856,6 +1856,14 @@ export const confirmTransferDocPutToStock = asyncHandler(
           updated_at: new Date(),
         },
       });
+    });
+
+        const user_ref =
+      String(body?.user_ref ?? body?.confirmed_by ?? "").trim() || null;
+
+    io.to(`transfer_doc:${no}`).emit("transfer_doc:confirm_put", {
+      no,
+      confirmed_by: user_ref,
     });
 
     return res.json({ success: true });

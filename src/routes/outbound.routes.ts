@@ -27,6 +27,7 @@ import {
   scanOutboundItemCheckBarcode,
   getAutoLocationPackCandidates,
   applyAutoLocationPack,
+  getOdooOutboundsInProcess,
 } from "../controllers/outbound.odoo.controller";
 
 import {
@@ -73,6 +74,12 @@ router.get(
   attachDepartmentAccess,
   getOdooOutboundsAvailable,
 );
+router.get(
+  "/get/odoo/transfers/completed",
+  auth,
+  attachDepartmentAccess,
+  getOdooOutboundsInProcess,
+);
 router.get("/get/odoo/transfers/:no", getOdooOutboundByNo);
 router.patch("/update/odoo/transfers/:no", updateOdooOutbound);
 
@@ -98,7 +105,7 @@ router.post(
 );
 
 router.post(
-  "/pack-products/:packProductId/rtc/move-to-location",
+  "/pack-products/rtc-bor/move-to-location",
   moveRtcPackingToLocation,
 );
 router.post(
