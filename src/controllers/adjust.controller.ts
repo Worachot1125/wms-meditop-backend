@@ -2281,6 +2281,19 @@ const getAdjustmentItemsFromRow = (row: any) => {
 const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
   const rows = Array.isArray(rowsInput) ? rowsInput : [];
 
+  const sortLocationRowsAsc = <R extends any>(list: R[]) => {
+    return [...(list || [])].sort((a: any, b: any) =>
+      String(a.location_name ?? a.full_name ?? "").localeCompare(
+        String(b.location_name ?? b.full_name ?? ""),
+        "en",
+        {
+          sensitivity: "base",
+          numeric: true,
+        },
+      ),
+    );
+  };
+
   const allItems = rows.flatMap((row: any) =>
     getAdjustmentItemsFromRow(row).map((item: any) => ({
       adjustment_id: row.id,
@@ -2327,8 +2340,6 @@ const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
     wmsExpMap.set(productLotKey, row.expiration_date ?? null);
     wmsZoneMap.set(productLotKey, row.zone_type ?? null);
 
-    // Fallback by product_id only.
-    // This helps when adjustment_item.lot_id is null or not matched with wms_mdt_goods.lot_id.
     if (Number.isFinite(productId) && !wmsZoneByProductMap.has(productId)) {
       wmsZoneByProductMap.set(productId, row.zone_type ?? null);
     }
@@ -2390,7 +2401,11 @@ const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
             location_name: true,
             quantity: true,
           },
-          orderBy: [{ location_name: "asc" }],
+          orderBy: [
+            { location_name: "asc" },
+            { product_id: "asc" },
+            { lot_id: "asc" },
+          ],
         })
       : [];
 
@@ -2429,6 +2444,10 @@ const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
     }
   }
 
+  for (const [key, list] of stockMap.entries()) {
+    stockMap.set(key, sortLocationRowsAsc(list));
+  }
+
   const adjustmentIds = rows
     .map((row: any) => Number(row.id ?? 0))
     .filter((id) => id > 0);
@@ -2452,7 +2471,10 @@ const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
             created_at: true,
             updated_at: true,
           },
-          orderBy: [{ id: "asc" }],
+          orderBy: [
+            { location_name: "asc" },
+            { id: "asc" },
+          ],
         })
       : [];
 
@@ -2484,6 +2506,10 @@ const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
     });
   }
 
+  for (const [key, list] of confirmMap.entries()) {
+    confirmMap.set(key, sortLocationRowsAsc(list));
+  }
+
   return rows.map((row: any) => {
     const originalItems = getAdjustmentItemsFromRow(row);
 
@@ -2501,11 +2527,14 @@ const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
           : null) ??
         null;
 
+      const locationNames = key ? (stockMap.get(key) ?? []) : [];
+      const confirmedLocations = confirmMap.get(itemId) ?? [];
+
       return {
         ...item,
         zone_type: zoneType,
-        location_names: key ? (stockMap.get(key) ?? []) : [],
-        confirmed_locations: confirmMap.get(itemId) ?? [],
+        location_names: sortLocationRowsAsc(locationNames),
+        confirmed_locations: sortLocationRowsAsc(confirmedLocations),
       };
     });
 
@@ -2887,7 +2916,50 @@ export const getAdjustmentDetail = asyncHandler(
       throw badRequest(`ไม่พบ Adjustment: ${decoded}`);
     }
 
-    const [data] = await attachAdjustmentLocations([row]);
+    const sortByLocationNameAsc = (rows: any[]) => {
+      return [...(rows || [])].sort((a: any, b: any) =>
+        String(a.location_name ?? a.full_name ?? "").localeCompare(
+          String(b.location_name ?? b.full_name ?? ""),
+          "en",
+          {
+            sensitivity: "base",
+            numeric: true,
+          },
+        ),
+      );
+    };
+
+    const [attached] = await attachAdjustmentLocations([row]);
+    const data: any = attached;
+
+    data.items = Array.isArray(data.items)
+      ? data.items.map((item: any) => {
+          const rawLocations =
+            item.lock_locations ??
+            item.locations ??
+            item.location_list ??
+            [];
+
+          const sortedLocations = Array.isArray(rawLocations)
+            ? sortByLocationNameAsc(rawLocations)
+            : [];
+
+          const lockNo = sortedLocations.map(
+            (x: any) =>
+              `${x.location_name ?? x.full_name ?? "-"} (จำนวน ${
+                x.qty ?? x.quantity ?? 0
+              })`,
+          );
+
+          return {
+            ...item,
+            lock_no: lockNo,
+            location_name: lockNo,
+            lock_locations: sortedLocations,
+            locations: sortedLocations,
+          };
+        })
+      : data.items;
 
     return res.json({
       data,

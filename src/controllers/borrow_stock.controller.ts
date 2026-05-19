@@ -15,6 +15,21 @@ import {
   LOT_NULL_PLACEHOLDER,
 } from "../utils/helper_scan/barcode";
 import { resolveLocationByFullNameBasic } from "../utils/helper_scan/location";
+import { io } from "../index";
+
+const emitBorrowStockRealtime = (
+  borrowStock: { id: number },
+  event: string,
+  payload: any,
+) => {
+  try {
+    const id = Number(borrowStock.id);
+    if (!id) return;
+
+    io.to(`borrow_stock:${id}`).emit(event, payload);
+    io.emit(event, payload);
+  } catch {}
+};
 
 function getIO(req: Request) {
   return (req.app as any).get("io");
@@ -372,11 +387,25 @@ async function resolveBorrowStockAllowedLocation(location_full_name: string) {
 
 export const scanBorrowStockLocation = asyncHandler(
   async (
-    req: Request<{}, {}, { location_full_name: string }>,
+    req: Request<{ no: string }, {}, { location_full_name: string }>,
     res: Response,
   ) => {
+    const no = decodeURIComponent(String(req.params.no ?? "")).trim();
+    if (!no) throw badRequest("ไม่พบเลข Borrow Stock");
+
     const location_full_name = String(req.body.location_full_name ?? "").trim();
     if (!location_full_name) throw badRequest("กรุณาส่ง location_full_name");
+
+    const borrowStock = await prisma.borrow_stock.findFirst({
+      where: {
+        deleted_at: null,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!borrowStock) throw badRequest("ไม่พบ Borrow Stock");
 
     const loc = await resolveBorrowStockAllowedLocation(location_full_name);
 
@@ -387,8 +416,16 @@ export const scanBorrowStockLocation = asyncHandler(
       },
     };
 
-    const io = (req.app as any).get("io");
-    io?.to("borrow_stock:list").emit("borrow_stock:scan_location", payload);
+    emitBorrowStockRealtime(
+      {
+        id: borrowStock.id,
+      },
+      "borrow_stock:scan_location",
+      {
+        id: borrowStock.id,
+        message: "Borrow Stock location scanned",
+      },
+    );
 
     return res.json(payload);
   },
@@ -623,7 +660,9 @@ export const scanBorrowStockBarcodePreview = asyncHandler(
         : null,
     };
 
-    emitBorrowStockList(req, "borrow_stock:scan_preview", payload);
+    emitBorrowStockRealtime({ id: 0 }, "borrow_stock:scan_barcode_preview", {
+      message: "Borrow Stock barcode preview scanned",
+    });
 
     return res.json(payload);
   },
@@ -720,17 +759,6 @@ export const startBorrowStock = asyncHandler(
           .trim()
           .toLowerCase() === "true";
 
-      console.log("[startBorrowStock][item]", {
-        index,
-        code,
-        lotSerial,
-        expirationDate,
-        systemQty,
-        executedQty,
-        raw_is_outside_location: it.is_outside_location,
-        parsed_is_outside_location: isOutsideLocation,
-      });
-
       if (!code) throw badRequest(`items[${index}].code ห้ามว่าง`);
 
       if (!Number.isFinite(systemQty) || systemQty < 0) {
@@ -808,18 +836,6 @@ export const startBorrowStock = asyncHandler(
         },
       });
 
-      console.log("[startBorrowStock][normal-check]", {
-        index,
-        code,
-        lotSerial,
-        expirationDate,
-        location_name: loc.full_name,
-        all_departments,
-        department_ids,
-        borDepartmentIds,
-        borStockRow,
-      });
-
       if (!borStockRow) {
         const debugBorRows = await prisma.bor_stock.findMany({
           where: {
@@ -838,16 +854,6 @@ export const startBorrowStock = asyncHandler(
             quantity: true,
           },
           take: 20,
-        });
-
-        console.log("[startBorrowStock][debug bor rows]", {
-          index,
-          code,
-          lotSerial,
-          expirationDate,
-          department_ids,
-          borDepartmentIds,
-          rows: debugBorRows,
         });
 
         throw badRequest(
@@ -902,6 +908,18 @@ export const startBorrowStock = asyncHandler(
         },
       },
     });
+
+    emitBorrowStockRealtime(
+      {
+        id: created.id,
+      },
+      "borrow_stock:started",
+      {
+        id: created.id,
+        message: "Borrow Stock started",
+        data: created,
+      },
+    );
 
     return res.json({
       location: {
@@ -1143,14 +1161,17 @@ export const scanBorrowStockBarcode = asyncHandler(
       doc: detail,
     };
 
-    emitBorrowStockRoom(req, id, "borrow_stock:scan_barcode", payload);
-    emitBorrowStockList(req, "borrow_stock:scan_barcode", {
-      borrow_stock_id: id,
-      action,
-      affected_item_id: affectedItemId,
-      scanned: payload.scanned,
-      matched_stock: payload.matched_stock,
-    });
+    emitBorrowStockRealtime(
+      {
+        id: payload.doc.id,
+      },
+      "borrow_stock:scan_barcode",
+      {
+        id: payload.doc.id,
+        message: "Borrow Stock barcode scanned",
+        data: payload,
+      },
+    );
 
     return res.json(payload);
   },
@@ -1259,6 +1280,18 @@ export const confirmBorrowStock = asyncHandler(
         },
       },
     });
+
+    emitBorrowStockRealtime(
+      {
+        id: updated.id,
+      },
+      "borrow_stock:confirmed",
+      {
+        id: updated.id,
+        message: "Borrow Stock confirmed",
+        data: updated,
+      },
+    );
 
     return res.json({ doc: formatBorrowStock(updated as any) });
   },

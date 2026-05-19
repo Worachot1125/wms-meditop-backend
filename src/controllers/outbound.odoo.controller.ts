@@ -3349,6 +3349,14 @@ export const getOdooOutboundsByBatchName = asyncHandler(
             gi.lot_serial,
           );
 
+          const sortedLocks = [...(locks || [])].sort((a: any, b: any) =>
+            String(a.location_name ?? "").localeCompare(
+              String(b.location_name ?? ""),
+              "en",
+              { sensitivity: "base", numeric: true },
+            ),
+          );
+
           const locId = firstLocId(locks);
 
           const exp =
@@ -3417,10 +3425,10 @@ export const getOdooOutboundsByBatchName = asyncHandler(
               gi.product_id,
               gi.lot_serial,
             ),
-            lock_no: (locks || []).map(
+            lock_no: sortedLocks.map(
               (x) => `${x.location_name} (จำนวน ${x.qty})`,
             ),
-            lock_locations: locks,
+            lock_locations: sortedLocks,
             location_picks,
             location_confirms,
             return_locations,
@@ -5933,6 +5941,11 @@ export const updateGoodsOutItemRtc = asyncHandler(
 const buildProductLotKey = (productId?: number | null, lotId?: number | null) =>
   `${productId ?? "NULL"}|${lotId ?? "NULL"}`;
 
+type stock_locations = Array<{
+  location_id: number | null;
+  location_name: string | null;
+  qty: number;
+}>;
 // ============================================================
 // GET CANDIDATES
 // ============================================================
@@ -6128,6 +6141,11 @@ export const getAutoLocationPackCandidates = asyncHandler(
         exp: Date | null;
         available_qty: number;
         required_qty: number;
+        stock_locations: {
+          location_id: number | null;
+          location_name: string | null;
+          qty: number;
+        }[];
         docs: Array<{
           outbound_no: string;
           goods_out_item_id: number;
@@ -6157,6 +6175,19 @@ export const getAutoLocationPackCandidates = asyncHandler(
           exp: row.exp,
           available_qty: stockInfo.qty,
           required_qty: row.remaining,
+          stock_locations: stockInfo.stocks
+            .map((st: any) => ({
+              location_id: st.location_id ?? null,
+              location_name: st.location_name ?? null,
+              qty: Number(st.quantity ?? 0),
+            }))
+            .sort((a: any, b: any) =>
+              String(a.location_name ?? "").localeCompare(
+                String(b.location_name ?? ""),
+                "en",
+                { sensitivity: "base", numeric: true },
+              ),
+            ),
 
           docs: [
             {

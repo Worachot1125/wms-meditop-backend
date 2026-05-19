@@ -463,6 +463,13 @@ async function relabelPackProductBoxesByMax(
 ) {
   const { packProductId, newMaxBox, fallbackPrefixRaw } = input;
 
+  const normalizeBoxPrefix = (value: string) => {
+    return String(value ?? "")
+      .trim()
+      .replace(/\s*_\s*.*$/g, "")
+      .replace(/\s+/g, " ");
+  };
+
   const existingBoxes = await tx.pack_product_box.findMany({
     where: {
       pack_product_id: packProductId,
@@ -477,18 +484,20 @@ async function relabelPackProductBoxesByMax(
   });
 
   for (const existingBox of existingBoxes) {
-    const prefixFromCode = normalizeSpaces(
-      String(existingBox.box_code ?? "").split("_")[0] ?? "",
+    const prefixFromCode = normalizeBoxPrefix(
+      String(existingBox.box_code ?? ""),
     );
-
-    const prefixRaw = prefixFromCode || fallbackPrefixRaw;
+    const prefixRaw = prefixFromCode || normalizeBoxPrefix(fallbackPrefixRaw);
 
     await tx.pack_product_box.update({
       where: { id: existingBox.id },
       data: {
         box_max: newMaxBox,
         box_label: `${existingBox.box_no}/${newMaxBox}`,
+
+        // ✅ force exact pattern: BB-222_ 1/1
         box_code: `${prefixRaw}_ ${existingBox.box_no}/${newMaxBox}`,
+
         updated_at: new Date(),
       },
     });
@@ -893,7 +902,7 @@ function applyReturnToPackProduct(row: any) {
                         qty: Number(item.qty ?? 0),
 
                         // ✅ pick เดิมจาก DB
-                        pick: Number(item.pick ?? 0),
+                        pick: Math.max(0, Number(item.pick ?? 0) - returnQty),
 
                         original_qty: Number(item.qty ?? 0),
                         original_pick: Number(item.pick ?? 0),
@@ -1142,7 +1151,21 @@ export const scanPackProductBarcode = asyncHandler(
     req: Request<{}, {}, { barcode: string; user_ref?: string | null }>,
     res: Response,
   ) => {
-    const parsed = parsePackBarcode(req.body?.barcode);
+    const isValidPackBoxCode = (value: string) => {
+      return /^((?:[A-Za-z]+(?:\/[A-Za-z0-9]+)*[-/]?\d+(?:-\d+)?)|(?:\d+))(,\s*((?:[A-Za-z]+(?:\/[A-Za-z0-9]+)*[-/]?\d+(?:-\d+)?)|(?:\d+)))*_ \d+\/\d+$/.test(
+        String(value ?? "").trim(),
+      );
+    };
+
+    const rawBarcode = String(req.body?.barcode ?? "").trim();
+
+    if (!isValidPackBoxCode(rawBarcode)) {
+      throw badRequest(
+        "รูปแบบ Box Code ไม่ถูกต้อง ต้องเป็นรูปแบบ BB-123_ 1/1 หรือ WH/BB/123_ 1/1 หรือ 123456_ x/x หรือ WH/DO11-111_ x/x เท่านั้น",
+      );
+    }
+
+    const parsed = parsePackBarcode(rawBarcode);
     const userRef =
       req.body?.user_ref == null
         ? null
@@ -2613,7 +2636,23 @@ export const movePdPackingToLocation = asyncHandler(
         const pickQty = Math.max(0, Math.floor(Number(item.pick ?? 0)));
         const baseQty = Math.max(0, Math.floor(Number(item.qty ?? 0)));
 
-        const moveQty = packQty > 0 ? packQty : pickQty > 0 ? pickQty : baseQty;
+        const itemKey = buildPdItemKey(item);
+        const pdQtyForItem = Math.max(
+          0,
+          Math.floor(Number(pdQtyMap.get(itemKey) ?? 0)),
+        );
+
+        const moveQty =
+          pdQtyForItem > 0
+            ? Math.min(
+                pdQtyForItem,
+                packQty > 0 ? packQty : pickQty > 0 ? pickQty : baseQty,
+              )
+            : packQty > 0
+              ? packQty
+              : pickQty > 0
+                ? pickQty
+                : baseQty;
 
         if (moveQty <= 0) continue;
 
@@ -2686,12 +2725,6 @@ export const movePdPackingToLocation = asyncHandler(
             goods_out_item_id: Number(item.id),
           } as any,
         });
-
-        const itemKey = buildPdItemKey(item);
-        const pdQtyForItem = Math.max(
-          0,
-          Math.floor(Number(pdQtyMap.get(itemKey) ?? 0)),
-        );
 
         const currentPick = Math.max(0, Math.floor(Number(item.pick ?? 0)));
         const nextPick = Math.max(0, currentPick - pdQtyForItem);

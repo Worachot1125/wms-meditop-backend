@@ -495,6 +495,11 @@ export const getOdooInboundByNo = asyncHandler(
               location_id: true,
               location_name: true,
             },
+            orderBy: [
+              { location_name: "asc" },
+              { product_id: "asc" },
+              { lot_name: "asc" },
+            ],
           })
         : [];
 
@@ -575,6 +580,11 @@ export const getOdooInboundByNo = asyncHandler(
       return Array.from(map.values()).sort((a, b) =>
         String(a.location_name ?? "").localeCompare(
           String(b.location_name ?? ""),
+          "en",
+          {
+            sensitivity: "base",
+            numeric: true,
+          },
         ),
       );
     };

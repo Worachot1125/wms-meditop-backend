@@ -201,6 +201,39 @@ export async function handlePDAutoProcess({
     mergedItems,
   });
 
+  if (!inbound?.id) {
+    throw badRequest(`PD ${number} สร้าง Inbound ไม่สำเร็จ`);
+  }
+
+  const noPickItems = await prisma.goods_out_item.findMany({
+    where: {
+      outbound_id: Number(outbound.id),
+      deleted_at: null,
+    },
+    select: {
+      pick: true,
+      pack: true,
+    } as any,
+  });
+
+  const totalPickedOrPacked = noPickItems.reduce((sum: number, row: any) => {
+    return (
+      sum +
+      Math.max(0, Number(row.pick ?? 0)) +
+      Math.max(0, Number(row.pack ?? 0))
+    );
+  }, 0);
+
+  if (totalPickedOrPacked <= 0) {
+    await prisma.inbound.update({
+      where: { id: Number(inbound.id) },
+      data: {
+        status: "completed",
+        updated_at: new Date(),
+      } as any,
+    });
+  }
+
   const result = await prisma.$transaction(async (tx) => {
     const outboundItems = await tx.goods_out_item.findMany({
       where: {
@@ -325,6 +358,8 @@ export async function handlePDAutoProcess({
         lot_id: lotId,
         lot_serial: match.lot_serial ?? lotSerial ?? null,
         old_qty: currentQty,
+        current_pick: Number(match.pick ?? 0),
+        current_pack: Number(match.pack ?? 0),
         pd_qty: pdQty,
         new_qty: nextQty,
         action: "pd_reduce_qty",
@@ -386,17 +421,72 @@ export async function handlePDAutoProcess({
     };
   });
 
+  const hasPickOverAfterPd = result.affected.some((x: any) => {
+    const currentPick = Number(x.current_pick ?? 0);
+    const newQty = Number(x.new_qty ?? 0);
+
+    return currentPick > 0 && currentPick >= newQty;
+  });
+
+  const hasPickedButNotOverAfterPd =
+    totalPickedOrPacked > 0 && !hasPickOverAfterPd;
+
   try {
     io.to(`outbound:${outbound.no}`).emit("outbound:pd_updated", result);
 
+    // ✅ case 1: no pick yet
+    if (totalPickedOrPacked <= 0) {
+      io.to(`outbound:${outbound.no}`).emit("outbound:pd_pending", {
+        ...result,
+        mode: "pd_pending_no_pick",
+        items: mergedItems,
+      });
+    }
+
+    // ✅ case 2: picked but still not over
+    if (hasPickedButNotOverAfterPd) {
+      io.to(`outbound:${outbound.no}`).emit("outbound:pd_picked", {
+        ...result,
+        mode: "pd_picked_auto_process",
+        items: mergedItems,
+      });
+    }
+
+    // ✅ case 3: pick >= remaining qty after PD reduce
+    if (hasPickOverAfterPd) {
+      io.to(`outbound:${outbound.no}`).emit("outbound:pd_pick_over", {
+        ...result,
+        mode: "pd_pick_over_after_reduce_qty",
+        items: mergedItems,
+      });
+    }
+
+    // ✅ case 3: inside pack product
     if (packing?.pack_product_id) {
+      const packPayload = {
+        ...result,
+        mode:
+          totalPickedOrPacked <= 0
+            ? "pd_pending_no_pick_in_pack_product"
+            : "pd_picked_in_pack_product",
+        items: mergedItems,
+      };
+
       io.to(`pack_product:${packing.pack_product_id}`).emit(
         "pack_product:updated",
         {
           pack_product_id: packing.pack_product_id,
-          reason: "pd_auto_process",
-          data: result,
+          reason:
+            totalPickedOrPacked <= 0
+              ? "pd_auto_completed_no_pick"
+              : "pd_auto_process_picked",
+          data: packPayload,
         },
+      );
+
+      io.to(`pack_product:${packing.pack_product_id}`).emit(
+        "packing:pd_detected",
+        packPayload,
       );
     }
   } catch {}
