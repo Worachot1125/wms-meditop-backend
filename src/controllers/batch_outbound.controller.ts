@@ -663,9 +663,24 @@ export const deleteBatchOutboundsByOutboundId = asyncHandler(
 
 
 export const updateBatchOutboundStatusByName = asyncHandler(
-  async (req: Request<{ name: string }, {}, { status?: string }>, res: Response) => {
+  async (
+    req: Request<
+      { name: string },
+      {},
+      {
+        status?: string;
+        user_ref?: string;
+      }
+    >,
+    res: Response,
+  ) => {
     const name = decodeURIComponent(String(req.params.name ?? "")).trim();
     const status = String(req.body?.status ?? "").trim();
+
+    const user_ref =
+      req.body?.user_ref == null
+        ? null
+        : String(req.body.user_ref).trim() || null;
 
     if (!name) throw badRequest("กรุณาระบุ batch name");
     if (!status) throw badRequest("กรุณาระบุ status");
@@ -678,21 +693,59 @@ export const updateBatchOutboundStatusByName = asyncHandler(
       );
     }
 
-    const exists = await prisma.batch_outbound.count({
+    if (status === "completed" && !user_ref) {
+      throw badRequest("กรุณาระบุ user_ref");
+    }
+
+    const batchRows = await prisma.batch_outbound.findMany({
       where: { name },
+      select: {
+        outbound_id: true,
+      },
     });
 
-    if (exists === 0) {
+    if (batchRows.length === 0) {
       throw notFound(`ไม่พบ batch_outbound name: ${name}`);
     }
 
-    const result = await prisma.batch_outbound.updateMany({
-      where: { name },
-      data: {
-        status,
-        updated_at: new Date(),
-        released_at: status === "completed" ? new Date() : null,
-      },
+    const outboundIds = [
+      ...new Set(
+        batchRows
+          .map((x) => Number(x.outbound_id ?? 0))
+          .filter((x) => Number.isFinite(x) && x > 0),
+      ),
+    ];
+
+    const result = await prisma.$transaction(async (tx) => {
+      const batchResult = await tx.batch_outbound.updateMany({
+        where: { name },
+        data: {
+          status,
+          updated_at: new Date(),
+          released_at: status === "completed" ? new Date() : null,
+        },
+      });
+
+      let itemResult = { count: 0 };
+
+      if (status === "completed" && outboundIds.length > 0) {
+        itemResult = await tx.goods_out_item.updateMany({
+          where: {
+            outbound_id: {
+              in: outboundIds,
+            },
+          },
+          data: {
+            user_pick: user_ref,
+            updated_at: new Date(),
+          },
+        });
+      }
+
+      return {
+        batch_count: batchResult.count,
+        goods_out_item_count: itemResult.count,
+      };
     });
 
     return res.json({
@@ -700,7 +753,9 @@ export const updateBatchOutboundStatusByName = asyncHandler(
       message: `อัปเดต batch ${name} เป็น ${status} สำเร็จ`,
       batch_name: name,
       status,
-      updated_count: result.count,
+      user_pick: status === "completed" ? user_ref : null,
+      updated_count: result.batch_count,
+      updated_goods_out_item_count: result.goods_out_item_count,
     });
   },
 );

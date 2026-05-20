@@ -4645,6 +4645,37 @@ export const createOutboundLotAdjustment = asyncHandler(
       },
     });
 
+    const lotSerialsForResolve = lines
+      .map((line) => firstStr(line.lot_serial))
+      .filter((x): x is string => Boolean(x));
+
+    const wmsLotRows =
+      item.product_id != null && lotSerialsForResolve.length > 0
+        ? await prisma.wms_mdt_goods.findMany({
+            where: {
+              product_id: item.product_id,
+              lot_name: {
+                in: lotSerialsForResolve,
+              },
+            } as any,
+            select: {
+              lot_id: true,
+              lot_name: true,
+            } as any,
+          })
+        : [];
+
+    const wmsLotIdMap = new Map<string, number>();
+
+    for (const row of wmsLotRows as any[]) {
+      const lotName = firstStr(row.lot_name);
+      const lotId = Number(row.lot_id);
+
+      if (lotName && Number.isFinite(lotId)) {
+        wmsLotIdMap.set(normalizeLotSerialForMatch(lotName), lotId);
+      }
+    }
+
     const rawNormalizedLines = lines.map((line) => {
       const rawLotId =
         line.lot_id == null || line.lot_id === "" ? null : Number(line.lot_id);
@@ -4661,8 +4692,12 @@ export const createOutboundLotAdjustment = asyncHandler(
           sameLotSerialForMatch(row.lot_serial, lot_serial),
         ) ?? null;
 
+      const resolvedWmsLotId = lot_serial
+        ? (wmsLotIdMap.get(normalizeLotSerialForMatch(lot_serial)) ?? null)
+        : null;
+
       return {
-        lot_id: rawLotId ?? matchedSibling?.lot_id ?? null,
+        lot_id: rawLotId ?? matchedSibling?.lot_id ?? resolvedWmsLotId ?? null,
         lot_serial,
         qty,
       };
@@ -5165,6 +5200,51 @@ export const createOutboundLotAdjustment = asyncHandler(
     let queuedFragment: any = null;
 
     if (outbound.picking_id) {
+      const linkedLotSerials = Array.from(
+        new Set(
+          (result.linkedLines ?? [])
+            .map((line: any) => firstStr(line.lot_serial))
+            .filter((x: string | undefined): x is string => Boolean(x)),
+        ),
+      );
+
+      const linkedWmsLots =
+        item.product_id != null && linkedLotSerials.length > 0
+          ? await prisma.wms_mdt_goods.findMany({
+              where: {
+                product_id: Number(item.product_id),
+              } as any,
+              select: {
+                lot_id: true,
+                lot_name: true,
+              } as any,
+            })
+          : [];
+
+      const linkedLotIdMap = new Map<string, number>();
+
+      for (const row of linkedWmsLots as any[]) {
+        const lotName = firstStr(row.lot_name);
+        const lotId = Number(row.lot_id);
+
+        if (!lotName || !Number.isFinite(lotId)) continue;
+
+        linkedLotIdMap.set(normalizeLotSerialForMatch(lotName), lotId);
+      }
+
+      const linkedLinesForOdoo = (result.linkedLines ?? []).map((line: any) => {
+        const normalizedLot = normalizeLotSerialForMatch(line.lot_serial);
+
+        const resolvedLotId = normalizedLot
+          ? (linkedLotIdMap.get(normalizedLot) ?? null)
+          : null;
+
+        return {
+          ...line,
+          lot_id: line.lot_id ?? resolvedLotId ?? null,
+        };
+      });
+
       const itemsForOdoo = buildOdooItemsForSingleAdjustment({
         item: {
           code: item.code,
@@ -5185,7 +5265,7 @@ export const createOutboundLotAdjustment = asyncHandler(
           location_dest_id: outbound.location_dest_id,
         },
         reference: reason,
-        linkedLines: result.linkedLines,
+        linkedLines: linkedLinesForOdoo,
       });
 
       const totalOdooQty = itemsForOdoo.reduce(

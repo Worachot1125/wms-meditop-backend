@@ -431,7 +431,19 @@ export async function handlePDAutoProcess({
       });
     }
 
-    // ✅ case 2: picked but still not over
+    // ✅ case 2: PD เข้ามาระหว่าง pick แล้ว
+    // มี pick/pack แล้ว ให้ inbound PD completed ไปเลย
+    if (totalPickedOrPacked > 0) {
+      await prisma.inbound.update({
+        where: { id: Number(inbound.id) },
+        data: {
+          status: "completed",
+          updated_at: new Date(),
+        } as any,
+      });
+    }
+
+    // ✅ case 3: picked but still not over
     if (hasPickedButNotOverAfterPd) {
       io.to(`outbound:${outbound.no}`).emit("outbound:pd_picked", {
         ...result,
@@ -440,7 +452,7 @@ export async function handlePDAutoProcess({
       });
     }
 
-    // ✅ case 3: pick >= remaining qty after PD reduce
+    // ✅ case 4: pick >= remaining qty after PD reduce
     if (hasPickOverAfterPd) {
       io.to(`outbound:${outbound.no}`).emit("outbound:pd_pick_over", {
         ...result,
@@ -449,7 +461,7 @@ export async function handlePDAutoProcess({
       });
     }
 
-    // ✅ case 3: inside pack product
+    // ✅ case 5: inside pack product
     if (packing?.pack_product_id) {
       const packPayload = {
         ...result,
