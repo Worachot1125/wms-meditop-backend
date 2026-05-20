@@ -2852,14 +2852,33 @@ export const movePdPackingToLocation = asyncHandler(
       };
     });
 
-    io.to(`pack_product:${packProductId}`).emit("pack_product:updated", {
-      pack_product_id: packProductId,
-      reason: "pd_move_to_pack_location",
-      data: result,
-    });
+    try {
+      io.to(`pack_product:${packProductId}`).emit("pack_product:updated", {
+        pack_product_id: packProductId,
+        reason: "pd_move_to_pack_location",
+        data: result,
+      });
 
-    io.emit("packing:pd_moved", result);
+      io.to(`outbound:${result.outbound_no}`).emit("outbound:pd_moved", {
+        ...result,
+        message: "PD ถูกย้ายสินค้าไป Location Packing แล้ว",
+      });
 
+      io.to(`outbound-id:${result.outbound_id}`).emit("outbound:pd_moved", {
+        ...result,
+        message: "PD ถูกย้ายสินค้าไป Location Packing แล้ว",
+      });
+
+      io.emit("packing:pd_moved", {
+        ...result,
+        message: "PD ถูกย้ายสินค้าไป Location Packing แล้ว",
+      });
+
+      io.emit("outbound:pd_moved", {
+        ...result,
+        message: "PD ถูกย้ายสินค้าไป Location Packing แล้ว",
+      });
+    } catch {}
     return res.json({
       success: true,
       message: "ย้ายสินค้าไป Location Packing สำเร็จ",
@@ -3104,10 +3123,30 @@ export const moveRtcPackingToLocation = asyncHandler(
       };
     });
 
-    io.emit("packing:rtc_bor_moved", {
-      ...result,
-      message: "ย้ายสินค้า RTC/BOR ไป Location และลบ Packing Flow สำเร็จ",
-    });
+    try {
+      io.to(`outbound:${result.outbound_no}`).emit("outbound:rtc_bor_moved", {
+        ...result,
+        message: "ย้ายสินค้า RTC/BOR ไป Location และลบ Packing Flow สำเร็จ",
+      });
+
+      io.to(`outbound-id:${result.outbound_id}`).emit(
+        "outbound:rtc_bor_moved",
+        {
+          ...result,
+          message: "ย้ายสินค้า RTC/BOR ไป Location และลบ Packing Flow สำเร็จ",
+        },
+      );
+
+      io.emit("packing:rtc_bor_moved", {
+        ...result,
+        message: "ย้ายสินค้า RTC/BOR ไป Location และลบ Packing Flow สำเร็จ",
+      });
+
+      io.emit("outbound:rtc_bor_moved", {
+        ...result,
+        message: "ย้ายสินค้า RTC/BOR ไป Location และลบ Packing Flow สำเร็จ",
+      });
+    } catch {}
 
     return res.json({
       success: true,

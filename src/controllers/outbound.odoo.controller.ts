@@ -1257,7 +1257,7 @@ export const getOdooOutbounds = asyncHandler(
             lot_id: gi.lot_id, // keep compat
             lot_serial: gi.lot_serial,
             qty: gi.qty,
-            pick: gi.pick,
+            pick: Math.min(Number(gi.pick ?? 0), Number(gi.qty ?? 0)),
             pack: gi.pack,
             status: gi.status,
             barcode_id: gi.barcode_id,
@@ -6008,6 +6008,7 @@ export const getAutoLocationPackCandidates = asyncHandler(
       lot_serial: string | null;
       exp: Date | null;
       remaining: number;
+      pick: number;
       key: string;
     }> = [];
 
@@ -6047,9 +6048,10 @@ export const getAutoLocationPackCandidates = asyncHandler(
 
     for (const ob of outbounds) {
       for (const item of ob.goods_outs) {
-        const qty = Number(item.qty ?? 0);
-        const pick = Number(item.pick ?? 0);
-        const remaining = qty - pick;
+        const qty = Math.max(0, Number(item.qty ?? 0));
+        const rawPick = Math.max(0, Number(item.pick ?? 0));
+        const pick = Math.min(rawPick, qty);
+        const remaining = Math.max(0, qty - pick);
 
         if (remaining <= 0) continue;
 
@@ -6077,6 +6079,7 @@ export const getAutoLocationPackCandidates = asyncHandler(
           lot_serial: item.lot_serial,
           exp: expValue,
           remaining,
+          pick,
           key,
         });
       }
@@ -6204,7 +6207,7 @@ export const getAutoLocationPackCandidates = asyncHandler(
               outbound_no: row.outbound_no,
               goods_out_item_id: row.goods_out_item_id,
               qty: row.remaining,
-              pick: 0,
+              pick: row.pick,
               remaining: row.remaining,
             },
           ],
@@ -6216,7 +6219,7 @@ export const getAutoLocationPackCandidates = asyncHandler(
           outbound_no: row.outbound_no,
           goods_out_item_id: row.goods_out_item_id,
           qty: row.remaining,
-          pick: 0,
+          pick: row.pick,
           remaining: row.remaining,
         });
       }
@@ -6258,8 +6261,6 @@ export const applyAutoLocationPack = asyncHandler(
     if (mode === "DOC" && !outboundNo)
       throw badRequest("กรุณาระบุ outbound_no");
 
-    // ✅ กัน AUTO ไปโดนเอกสารอื่นนอก Batch
-    // FE ควรส่ง outbound_nos มาด้วยตอน apply
     if (mode === "AUTO" && outboundNos.length === 0) {
       throw badRequest("AUTO ต้องส่ง outbound_nos ของ Batch มาด้วย");
     }
@@ -6280,9 +6281,6 @@ export const applyAutoLocationPack = asyncHandler(
         throw badRequest(`ไม่พบ Location: ${sourceLocationName}`);
       }
 
-      // ======================================================
-      // Load stock เฉพาะ Location_Pack ที่ user เลือกเท่านั้น
-      // ======================================================
       const stocks = await tx.stock.findMany({
         where: {
           quantity: {
@@ -6317,9 +6315,6 @@ export const applyAutoLocationPack = asyncHandler(
         throw badRequest("stock Location_Pack ไม่เพียงพอ");
       }
 
-      // ======================================================
-      // Load goods_out_item เฉพาะ Doc ที่เกี่ยวข้อง
-      // ======================================================
       const goodsOutItems = await tx.goods_out_item.findMany({
         where: {
           deleted_at: null,
@@ -6340,9 +6335,6 @@ export const applyAutoLocationPack = asyncHandler(
         throw badRequest("ไม่พบ goods_out_item");
       }
 
-      // ======================================================
-      // Resolve exp จาก wms_mdt_goods ด้วย product_id + lot_id
-      // ======================================================
       const productLotPairs = goodsOutItems
         .map((item) => ({
           product_id: item.product_id,
@@ -6394,13 +6386,24 @@ export const applyAutoLocationPack = asyncHandler(
 
           return key === itemKey;
         })
-        .map((item) => {
-          const qty = Number(item.qty ?? 0);
-          const pick = Number(item.pick ?? 0);
+        .map((item: any) => {
+          const originalQty = Math.max(0, Number(item.qty ?? 0));
+          const pdQty = Math.max(0, Number(item.pd ?? 0));
+
+          // ✅ qty ที่ใช้ pick ต้องเท่ากับ qty ที่ FE เห็นหลังหัก PD
+          const qty = Math.max(0, originalQty - pdQty);
+
+          const rawPick = Math.max(0, Number(item.pick ?? 0));
+          const effectivePick = Math.min(rawPick, qty);
 
           return {
             item,
-            remaining: Math.max(0, qty - pick),
+            original_qty: originalQty,
+            pd_qty: pdQty,
+            qty,
+            raw_pick: rawPick,
+            effective_pick: effectivePick,
+            remaining: Math.max(0, qty - effectivePick),
           };
         })
         .filter((x) => x.remaining > 0);
@@ -6412,30 +6415,27 @@ export const applyAutoLocationPack = asyncHandler(
       const updatedItems: any[] = [];
       const stockCuts: any[] = [];
 
-      // ======================================================
-      // Apply pick + location_pick + cut stock
-      // ======================================================
       for (const row of matchedItems) {
         if (totalAvailable <= 0) break;
 
         const useQty = Math.min(totalAvailable, row.remaining);
         if (useQty <= 0) continue;
 
+        const nextPick = row.effective_pick + useQty;
+
         const updated = await tx.goods_out_item.update({
           where: {
             id: row.item.id,
           },
           data: {
-            pick: {
-              increment: useQty,
-            },
+            pick: nextPick,
             pick_time: new Date(),
-          },
+            updated_at: new Date(),
+          } as any,
         });
 
         updatedItems.push(updated);
 
-        // ✅ สำคัญ: ทำให้ FE แสดง Pick ใต้ Location_Pack ที่เลือกถูกต้อง
         const existingPick = await tx.goods_out_item_location_pick.findFirst({
           where: {
             goods_out_item_id: row.item.id,
@@ -6486,7 +6486,8 @@ export const applyAutoLocationPack = asyncHandler(
               quantity: {
                 decrement: cutQty,
               },
-            },
+              updated_at: new Date(),
+            } as any,
           });
 
           stockCuts.push({
@@ -6513,6 +6514,25 @@ export const applyAutoLocationPack = asyncHandler(
         stock_cuts: stockCuts,
       };
     });
+
+    const affectedOutboundNos =
+      mode === "DOC" && outboundNo ? [outboundNo] : outboundNos;
+
+    for (const no of affectedOutboundNos) {
+      io.to(`outbound:${no}`).emit("outbound:auto_location_pack_applied", {
+        ...result,
+        item_key: itemKey,
+        mode,
+        outbound_no: no,
+        outbound_nos: affectedOutboundNos,
+        source_location_name: sourceLocationName,
+        message: "Auto Location Pack updated",
+      });
+
+      io.to(`outbound:${no}`).emit("outbound:scan_pick", {
+        outbound_no: no,
+      });
+    }
 
     return res.json({
       data: result,

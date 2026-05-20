@@ -40,13 +40,6 @@ function emitOutboundRealtime(
     if (outboundNo) {
       io.to(`outbound:${outboundNo}`).emit(event, payload);
     }
-
-    const oid = Number(outboundId ?? NaN);
-    if (Number.isFinite(oid) && oid > 0) {
-      io.to(`outbound-id:${oid}`).emit(event, payload);
-    }
-
-    io.emit(event, payload);
   } catch {}
 }
 
@@ -647,6 +640,7 @@ async function assertLocationHasStockForScanByLotExp(args: {
  * body: { barcode: string; location_full_name: string; qty_input?: number }
  * =========================
  */
+
 export const scanOutboundPick = asyncHandler(
   async (
     req: Request<
@@ -853,12 +847,11 @@ export const scanOutboundPick = asyncHandler(
           throw badRequest("ไม่มีจำนวน pick เหลือให้เปลี่ยน lot");
         }
 
-        const stockRemaining = Math.max(0, stockQty - currentPick);
-        const willUse = Math.min(addQty, remaining, stockRemaining);
+        const willUse = Math.min(addQty, remaining, stockQty);
 
         if (willUse <= 0) {
           throw badRequest(
-            `สินค้าไม่พอสำหรับเปลี่ยน lot (stock=${stockQty}, pick แล้ว=${currentPick})`,
+            `สินค้าไม่พอสำหรับ pick เพิ่ม (stock=${stockQty}, ต้องการเพิ่ม=${addQty})`,
           );
         }
 
@@ -905,11 +898,10 @@ export const scanOutboundPick = asyncHandler(
         throw badRequest("pick ครบแล้ว");
       }
 
-      const stockRemaining = Math.max(0, stockQty - currentPick);
       const willAdd =
         requiredQty > 0
-          ? Math.min(addQty, remaining, stockRemaining)
-          : Math.min(addQty, stockRemaining);
+          ? Math.min(addQty, remaining, stockQty)
+          : Math.min(addQty, stockQty);
 
       if (willAdd <= 0) {
         throw badRequest(
@@ -937,11 +929,33 @@ export const scanOutboundPick = asyncHandler(
 
     const detail = await buildOutboundDetail(outbound.id, no, loc.id);
 
-    return res.json({
+    const responsePayload = {
       ...detail,
       addQty: saved.appliedQty,
       is_adjustment: saved.is_adjustment,
-    });
+    };
+
+    emitOutboundRealtime(
+      no,
+      saved.is_adjustment
+        ? "outbound:scan_adjustment_pick"
+        : "outbound:scan_pick",
+      {
+        ...responsePayload,
+        outbound_no: no,
+        outbound_id: outbound.id,
+        location_id: loc.id,
+        location_full_name: loc.full_name,
+        addQty: saved.appliedQty,
+        is_adjustment: saved.is_adjustment,
+        message: saved.is_adjustment
+          ? "Scan adjustment pick updated"
+          : "Scan pick updated",
+      },
+      Number(outbound.id),
+    );
+
+    return res.json(responsePayload);
   },
 );
 
@@ -3166,11 +3180,32 @@ export const confirmOutboundReturn = asyncHandler(
       }
     });
 
-    return res.json({
+    const responsePayload = {
       success: true,
       message: "confirm return สำเร็จ",
+      outbound_no: outbound.no,
+      outbound_id: outbound.id,
+      return_mode: String(req.body?.return_mode ?? "PICK")
+        .trim()
+        .toUpperCase(),
       pd_inbound_completed_count: updatedPDInboundCount,
-    });
+    };
+
+    emitOutboundRealtime(
+      outbound.no,
+      "outbound:return_confirmed",
+      responsePayload,
+      Number(outbound.id),
+    );
+
+    emitOutboundRealtime(
+      outbound.no,
+      "outbound:confirm_return",
+      responsePayload,
+      Number(outbound.id),
+    );
+
+    return res.json(responsePayload);
   },
 );
 
@@ -3464,21 +3499,36 @@ export const confirmRTCtoStock = asyncHandler(
       };
     });
 
-    emitOutboundRealtime(
-      no,
-      config.confirmEvent,
-      {
-        outbound_no: no,
-        ...result,
-      },
-      Number(outbound.id),
-    );
-
-    return res.json({
+    const responsePayload = {
       success: true,
       message: `confirm ${config.source.toUpperCase()} to stock success`,
       outbound_no: no,
+      outbound_id: Number(outbound.id),
+      out_type: (outbound as any).out_type ?? null,
       ...result,
-    });
+    };
+
+    emitOutboundRealtime(
+      no,
+      config.confirmEvent,
+      responsePayload,
+      Number(outbound.id),
+    );
+
+    emitOutboundRealtime(
+      no,
+      "outbound:return_confirmed",
+      responsePayload,
+      Number(outbound.id),
+    );
+
+    emitOutboundRealtime(
+      no,
+      "outbound:rtc_bor_return_confirmed",
+      responsePayload,
+      Number(outbound.id),
+    );
+
+    return res.json(responsePayload);
   },
 );
