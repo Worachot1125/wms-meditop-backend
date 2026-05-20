@@ -3394,6 +3394,11 @@ export const getOdooOutboundsByBatchName = asyncHandler(
               }))
             : [];
 
+          const originalQty = Math.max(0, Number(gi.qty ?? 0));
+          const pdQty = Math.max(0, Number(gi.pd ?? 0));
+
+          const displayQty = Math.max(0, originalQty - pdQty);
+
           return {
             id: gi.id,
             outbound_id: gi.outbound_id,
@@ -3407,7 +3412,12 @@ export const getOdooOutboundsByBatchName = asyncHandler(
             lot_serial: gi.lot_serial,
             lot_adjustment_id: gi.lot_adjustment_id ?? null,
             exp: exp ? new Date(exp).toISOString() : null,
-            qty: gi.qty,
+            // ✅ qty ที่ FE เห็น = qty - pd
+            qty: displayQty,
+
+            // ✅ เก็บค่า debug/ใช้งานต่อ
+            original_qty: originalQty,
+            pd: pdQty,
             pick: gi.pick,
             confirmed_pick: Number(gi.confirmed_pick ?? 0),
             pack: gi.pack,

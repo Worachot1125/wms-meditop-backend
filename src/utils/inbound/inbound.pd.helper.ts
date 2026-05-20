@@ -296,12 +296,21 @@ export async function handlePDAutoProcess({
       }
 
       const currentQty = Math.max(0, Number(match.qty ?? 0));
+      const currentPd = Math.max(0, Number(match.pd ?? 0));
+      const currentRtc = Math.max(0, Number(match.rtc ?? 0));
+      const currentBor = Math.max(0, Number(match.bor ?? 0));
+      const currentReturn = Math.max(0, Number(match.return ?? 0));
       const currentPack = Math.max(0, Number(match.pack ?? 0));
 
-      const qtyReduce = Math.min(currentQty, pdQty);
-      const packReduce = Math.min(currentPack, pdQty);
+      const currentRemain = Math.max(
+        0,
+        currentQty - currentPd - currentRtc - currentBor - currentReturn,
+      );
 
-      const nextQty = Math.max(0, currentQty - qtyReduce);
+      const pdApplyQty = Math.min(currentRemain, pdQty);
+      const nextPd = currentPd + pdApplyQty;
+
+      const packReduce = Math.min(currentPack, pdApplyQty);
       const nextPack = Math.max(0, currentPack - packReduce);
 
       const boxResult =
@@ -314,37 +323,10 @@ export async function handlePDAutoProcess({
 
       packingBoxAffected.push(...boxResult);
 
-      if (nextQty <= 0) {
-        await tx.goods_out_item.update({
-          where: { id: match.id },
-          data: {
-            qty: 0,
-            pack: nextPack,
-            deleted_at: new Date(),
-            updated_at: new Date(),
-          } as any,
-        });
-
-        affected.push({
-          pd_no: number,
-          outbound_no: outbound.no,
-          goods_out_item_id: match.id,
-          product_id: productId,
-          lot_id: lotId,
-          lot_serial: match.lot_serial ?? lotSerial ?? null,
-          old_qty: currentQty,
-          pd_qty: pdQty,
-          new_qty: 0,
-          action: "pd_soft_delete_item",
-        });
-
-        continue;
-      }
-
       await tx.goods_out_item.update({
         where: { id: match.id },
         data: {
-          qty: nextQty,
+          pd: nextPd,
           pack: nextPack,
           updated_at: new Date(),
         } as any,
@@ -358,11 +340,17 @@ export async function handlePDAutoProcess({
         lot_id: lotId,
         lot_serial: match.lot_serial ?? lotSerial ?? null,
         old_qty: currentQty,
+        current_pd: currentPd,
         current_pick: Number(match.pick ?? 0),
         current_pack: Number(match.pack ?? 0),
-        pd_qty: pdQty,
-        new_qty: nextQty,
-        action: "pd_reduce_qty",
+        pd_qty: pdApplyQty,
+        new_qty: currentQty,
+        new_pd: nextPd,
+        remaining_qty: Math.max(
+          0,
+          currentQty - nextPd - currentRtc - currentBor - currentReturn,
+        ),
+        action: "pd_increment",
       });
     }
 

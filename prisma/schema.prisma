@@ -491,6 +491,7 @@ model goods_out_item {
   pick               Int       @default(0)
   rtc                Int       @default(0)
   bor                Int       @default(0)
+  pd                 Int       @default(0)
   return             Int       @default(0)
   rtc_check          Boolean   @default(false)
   return_check       Boolean   @default(false)

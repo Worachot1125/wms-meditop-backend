@@ -461,9 +461,24 @@ export const scanOutboundLocation = asyncHandler(
           where: { no },
           select: { id: true, no: true, deleted_at: true },
         }),
-      resolveLocation: resolveLocationByFullNameBasic,
+
+      resolveLocation: async (locationFullName: string) => {
+        const location = await resolveLocationByFullNameBasic(locationFullName);
+
+        const fullName = String(location?.full_name ?? "").trim();
+
+        if (fullName.includes("_Location_Pack")) {
+          throw badRequest(
+            "Location นี้เป็น Location_Pack ไม่สามารถใช้สำหรับ Scan Location ได้",
+          );
+        }
+
+        return location;
+      },
+
       buildDetail: ({ doc, location }) =>
         buildOutboundDetail(doc.id, doc.no, location.id),
+
       buildPayload: ({ location, detail }) => ({
         location: {
           location_id: location.id,
@@ -471,9 +486,11 @@ export const scanOutboundLocation = asyncHandler(
         },
         ...detail,
       }),
+
       emitRealtime: (payload, doc) => {
         emitOutboundRealtime(no, "outbound:scan_location", payload, doc.id);
       },
+
       notFoundMessage: `ไม่พบ outbound: ${no}`,
     });
 
@@ -2764,6 +2781,18 @@ export const confirmOutboundPickToStock = asyncHandler(
           ).trim();
 
           if (!locationName) {
+            continue;
+          }
+
+          // ✅ Location_Pack ไม่ต้องตัด stock เพราะถูกตัดไปตอน Auto-LocationPack แล้ว
+          if (locationName.toLowerCase().includes("_location_pack")) {
+            const lpQty = Math.max(
+              0,
+              Math.floor(Number(pickRow.qty_pick ?? 0)),
+            );
+            const skipQty = Math.min(remainToCut, lpQty);
+
+            remainToCut -= skipQty;
             continue;
           }
 

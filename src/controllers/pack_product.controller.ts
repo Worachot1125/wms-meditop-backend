@@ -893,19 +893,23 @@ function applyReturnToPackProduct(row: any) {
                 ...po.outbound,
                 goods_outs: Array.isArray(po.outbound?.goods_outs)
                   ? po.outbound.goods_outs.map((item: any) => {
+                      const originalQty = Math.max(0, Number(item.qty ?? 0));
+                      const pdQty = Math.max(0, Number(item.pd ?? 0));
                       const returnQty = Math.max(0, Number(item.return ?? 0));
+                      const originalPick = Math.max(0, Number(item.pick ?? 0));
 
                       return {
                         ...item,
 
-                        // ✅ qty เดิมจาก DB
-                        qty: Number(item.qty ?? 0),
+                        // qty ที่ FE ใช้งาน = qty DB - pd
+                        qty: Math.max(0, originalQty - pdQty),
 
-                        // ✅ pick เดิมจาก DB
-                        pick: Math.max(0, Number(item.pick ?? 0) - returnQty),
+                        // pick ที่ FE ใช้งาน = pick DB - return
+                        pick: Math.max(0, originalPick - returnQty),
 
-                        original_qty: Number(item.qty ?? 0),
-                        original_pick: Number(item.pick ?? 0),
+                        original_qty: originalQty,
+                        original_pick: originalPick,
+                        pd_qty: pdQty,
                         return_qty: returnQty,
                       };
                     })
