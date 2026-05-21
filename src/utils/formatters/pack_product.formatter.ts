@@ -72,6 +72,9 @@ export interface GroupedPackProductItemFormatter {
   qty: number;
   pick: number;
   pack: number;
+  pd_qty: number;
+  pd_returned_qty: number;
+  pending_return_qty: number;
   status: string;
   outbound_ids: number[];
   outbound_nos: string[];
@@ -102,7 +105,9 @@ export interface PackProductFormatter {
 }
 
 function normalizeKey(value: unknown) {
-  return String(value ?? "").trim().toUpperCase();
+  return String(value ?? "")
+    .trim()
+    .toUpperCase();
 }
 
 function sortNumberAsc(arr: number[]) {
@@ -126,8 +131,10 @@ function pickGroupedStatus(current: string, incoming: string) {
   if (c === "completed" && i !== "completed") return incoming;
   if (i === "completed" && c !== "completed") return current;
 
-  if (c === "packed" || i === "packed") return c === "packed" ? current : incoming;
-  if (c === "picked" || i === "picked") return c === "picked" ? current : incoming;
+  if (c === "packed" || i === "packed")
+    return c === "packed" ? current : incoming;
+  if (c === "picked" || i === "picked")
+    return c === "picked" ? current : incoming;
 
   return current || incoming;
 }
@@ -191,9 +198,7 @@ function mergeBoxDetails(
 function buildBoxDisplay(details: GroupedPackProductBoxDetailFormatter[]) {
   if (!details.length) return null;
 
-  return details
-    .map((d) => `${d.box_label} (จำนวน ${d.qty})`)
-    .join(", ");
+  return details.map((d) => `${d.box_label} (จำนวน ${d.qty})`).join(", ");
 }
 
 function buildItemBoxMap(boxes: PackBoxWithItems[]) {
@@ -212,8 +217,14 @@ function buildItemBoxMap(boxes: PackBoxWithItems[]) {
         box_details: [],
       };
 
-      existing.box_ids = uniqueNumbers([...existing.box_ids, Number(packBox.id)]);
-      existing.box_nos = uniqueNumbers([...existing.box_nos, Number(packBox.box_no)]);
+      existing.box_ids = uniqueNumbers([
+        ...existing.box_ids,
+        Number(packBox.id),
+      ]);
+      existing.box_nos = uniqueNumbers([
+        ...existing.box_nos,
+        Number(packBox.box_no),
+      ]);
       existing.box_labels = uniqueStrings([
         ...existing.box_labels,
         String(packBox.box_label ?? ""),
@@ -269,6 +280,23 @@ function groupItemsBySkuAndLot(
           qty: Number(item.qty ?? 0),
           pick: Number(item.pick ?? 0),
           pack: Number(item.pack ?? 0),
+          pd_qty: Number((item as any).pd_qty ?? (item as any).pd ?? 0),
+          pd_returned_qty: Number(
+            (item as any).pd_returned_qty ??
+              (item as any).return_qty ??
+              (item as any).return ??
+              0,
+          ),
+          pending_return_qty: Math.max(
+            0,
+            Number((item as any).pd_qty ?? (item as any).pd ?? 0) -
+              Number(
+                (item as any).pd_returned_qty ??
+                  (item as any).return_qty ??
+                  (item as any).return ??
+                  0,
+              ),
+          ),
           status: item.status,
           outbound_ids: uniqueNumbers([Number(item.outbound_id ?? 0)]),
           outbound_nos: uniqueStrings([String(item.outbound_no ?? "")]),
@@ -288,6 +316,20 @@ function groupItemsBySkuAndLot(
       existing.qty += Number(item.qty ?? 0);
       existing.pick += Number(item.pick ?? 0);
       existing.pack += Number(item.pack ?? 0);
+      const pdQty = Number((item as any).pd_qty ?? (item as any).pd ?? 0);
+      const returnedQty = Number(
+        (item as any).pd_returned_qty ??
+          (item as any).return_qty ??
+          (item as any).return ??
+          0,
+      );
+
+      existing.pd_qty += pdQty;
+      existing.pd_returned_qty += returnedQty;
+      existing.pending_return_qty = Math.max(
+        0,
+        existing.pd_qty - existing.pd_returned_qty,
+      );
       existing.status = pickGroupedStatus(existing.status, item.status);
       existing.outbound_ids = uniqueNumbers([
         ...existing.outbound_ids,
@@ -336,15 +378,17 @@ function groupItemsBySkuAndLot(
 function buildPackSummary(input: {
   packProduct: pack_product & {
     outbounds?: Array<{
-      outbound?: (outbound & {
-        goods_outs?: (goods_out_item & {
-          barcode_ref?: barcode | null;
-          boxes?: Array<{
-            quantity: number | null;
-            deleted_at?: Date | null;
-          }>;
-        })[];
-      }) | null;
+      outbound?:
+        | (outbound & {
+            goods_outs?: (goods_out_item & {
+              barcode_ref?: barcode | null;
+              boxes?: Array<{
+                quantity: number | null;
+                deleted_at?: Date | null;
+              }>;
+            })[];
+          })
+        | null;
     }>;
     boxes?: Array<
       pack_product_box & {
@@ -360,7 +404,9 @@ function buildPackSummary(input: {
   const { packProduct } = input;
 
   const boxes = Array.isArray(packProduct.boxes) ? packProduct.boxes : [];
-  const outbounds = Array.isArray(packProduct.outbounds) ? packProduct.outbounds : [];
+  const outbounds = Array.isArray(packProduct.outbounds)
+    ? packProduct.outbounds
+    : [];
 
   const allItems = outbounds.flatMap((row) =>
     (row.outbound?.goods_outs ?? []).map((item) => ({
@@ -430,24 +476,26 @@ function buildPackSummary(input: {
 export function formatPackProduct(
   row: pack_product & {
     outbounds?: Array<{
-      outbound?: (outbound & {
-        goods_outs?: (goods_out_item & {
-          deleted_at?: Date | null;
-          barcode_ref?: barcode | null;
-          boxes?: any[];
-          barcode_text?: string | null;
-          location_picks?: Array<{
-            location_id: number;
-            qty_pick: number;
-            location?: {
-              id: number;
-              full_name: string;
-            } | null;
-          }>;
-        })[];
-        department_code?: string | null;
-        department_raw?: string | null;
-      }) | null;
+      outbound?:
+        | (outbound & {
+            goods_outs?: (goods_out_item & {
+              deleted_at?: Date | null;
+              barcode_ref?: barcode | null;
+              boxes?: any[];
+              barcode_text?: string | null;
+              location_picks?: Array<{
+                location_id: number;
+                qty_pick: number;
+                location?: {
+                  id: number;
+                  full_name: string;
+                } | null;
+              }>;
+            })[];
+            department_code?: string | null;
+            department_raw?: string | null;
+          })
+        | null;
     }>;
     boxes?: Array<
       pack_product_box & {

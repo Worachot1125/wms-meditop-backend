@@ -28,6 +28,7 @@ import {
   getAutoLocationPackCandidates,
   applyAutoLocationPack,
   getOdooOutboundsInProcess,
+  getOdooOutboundsWaitReturnPack,
 } from "../controllers/outbound.odoo.controller";
 
 import {
@@ -52,6 +53,7 @@ import {
   getPackProducts,
   movePdPackingToLocation,
   moveRtcPackingToLocation,
+  returnPdPackProductItem,
 } from "../controllers/pack_product.controller";
 
 const router = Router();
@@ -79,6 +81,12 @@ router.get(
   auth,
   attachDepartmentAccess,
   getOdooOutboundsInProcess,
+);
+router.get(
+  "/get/odoo/transfers/return",
+  auth,
+  attachDepartmentAccess,
+  getOdooOutboundsWaitReturnPack,
 );
 router.get("/get/odoo/transfers/:no", getOdooOutboundByNo);
 router.patch("/update/odoo/transfers/:no", updateOdooOutbound);
@@ -121,6 +129,10 @@ router.post(
 router.get("/pack-products/:packProductId/summary", getPackProductSummary);
 router.get("/pack-products/:id", getPackProductById);
 router.post("/pack-products/scan", scanPackProductBarcode);
+router.post(
+  "/pack-products/:packProductId/pd/return-item",
+  returnPdPackProductItem,
+);
 router.post(
   "/pack-products/:packProductId/boxes/:boxId/scan-item",
   scanPackProductItem,

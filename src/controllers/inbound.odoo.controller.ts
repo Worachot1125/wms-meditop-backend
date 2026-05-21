@@ -124,6 +124,15 @@ export const receiveFromOdoo = asyncHandler(
         }
 
         const mergedItems = mergeInboundItems(items);
+        const isBORNumber = (value: any) => {
+          const s = String(value ?? "")
+            .trim()
+            .toUpperCase();
+
+          return (
+            s.includes("BOR") || s.includes("/BOR") || s.startsWith("WH/BOR")
+          );
+        };
 
         // ✅ BOR/BOS internal transfer -> swap / swap_item
         if (
@@ -174,10 +183,11 @@ export const receiveFromOdoo = asyncHandler(
           continue;
         }
 
-        if (isRTCNumber(number)) {
-          const rtc = await handleRTCReturnTransfer({
+        if (isRTCNumber(number) || isBORNumber(number)) {
+          const rtcBor = await handleRTCReturnTransfer({
             picking_id,
             number,
+            no: (transfer as any).no,
             location_id,
             location,
             location_dest_id,
@@ -190,7 +200,7 @@ export const receiveFromOdoo = asyncHandler(
             mergedItems,
           });
 
-          results.push(rtc);
+          results.push(rtcBor);
           continue;
         }
 
@@ -214,7 +224,7 @@ export const receiveFromOdoo = asyncHandler(
           continue;
         }
 
-        // ✅ BOR และ non-TF อื่น ๆ -> inbound / goods_in ปกติ
+       // ✅ non-TF อื่น ๆ -> inbound / goods_in ปกติ
         const inbound = await handleInboundTransfer({
           picking_id,
           number,

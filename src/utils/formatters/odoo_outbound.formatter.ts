@@ -62,6 +62,13 @@ export interface OdooOutboundItemFormatter {
   pick: number;
   pack: number;
   return: number;
+
+  pd: number;
+  pd_qty: number;
+  return_qty: number;
+  pd_returned_qty: number;
+  pending_return_qty: number;
+
   boxes: BoxFormatter[];
   status: string;
   out_type: string;
@@ -207,7 +214,17 @@ export function formatOdooOutbound(
               sku: item.sku ?? null,
               rtc: item.rtc ?? null,
               rtc_check: item.rtc_check,
-              return: item.return ?? 0,
+              return: Number(item.return ?? 0),
+
+              pd: Number(item.pd ?? 0),
+              pd_qty: Number(item.pd ?? 0),
+              return_qty: Number(item.return ?? 0),
+              pd_returned_qty: Number(item.return ?? 0),
+              pending_return_qty: Math.max(
+                0,
+                Number(item.pd ?? 0) - Number(item.return ?? 0),
+              ),
+
               return_check: item.return_check,
 
               lock_no: item.lock_no ?? null,

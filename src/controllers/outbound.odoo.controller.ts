@@ -821,6 +821,9 @@ export const receiveOutboundFromOdoo = asyncHandler(
                   location,
                   location_dest_id: mappedVirtualLocationId,
                   location_dest,
+                  location_dest_owner: location_dest_owner ?? null,
+                  location_dest_owner_display:
+                    location_dest_owner_display ?? null,
                   department_id: department_id?.toString(),
                   department: department?.toString() || "",
                   reference: convertedReference,
@@ -839,6 +842,9 @@ export const receiveOutboundFromOdoo = asyncHandler(
                   location,
                   location_dest_id: mappedVirtualLocationId,
                   location_dest,
+                  location_dest_owner: location_dest_owner ?? null,
+                  location_dest_owner_display:
+                    location_dest_owner_display ?? null,
                   department_id: department_id?.toString(),
                   department: department?.toString() || "",
                   reference: convertedReference,
@@ -2067,342 +2073,387 @@ export const getOdooOutboundsAvailable = asyncHandler(
   },
 );
 
-export const getOdooOutboundsInProcess = asyncHandler(
-  async (req: AuthRequest, res: Response) => {
-    const page = Number(req.query.page) || 1;
-    const limit =
-      req.query.limit !== undefined ? Number(req.query.limit) || 10 : 10;
+type WaitPackMode = "normal" | "return_pack";
 
-    if (isNaN(page) || page < 1) {
-      throw badRequest("page ต้องเป็นตัวเลขบวกที่มีค่ามากกว่า 0");
-    }
+const getOdooOutboundsInProcessBase = async (
+  req: AuthRequest,
+  res: Response,
+  mode: WaitPackMode,
+) => {
+  const page = Number(req.query.page) || 1;
+  const limit =
+    req.query.limit !== undefined ? Number(req.query.limit) || 10 : 10;
 
-    if (isNaN(limit) || limit < 1) {
-      throw badRequest("limit ต้องเป็นตัวเลขบวกที่มีค่ามากกว่า 0");
-    }
+  if (isNaN(page) || page < 1) {
+    throw badRequest("page ต้องเป็นตัวเลขบวกที่มีค่ามากกว่า 0");
+  }
 
-    const skip = (page - 1) * limit;
+  if (isNaN(limit) || limit < 1) {
+    throw badRequest("limit ต้องเป็นตัวเลขบวกที่มีค่ามากกว่า 0");
+  }
 
-    const rawSearch = req.query.search;
-    const search = typeof rawSearch === "string" ? rawSearch.trim() : "";
+  const skip = (page - 1) * limit;
 
-    const selectedDepartmentNames = parseDepartmentNames(req.query.department);
+  const rawSearch = req.query.search;
+  const search = typeof rawSearch === "string" ? rawSearch.trim() : "";
 
-    const accessWhere = buildDepartmentAccessWhere(
-      req,
-    ) as Prisma.outboundWhereInput;
+  const selectedDepartmentNames = parseDepartmentNames(req.query.department);
 
-    const allowedDepartmentFilter = accessWhere.department_id;
+  const accessWhere = buildDepartmentAccessWhere(
+    req,
+  ) as Prisma.outboundWhereInput;
 
-    const requestedLocalDepartmentIds = parseDepartmentIdsAsNumbers(
-      req.query.department_ids ?? req.query.department_id,
-    );
+  const allowedDepartmentFilter = accessWhere.department_id;
 
-    let requestedOdooDepartmentIds: string[] = [];
+  const requestedLocalDepartmentIds = parseDepartmentIdsAsNumbers(
+    req.query.department_ids ?? req.query.department_id,
+  );
 
-    if (selectedDepartmentNames.length > 0) {
-      const deptRows = await prisma.department.findMany({
-        where: {
-          deleted_at: null,
-          OR: [
-            {
-              short_name: {
-                in: selectedDepartmentNames,
-                mode: "insensitive",
-              },
+  let requestedOdooDepartmentIds: string[] = [];
+
+  if (selectedDepartmentNames.length > 0) {
+    const deptRows = await prisma.department.findMany({
+      where: {
+        deleted_at: null,
+        OR: [
+          {
+            short_name: {
+              in: selectedDepartmentNames,
+              mode: "insensitive",
             },
-            {
-              full_name: {
-                in: selectedDepartmentNames,
-                mode: "insensitive",
-              },
-            },
-          ],
-        },
-        select: {
-          odoo_id: true,
-        },
-      });
-
-      requestedOdooDepartmentIds = deptRows
-        .map((d) => d.odoo_id)
-        .filter((v): v is number => v !== null && v !== undefined)
-        .map((v) => String(v));
-    } else if (requestedLocalDepartmentIds.length > 0) {
-      const deptRows = await prisma.department.findMany({
-        where: {
-          id: { in: requestedLocalDepartmentIds },
-          deleted_at: null,
-        },
-        select: {
-          odoo_id: true,
-        },
-      });
-
-      requestedOdooDepartmentIds = deptRows
-        .map((d) => d.odoo_id)
-        .filter((v): v is number => v !== null && v !== undefined)
-        .map((v) => String(v));
-    }
-
-    let selectedDepartmentWhere: Prisma.outboundWhereInput = {};
-
-    if (requestedOdooDepartmentIds.length > 0) {
-      if (typeof allowedDepartmentFilter === "string") {
-        selectedDepartmentWhere = requestedOdooDepartmentIds.includes(
-          allowedDepartmentFilter,
-        )
-          ? { department_id: allowedDepartmentFilter }
-          : { department_id: { in: [] } };
-      } else if (
-        allowedDepartmentFilter &&
-        typeof allowedDepartmentFilter === "object" &&
-        "in" in allowedDepartmentFilter
-      ) {
-        const allowed = (allowedDepartmentFilter.in as (string | number)[]).map(
-          (v) => String(v),
-        );
-
-        const selected = requestedOdooDepartmentIds.filter((id) =>
-          allowed.includes(id),
-        );
-
-        selectedDepartmentWhere = {
-          department_id: { in: selected },
-        };
-      } else {
-        selectedDepartmentWhere = {
-          department_id: { in: requestedOdooDepartmentIds },
-        };
-      }
-    } else {
-      if (selectedDepartmentNames.length > 0) {
-        selectedDepartmentWhere = { department_id: { in: [] } };
-      } else if (typeof allowedDepartmentFilter === "string") {
-        selectedDepartmentWhere = { department_id: allowedDepartmentFilter };
-      } else if (
-        allowedDepartmentFilter &&
-        typeof allowedDepartmentFilter === "object" &&
-        "in" in allowedDepartmentFilter
-      ) {
-        selectedDepartmentWhere = {
-          department_id: {
-            in: (allowedDepartmentFilter.in as (string | number)[]).map((v) =>
-              String(v),
-            ),
           },
-        };
-      } else {
-        selectedDepartmentWhere = {};
-      }
-    }
+          {
+            full_name: {
+              in: selectedDepartmentNames,
+              mode: "insensitive",
+            },
+          },
+        ],
+      },
+      select: {
+        odoo_id: true,
+      },
+    });
 
-    const baseWhere: Prisma.outboundWhereInput = {
-      deleted_at: null,
-      in_process: true,
-      ...selectedDepartmentWhere,
-    };
+    requestedOdooDepartmentIds = deptRows
+      .map((d) => d.odoo_id)
+      .filter((v): v is number => v !== null && v !== undefined)
+      .map((v) => String(v));
+  } else if (requestedLocalDepartmentIds.length > 0) {
+    const deptRows = await prisma.department.findMany({
+      where: {
+        id: { in: requestedLocalDepartmentIds },
+        deleted_at: null,
+      },
+      select: {
+        odoo_id: true,
+      },
+    });
 
-    let where: Prisma.outboundWhereInput = baseWhere;
+    requestedOdooDepartmentIds = deptRows
+      .map((d) => d.odoo_id)
+      .filter((v): v is number => v !== null && v !== undefined)
+      .map((v) => String(v));
+  }
 
-    if (search) {
-      const searchCondition =
-        await buildOdooOutboundAvailableSearchWhere(search);
+  let selectedDepartmentWhere: Prisma.outboundWhereInput = {};
 
-      where = {
-        AND: [baseWhere, searchCondition],
+  if (requestedOdooDepartmentIds.length > 0) {
+    if (typeof allowedDepartmentFilter === "string") {
+      selectedDepartmentWhere = requestedOdooDepartmentIds.includes(
+        allowedDepartmentFilter,
+      )
+        ? { department_id: allowedDepartmentFilter }
+        : { department_id: { in: [] } };
+    } else if (
+      allowedDepartmentFilter &&
+      typeof allowedDepartmentFilter === "object" &&
+      "in" in allowedDepartmentFilter
+    ) {
+      const allowed = (allowedDepartmentFilter.in as (string | number)[]).map(
+        (v) => String(v),
+      );
+
+      const selected = requestedOdooDepartmentIds.filter((id) =>
+        allowed.includes(id),
+      );
+
+      selectedDepartmentWhere = {
+        department_id: { in: selected },
+      };
+    } else {
+      selectedDepartmentWhere = {
+        department_id: { in: requestedOdooDepartmentIds },
       };
     }
+  } else {
+    if (selectedDepartmentNames.length > 0) {
+      selectedDepartmentWhere = { department_id: { in: [] } };
+    } else if (typeof allowedDepartmentFilter === "string") {
+      selectedDepartmentWhere = { department_id: allowedDepartmentFilter };
+    } else if (
+      allowedDepartmentFilter &&
+      typeof allowedDepartmentFilter === "object" &&
+      "in" in allowedDepartmentFilter
+    ) {
+      selectedDepartmentWhere = {
+        department_id: {
+          in: (allowedDepartmentFilter.in as (string | number)[]).map((v) =>
+            String(v),
+          ),
+        },
+      };
+    } else {
+      selectedDepartmentWhere = {};
+    }
+  }
 
-    const [outbounds, total] = await Promise.all([
-      prisma.outbound.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy: { created_at: "desc" },
-        include: {
-          batch_lock: {
-            select: {
-              id: true,
-              name: true,
-              status: true,
-              remark: true,
-              user_id: true,
-              created_at: true,
-              updated_at: true,
-              released_at: true,
-            },
-          },
+  const rtcBorActionWhere: Prisma.goods_out_itemWhereInput = {
+    deleted_at: null,
+    OR: [
+      { rtc_check: true },
+      { return_check: true },
+      { rtc: { gt: 0 } },
+      { bor: { gt: 0 } },
+    ],
+  };
 
-          packProductOutbounds: {
-            select: {
-              id: true,
-              pack_product_id: true,
-              outbound_id: true,
-            },
-          },
-
+  const packActionWhere: Prisma.outboundWhereInput =
+    mode === "return_pack"
+      ? {
           goods_outs: {
-            where: { deleted_at: null },
-            include: {
-              barcode_ref: {
-                where: { deleted_at: null },
-              },
+            some: rtcBorActionWhere,
+          },
+        }
+      : {
+          NOT: {
+            goods_outs: {
+              some: rtcBorActionWhere,
             },
-            orderBy: [{ sequence: "asc" }, { id: "asc" }],
+          },
+        };
+
+  const baseWhere: Prisma.outboundWhereInput = {
+    deleted_at: null,
+    in_process: true,
+    ...selectedDepartmentWhere,
+    ...packActionWhere,
+  };
+
+  let where: Prisma.outboundWhereInput = baseWhere;
+
+  if (search) {
+    const searchCondition = await buildOdooOutboundAvailableSearchWhere(search);
+
+    where = {
+      AND: [baseWhere, searchCondition],
+    };
+  }
+
+  const [outbounds, total] = await Promise.all([
+    prisma.outbound.findMany({
+      where,
+      skip,
+      take: limit,
+      orderBy: { created_at: "desc" },
+      include: {
+        batch_lock: {
+          select: {
+            id: true,
+            name: true,
+            status: true,
+            remark: true,
+            user_id: true,
+            created_at: true,
+            updated_at: true,
+            released_at: true,
           },
         },
-      }),
-
-      prisma.outbound.count({ where }),
-    ]);
-
-    const departmentIds = [
-      ...new Set(
-        outbounds
-          .map((ob) =>
-            typeof ob.department_id === "string" ? ob.department_id.trim() : "",
-          )
-          .filter((s) => s !== "")
-          .map((s) => parseInt(s, 10))
-          .filter((num) => Number.isFinite(num)),
-      ),
-    ];
-
-    const deptMap = new Map<number, string>();
-
-    if (departmentIds.length > 0) {
-      const departments = await prisma.department.findMany({
-        where: {
-          odoo_id: { in: departmentIds },
-          deleted_at: null,
+        packProductOutbounds: {
+          select: {
+            id: true,
+            pack_product_id: true,
+            outbound_id: true,
+          },
         },
-        select: { odoo_id: true, short_name: true },
-      });
+        goods_outs: {
+          where: { deleted_at: null },
+          include: {
+            barcode_ref: {
+              where: { deleted_at: null },
+            },
+          },
+          orderBy: [{ sequence: "asc" }, { id: "asc" }],
+        },
+      },
+    }),
 
-      for (const dept of departments) {
-        if (dept.odoo_id) {
-          deptMap.set(Number(dept.odoo_id), dept.short_name);
-        }
+    prisma.outbound.count({ where }),
+  ]);
+
+  const departmentIds = [
+    ...new Set(
+      outbounds
+        .map((ob) =>
+          typeof ob.department_id === "string" ? ob.department_id.trim() : "",
+        )
+        .filter((s) => s !== "")
+        .map((s) => parseInt(s, 10))
+        .filter((num) => Number.isFinite(num)),
+    ),
+  ];
+
+  const deptMap = new Map<number, string>();
+
+  if (departmentIds.length > 0) {
+    const departments = await prisma.department.findMany({
+      where: {
+        odoo_id: { in: departmentIds },
+        deleted_at: null,
+      },
+      select: { odoo_id: true, short_name: true },
+    });
+
+    for (const dept of departments) {
+      if (dept.odoo_id) {
+        deptMap.set(Number(dept.odoo_id), dept.short_name);
       }
     }
+  }
 
-    const formatted = outbounds.map((ob: any) => {
-      const deptId =
-        typeof ob.department_id === "string"
-          ? parseInt(ob.department_id, 10)
-          : NaN;
+  const formatted = outbounds.map((ob: any) => {
+    const deptId =
+      typeof ob.department_id === "string"
+        ? parseInt(ob.department_id, 10)
+        : NaN;
 
-      const departmentShortName = Number.isFinite(deptId)
-        ? deptMap.get(deptId)
-        : undefined;
+    const departmentShortName = Number.isFinite(deptId)
+      ? deptMap.get(deptId)
+      : undefined;
 
-      const items = Array.isArray(ob.goods_outs)
-        ? ob.goods_outs.map((item: any) => ({
-            id: item.id,
-            outbound_id: item.outbound_id,
-            sequence: item.sequence,
-            product_id: item.product_id,
-            code: item.code,
-            name: item.name,
-            sku: item.sku,
-            unit: item.unit,
-            tracking: item.tracking,
-            lot_id: item.lot_id,
-            lot_serial: item.lot_serial,
-            qty: item.qty,
-            pick: item.pick,
-            confirmed_pick: item.confirmed_pick,
-            pack: item.pack,
-            rtc: item.rtc,
-            rtc_check: item.rtc_check,
-            return: item.return,
-            return_check: item.return_check,
-            status: item.status,
-            barcode_id: item.barcode_id,
-            barcode_text: item.barcode_text,
-            created_at: item.created_at,
-            updated_at: item.updated_at,
-            barcode: item.barcode_ref
-              ? {
-                  id: item.barcode_ref.id,
-                  barcode: item.barcode_ref.barcode,
-                  lot_start: item.barcode_ref.lot_start,
-                  lot_stop: item.barcode_ref.lot_stop,
-                  exp_start: item.barcode_ref.exp_start,
-                  exp_stop: item.barcode_ref.exp_stop,
-                  barcode_length: item.barcode_ref.barcode_length,
-                }
-              : null,
-          }))
-        : [];
+    const items = Array.isArray(ob.goods_outs)
+      ? ob.goods_outs.map((item: any) => ({
+          id: item.id,
+          outbound_id: item.outbound_id,
+          sequence: item.sequence,
+          product_id: item.product_id,
+          code: item.code,
+          name: item.name,
+          sku: item.sku,
+          unit: item.unit,
+          tracking: item.tracking,
+          lot_id: item.lot_id,
+          lot_serial: item.lot_serial,
+          qty: item.qty,
+          pick: item.pick,
+          confirmed_pick: item.confirmed_pick,
+          pack: item.pack,
+          rtc: item.rtc,
+          rtc_check: item.rtc_check,
+          bor: item.bor,
+          return: item.return,
+          return_check: item.return_check,
+          status: item.status,
+          barcode_id: item.barcode_id,
+          barcode_text: item.barcode_text,
+          created_at: item.created_at,
+          updated_at: item.updated_at,
+          barcode: item.barcode_ref
+            ? {
+                id: item.barcode_ref.id,
+                barcode: item.barcode_ref.barcode,
+                lot_start: item.barcode_ref.lot_start,
+                lot_stop: item.barcode_ref.lot_stop,
+                exp_start: item.barcode_ref.exp_start,
+                exp_stop: item.barcode_ref.exp_stop,
+                barcode_length: item.barcode_ref.barcode_length,
+              }
+            : null,
+        }))
+      : [];
 
-      const hasRtcBor = (ob.goods_outs || []).some((x: any) => {
-        return (
-          Boolean(x.rtc_check) ||
-          Number(x.rtc ?? 0) > 0 ||
-          Number(x.bor ?? 0) > 0
-        );
-      });
+    const hasRtcBor = items.some((x: any) => {
+      return (
+        Boolean(x.rtc_check) ||
+        Boolean(x.return_check) ||
+        Number(x.rtc ?? 0) > 0 ||
+        Number(x.bor ?? 0) > 0
+      );
+    });
 
-      const returnPackMode = String(ob.no ?? "")
-        .toUpperCase()
-        .includes("BOR")
+    const returnPackMode =
+      String(ob.out_type ?? "")
+        .trim()
+        .toUpperCase() === "BO"
         ? "BOR"
         : "RTC";
 
-      return {
-        id: ob.id,
-        no: ob.no,
-        date: ob.date,
-        created_at: ob.created_at,
-        invoice: ob.invoice,
-        origin: ob.origin,
-        reference: ob.reference,
-        department_id: ob.department_id,
-        department: departmentShortName ?? ob.department,
-        location: ob.location,
-        location_dest: ob.location_dest,
-        out_type: ob.out_type,
-        in_process: ob.in_process,
+    return {
+      id: ob.id,
+      no: ob.no,
+      date: ob.date,
+      created_at: ob.created_at,
+      invoice: ob.invoice,
+      origin: ob.origin,
+      reference: ob.reference,
+      department_id: ob.department_id,
+      department: departmentShortName ?? ob.department,
+      location: ob.location,
+      location_dest: ob.location_dest,
+      out_type: ob.out_type,
+      in_process: ob.in_process,
 
-        batch_id: ob.batch_lock?.id ?? null,
-        batch_name: ob.batch_lock?.name ?? null,
-        pack_product_id: ob.packProductOutbounds?.[0]?.pack_product_id ?? null,
-        has_rtc_bor_pack_action: hasRtcBor,
-        rtc_bor_mode: hasRtcBor ? returnPackMode : null,
-        rtc_no: hasRtcBor ? ob.no : null,
-        batch: ob.batch_lock
-          ? {
-              id: ob.batch_lock.id,
-              name: ob.batch_lock.name,
-              status: ob.batch_lock.status,
-              remark: ob.batch_lock.remark,
-              user_id: ob.batch_lock.user_id,
-              created_at: ob.batch_lock.created_at,
-              updated_at: ob.batch_lock.updated_at,
-              released_at: ob.batch_lock.released_at,
-            }
+      batch_id: ob.batch_lock?.id ?? null,
+      batch_name: ob.batch_lock?.name ?? null,
+      pack_product_id: ob.packProductOutbounds?.[0]?.pack_product_id ?? null,
+
+      has_rtc_bor_pack_action: hasRtcBor,
+      rtc_bor_mode: hasRtcBor ? returnPackMode : null,
+      rtc_no: hasRtcBor ? ob.no : null,
+
+      batch: ob.batch_lock
+        ? {
+            id: ob.batch_lock.id,
+            name: ob.batch_lock.name,
+            status: ob.batch_lock.status,
+            remark: ob.batch_lock.remark,
+            user_id: ob.batch_lock.user_id,
+            created_at: ob.batch_lock.created_at,
+            updated_at: ob.batch_lock.updated_at,
+            released_at: ob.batch_lock.released_at,
+          }
+        : null,
+
+      total_items: items.length,
+      items,
+    };
+  });
+
+  return res.json({
+    data: formatted,
+    meta: {
+      page,
+      limit,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      department:
+        selectedDepartmentNames.length > 0
+          ? selectedDepartmentNames.join(",")
           : null,
+      mode,
+    },
+  });
+};
 
-        total_items: items.length,
-        items,
-      };
-    });
+export const getOdooOutboundsInProcess = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    return getOdooOutboundsInProcessBase(req, res, "normal");
+  },
+);
 
-    return res.json({
-      data: formatted,
-      meta: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-        department:
-          selectedDepartmentNames.length > 0
-            ? selectedDepartmentNames.join(",")
-            : null,
-      },
-    });
+export const getOdooOutboundsWaitReturnPack = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    return getOdooOutboundsInProcessBase(req, res, "return_pack");
   },
 );
 
@@ -3396,8 +3447,16 @@ export const getOdooOutboundsByBatchName = asyncHandler(
 
           const originalQty = Math.max(0, Number(gi.qty ?? 0));
           const pdQty = Math.max(0, Number(gi.pd ?? 0));
+          const returnQty = Math.max(0, Number(gi.return ?? 0));
+
+          const rawPick = Math.max(0, Number(gi.pick ?? 0));
+          const rawPack = Math.max(0, Number(gi.pack ?? 0));
 
           const displayQty = Math.max(0, originalQty - pdQty);
+
+          // ✅ pack/pick ที่แสดง ห้ามเกิน qty หลังหัก PD
+          const displayPick = Math.min(rawPick, displayQty);
+          const displayPack = Math.min(rawPack, displayPick, displayQty);
 
           return {
             id: gi.id,
@@ -3424,6 +3483,10 @@ export const getOdooOutboundsByBatchName = asyncHandler(
             rtc: gi.rtc ?? null,
             rtc_check: Boolean(gi.rtc_check),
             return: Number(gi.return ?? 0),
+            return_qty: returnQty,
+            pd_qty: pdQty,
+            pd_returned_qty: returnQty,
+            pending_return_qty: Math.max(0, pdQty - returnQty),
             return_check: Boolean(gi.return_check),
             status: gi.status,
             barcode_id: gi.barcode_id,
@@ -4430,7 +4493,16 @@ export const updateOutboundItem = asyncHandler(
 
 export const scanOutboundItemCheckBarcode = asyncHandler(
   async (
-    req: Request<{ no: string; itemId: string }, {}, { barcode: string }>,
+    req: Request<
+      { no: string; itemId: string },
+      {},
+      {
+        barcode: string;
+        location_full_name?: string;
+        validate_location?: boolean;
+        qty_input?: number;
+      }
+    >,
     res: Response,
   ) => {
     const no = Array.isArray(req.params.no) ? req.params.no[0] : req.params.no;
@@ -4441,14 +4513,26 @@ export const scanOutboundItemCheckBarcode = asyncHandler(
     const itemId = parseInt(itemIdStr, 10);
     const barcodeRaw = String(req.body.barcode ?? "").trim();
 
+    const locationFullName = String(req.body.location_full_name ?? "").trim();
+    const validateLocation = Boolean(req.body.validate_location);
+    const qtyInput =
+      req.body.qty_input == null
+        ? 1
+        : Math.max(1, Math.floor(Number(req.body.qty_input)));
+
     if (!no) throw badRequest("กรุณาระบุเลข Outbound No");
     if (isNaN(itemId)) throw badRequest("Item ID ต้องเป็นตัวเลข");
     if (!barcodeRaw) throw badRequest("กรุณาส่ง barcode");
+
+    if (validateLocation && !locationFullName) {
+      throw badRequest("กรุณาส่ง location_full_name");
+    }
 
     const outbound = await prisma.outbound.findUnique({
       where: { no },
       select: { id: true, no: true, deleted_at: true },
     });
+
     if (!outbound) throw notFound(`ไม่พบ Outbound: ${no}`);
     if (outbound.deleted_at) throw badRequest("Outbound นี้ถูกลบไปแล้ว");
 
@@ -4470,6 +4554,7 @@ export const scanOutboundItemCheckBarcode = asyncHandler(
       throw badRequest("Item ไม่ตรงกับ Outbound ที่ระบุ");
     }
     if (item.deleted_at) throw badRequest("Item นี้ถูกลบไปแล้ว");
+    if (item.product_id == null) throw badRequest("Item ไม่มี product_id");
 
     let masterBarcode: {
       id: number;
@@ -4509,7 +4594,93 @@ export const scanOutboundItemCheckBarcode = asyncHandler(
       normalizeScanText(parsedBarcodeText) ===
         normalizeScanText(expectedBarcodeText);
 
+    if (!barcodeMatched) {
+      throw badRequest("barcode ไม่ตรงกับสินค้า");
+    }
+
     const lotMatched = lotMatchedNullable(item.lot_serial, parsed.lot_serial);
+
+    const wmsLot = await prisma.wms_mdt_goods.findFirst({
+      where: {
+        product_id: Number(item.product_id),
+        lot_name: {
+          equals: String(parsed.lot_serial ?? "").trim(),
+          mode: "insensitive",
+        },
+      } as any,
+      select: {
+        lot_id: true,
+        lot_name: true,
+        expiration_date: true,
+      } as any,
+      orderBy: [{ id: "desc" }],
+    });
+
+    const resolvedLotId = wmsLot?.lot_id == null ? null : Number(wmsLot.lot_id);
+
+    let locationInfo: any = null;
+    let stockInfo: any = null;
+
+    if (validateLocation) {
+      const location = await prisma.location.findFirst({
+        where: {
+          full_name: locationFullName,
+          deleted_at: null,
+        } as any,
+        select: {
+          id: true,
+          full_name: true,
+        } as any,
+      });
+
+      if (!location) {
+        throw badRequest(`ไม่พบ Location: ${locationFullName}`);
+      }
+
+      const stock = await prisma.stock.findFirst({
+        where: {
+          active: true,
+          quantity: {
+            gt: 0,
+          },
+          location_id: Number(location.id),
+          product_id: Number(item.product_id),
+          OR: [
+            ...(resolvedLotId != null
+              ? [
+                  {
+                    lot_id: resolvedLotId,
+                  },
+                ]
+              : []),
+            {
+              lot_name: {
+                equals: String(parsed.lot_serial ?? "").trim(),
+                mode: "insensitive",
+              },
+            },
+          ],
+        } as any,
+        select: {
+          id: true,
+          product_id: true,
+          lot_id: true,
+          lot_name: true,
+          location_id: true,
+          location_name: true,
+          quantity: true,
+          expiration_date: true,
+        } as any,
+        orderBy: [{ id: "asc" }],
+      });
+
+      if (!stock || Number(stock.quantity ?? 0) < qtyInput) {
+        throw badRequest("Location ที่สแกนไม่มีสินค้าที่ต้องการเปลี่ยน Lot");
+      }
+
+      locationInfo = location;
+      stockInfo = stock;
+    }
 
     const normalized_scan = `${parsed.barcode_text ?? ""}${parsed.lot_serial ?? ""}${parsed.exp_text ?? ""}`;
 
@@ -4519,6 +4690,7 @@ export const scanOutboundItemCheckBarcode = asyncHandler(
         raw_input: parsed.raw_input,
         normalized_input: parsed.normalized_input,
         barcode_text: parsed.barcode_text,
+        lot_id: resolvedLotId,
         lot_serial: parsed.lot_serial,
         exp_text: parsed.exp_text,
         exp: parsed.exp ? parsed.exp.toISOString() : null,
@@ -4528,6 +4700,7 @@ export const scanOutboundItemCheckBarcode = asyncHandler(
         checks: {
           barcode_matched: barcodeMatched,
           lot_matched: lotMatched,
+          location_validated: validateLocation,
         },
         item: {
           id: item.id,
@@ -4536,6 +4709,15 @@ export const scanOutboundItemCheckBarcode = asyncHandler(
           lot_serial: item.lot_serial,
           exp: null,
         },
+        wms_lot: wmsLot
+          ? {
+              lot_id: resolvedLotId,
+              lot_name: wmsLot.lot_name,
+              expiration_date: wmsLot.expiration_date,
+            }
+          : null,
+        location: locationInfo,
+        stock: stockInfo,
         barcode_meta: masterBarcode
           ? {
               id: masterBarcode.id,

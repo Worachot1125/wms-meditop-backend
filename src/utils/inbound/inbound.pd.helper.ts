@@ -3,7 +3,7 @@ import { badRequest } from "../appError";
 import { handleInboundTransfer } from "./inbound.transfer.helper";
 import { io } from "../../index";
 
-async function reducePackingBoxItemsForPdTx(
+export async function reducePackingBoxItemsForPdTx(
   tx: any,
   args: {
     goods_out_item_id: number;
@@ -300,37 +300,24 @@ export async function handlePDAutoProcess({
       const currentRtc = Math.max(0, Number(match.rtc ?? 0));
       const currentBor = Math.max(0, Number(match.bor ?? 0));
       const currentReturn = Math.max(0, Number(match.return ?? 0));
-      const currentPack = Math.max(0, Number(match.pack ?? 0));
+const currentPack = Math.max(0, Number(match.pack ?? 0));
 
-      const currentRemain = Math.max(
-        0,
-        currentQty - currentPd - currentRtc - currentBor - currentReturn,
-      );
+const currentRemain = Math.max(
+  0,
+  currentQty - currentPd - currentRtc - currentBor - currentReturn,
+);
 
-      const pdApplyQty = Math.min(currentRemain, pdQty);
-      const nextPd = currentPd + pdApplyQty;
+const pdApplyQty = Math.min(currentRemain, pdQty);
+const nextPd = currentPd + pdApplyQty;
 
-      const packReduce = Math.min(currentPack, pdApplyQty);
-      const nextPack = Math.max(0, currentPack - packReduce);
-
-      const boxResult =
-        packReduce > 0
-          ? await reducePackingBoxItemsForPdTx(tx, {
-              goods_out_item_id: Number(match.id),
-              reduce_qty: packReduce,
-            })
-          : [];
-
-      packingBoxAffected.push(...boxResult);
-
-      await tx.goods_out_item.update({
-        where: { id: match.id },
-        data: {
-          pd: nextPd,
-          pack: nextPack,
-          updated_at: new Date(),
-        } as any,
-      });
+// ✅ สำคัญ: ถ้า Packing แล้ว ห้ามลด pack / ห้ามลบของในกล่อง
+await tx.goods_out_item.update({
+  where: { id: match.id },
+  data: {
+    pd: nextPd,
+    updated_at: new Date(),
+  } as any,
+});
 
       affected.push({
         pd_no: number,

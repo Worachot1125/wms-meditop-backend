@@ -2714,6 +2714,13 @@ export const confirmOutboundPickToStock = asyncHandler(
       select: {
         id: true,
         no: true,
+        out_type: true,
+        location_dest_id: true,
+        location_dest: true,
+        location_dest_owner: true,
+        location_dest_owner_display: true,
+        department_id: true,
+        department: true,
       },
     });
 
@@ -2722,6 +2729,32 @@ export const confirmOutboundPickToStock = asyncHandler(
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      const outType = String(outbound.out_type ?? "")
+        .trim()
+        .toUpperCase();
+      const locationDest = String(outbound.location_dest ?? "")
+        .trim()
+        .toUpperCase();
+
+      const isBO = outType === "BO";
+      const shouldMoveToBorStock = isBO && locationDest.includes("BOR");
+      const shouldMoveToSerStock = isBO && locationDest.includes("SER");
+
+      const borSerLocationName = String(
+        outbound.location_dest_owner ??
+          outbound.location_dest_owner_display ??
+          "",
+      ).trim();
+
+      if (
+        (shouldMoveToBorStock || shouldMoveToSerStock) &&
+        !borSerLocationName
+      ) {
+        throw badRequest(
+          `ไม่พบ location_dest_owner สำหรับบันทึก BOR/SER stock (outbound=${outbound.no})`,
+        );
+      }
+
       const items = await tx.goods_out_item.findMany({
         where: {
           outbound_id: outbound.id,
@@ -2730,6 +2763,9 @@ export const confirmOutboundPickToStock = asyncHandler(
         select: {
           id: true,
           product_id: true,
+          code: true,
+          name: true,
+          unit: true,
           lot_id: true,
           lot_serial: true,
           qty: true,
@@ -2744,6 +2780,8 @@ export const confirmOutboundPickToStock = asyncHandler(
 
       let updatedItems = 0;
       let stockUpdated = 0;
+      let borStockUpdated = 0;
+      let serStockUpdated = 0;
 
       for (const item of items) {
         const qty = Math.max(0, Math.floor(Number(item.qty ?? 0)));
@@ -2755,6 +2793,10 @@ export const confirmOutboundPickToStock = asyncHandler(
 
         if (pick <= 0 || confirmedPick >= pick) {
           continue;
+        }
+
+        if (!item.product_id) {
+          throw badRequest(`ไม่พบ product_id (item_id=${item.id})`);
         }
 
         const qtyToConfirm = pick - confirmedPick;
@@ -2783,6 +2825,7 @@ export const confirmOutboundPickToStock = asyncHandler(
         }
 
         let remainToCut = qtyToConfirm;
+        let firstExpirationDate: Date | null = null;
 
         for (const pickRow of pickRows as any[]) {
           if (remainToCut <= 0) break;
@@ -2794,18 +2837,14 @@ export const confirmOutboundPickToStock = asyncHandler(
               "",
           ).trim();
 
-          if (!locationName) {
-            continue;
-          }
+          if (!locationName) continue;
 
-          // ✅ Location_Pack ไม่ต้องตัด stock เพราะถูกตัดไปตอน Auto-LocationPack แล้ว
           if (locationName.toLowerCase().includes("_location_pack")) {
             const lpQty = Math.max(
               0,
               Math.floor(Number(pickRow.qty_pick ?? 0)),
             );
             const skipQty = Math.min(remainToCut, lpQty);
-
             remainToCut -= skipQty;
             continue;
           }
@@ -2834,12 +2873,7 @@ export const confirmOutboundPickToStock = asyncHandler(
               id: true,
               bucket_key: true,
               quantity: true,
-              product_id: true,
-              lot_id: true,
-              lot_name: true,
               expiration_date: true,
-              location_id: true,
-              location_name: true,
             },
           });
 
@@ -2863,6 +2897,10 @@ export const confirmOutboundPickToStock = asyncHandler(
               },
             });
 
+            if (!firstExpirationDate && stock.expiration_date) {
+              firstExpirationDate = stock.expiration_date;
+            }
+
             remainToCut -= cutQty;
             stockUpdated++;
           }
@@ -2872,6 +2910,118 @@ export const confirmOutboundPickToStock = asyncHandler(
           throw badRequest(
             `stock ไม่พอสำหรับตัดออก (item_id=${item.id}, product_id=${item.product_id}, lot_id=${item.lot_id ?? "-"}, lot=${item.lot_serial ?? "-"}, ต้องตัด=${qtyToConfirm}, ขาด=${remainToCut})`,
           );
+        }
+
+        if (shouldMoveToBorStock && qtyToConfirm > 0) {
+          const existingBorStock = await tx.bor_stock.findFirst({
+            where: {
+              deleted_at: null,
+              active: true,
+              no: outbound.no,
+              product_id: item.product_id,
+              lot_id: item.lot_id,
+              lot_name: item.lot_serial,
+              location_id: outbound.location_dest_id,
+              location_name: borSerLocationName,
+            },
+            select: {
+              id: true,
+            },
+          });
+
+          if (existingBorStock) {
+            await tx.bor_stock.update({
+              where: {
+                id: existingBorStock.id,
+              },
+              data: {
+                quantity: {
+                  increment: qtyToConfirm,
+                },
+                user_pick: user_ref,
+                updated_at: new Date(),
+              },
+            });
+          } else {
+            await tx.bor_stock.create({
+              data: {
+                no: outbound.no,
+                product_id: item.product_id,
+                product_code: item.code,
+                product_name: item.name,
+                unit: item.unit,
+                location_id: outbound.location_dest_id,
+                location_name: borSerLocationName,
+                lot_id: item.lot_id,
+                lot_name: item.lot_serial,
+                expiration_date: firstExpirationDate,
+                department_id: outbound.department_id,
+                department_name: outbound.department,
+                source: "OUTBOUND_BO",
+                quantity: qtyToConfirm,
+                active: true,
+                user_pick: user_ref,
+              },
+            });
+          }
+
+          borStockUpdated++;
+        }
+
+        if (shouldMoveToSerStock && qtyToConfirm > 0) {
+          const existingSerStock = await tx.ser_stock.findFirst({
+            where: {
+              deleted_at: null,
+              active: true,
+              no: outbound.no,
+              product_id: item.product_id,
+              lot_id: item.lot_id,
+              lot_name: item.lot_serial,
+              location_id: outbound.location_dest_id,
+              location_name: borSerLocationName,
+            },
+            select: {
+              id: true,
+            },
+          });
+
+          if (existingSerStock) {
+            await tx.ser_stock.update({
+              where: {
+                id: existingSerStock.id,
+              },
+              data: {
+                quantity: {
+                  increment: qtyToConfirm,
+                },
+                user_pick: user_ref,
+                updated_at: new Date(),
+              },
+            });
+          } else {
+            await tx.ser_stock.create({
+              data: {
+                no: outbound.no,
+                product_id: item.product_id,
+                product_code: item.code,
+                product_name: item.name,
+                unit: item.unit,
+                location_id: outbound.location_dest_id,
+                location_name: borSerLocationName,
+                lot_id: item.lot_id,
+                lot_name: item.lot_serial,
+                expiration_date: firstExpirationDate,
+                department_id: outbound.department_id,
+                department_name: outbound.department,
+                source: "OUTBOUND_BO",
+                quantity: qtyToConfirm,
+                active: true,
+                user_pick: user_ref,
+              },
+            });
+          }
+
+          serStockUpdated++;
         }
 
         await tx.goods_out_item.update({
@@ -2921,6 +3071,8 @@ export const confirmOutboundPickToStock = asyncHandler(
       return {
         updatedItems,
         stockUpdated,
+        borStockUpdated,
+        serStockUpdated,
         outboundCompleted,
       };
     });

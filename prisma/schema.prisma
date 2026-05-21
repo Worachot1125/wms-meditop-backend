@@ -367,30 +367,32 @@ model odoo_request_log {
 }
 
 model outbound {
-  no                     String                    @unique
-  picking_id             Int?
-  location_id            Int?
-  location               String?
-  location_dest_id       Int?
-  location_dest          String?
-  department_id          String?
-  department             String
-  reference              String?
-  origin                 String?
-  date                   DateTime                  @default(now())
-  out_type               String                    @default("DO")
-  invoice                String?
-  in_process             Boolean                   @default(false)
-  created_at             DateTime                  @default(now())
-  updated_at             DateTime?
-  deleted_at             DateTime?
-  outbound_barcode       String?                   @unique
-  id                     Int                       @id @default(autoincrement())
-  goods_outs             goods_out_item[]
-  batch_lock             batch_outbound?
-  adjust_lot_logs        adjust_lot_log[]
-  outboundLotAdjustments outbound_lot_adjustment[]
-  packProductOutbounds   pack_product_outbound[]
+  no                          String                    @unique
+  picking_id                  Int?
+  location_id                 Int?
+  location                    String?
+  location_dest_id            Int?
+  location_dest               String?
+  location_dest_owner         String?
+  location_dest_owner_display String?
+  department_id               String?
+  department                  String
+  reference                   String?
+  origin                      String?
+  date                        DateTime                  @default(now())
+  out_type                    String                    @default("DO")
+  invoice                     String?
+  in_process                  Boolean                   @default(false)
+  created_at                  DateTime                  @default(now())
+  updated_at                  DateTime?
+  deleted_at                  DateTime?
+  outbound_barcode            String?                   @unique
+  id                          Int                       @id @default(autoincrement())
+  goods_outs                  goods_out_item[]
+  batch_lock                  batch_outbound?
+  adjust_lot_logs             adjust_lot_log[]
+  outboundLotAdjustments      outbound_lot_adjustment[]
+  packProductOutbounds        pack_product_outbound[]
 
   @@map("outbounds")
 }

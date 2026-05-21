@@ -290,19 +290,25 @@ function buildTransferMovementVisibilityWhere(
 
   const level = String(user.user_level ?? "").trim();
 
-  // ✅ Admin เห็นทั้งหมด
   if (level === "Admin") {
     return {};
   }
 
-  // ✅ Supervisor เห็นเฉพาะเอกสารที่ตัวเองสร้าง
   if (level === "Supervisor") {
     return {
-      user_id: user.id,
+      OR: [
+        { user_id: user.id },
+        {
+          movement_user_works: {
+            some: {
+              user_id: user.id,
+            },
+          },
+        },
+      ],
     };
   }
 
-  // ✅ Operator เห็นเฉพาะเอกสารที่ตัวเองถูก assign ใน movement_user_works
   if (level === "Operator") {
     return {
       movement_user_works: {
@@ -313,7 +319,6 @@ function buildTransferMovementVisibilityWhere(
     };
   }
 
-  // default: จำกัดแบบปลอดภัย
   return {
     user_id: user.id,
   };
@@ -892,9 +897,22 @@ export const getTransferMovementsPaginated = asyncHandler(
       throw badRequest("status ต้องเป็น pick, put หรือ completed");
     }
 
-    const selectedDepartments = parseDepartmentNames(req.query.department);
+    let selectedDepartments = parseDepartmentNames(req.query.department);
 
-    const visibilityWhere = buildTransferMovementVisibilityWhere(req);
+    if (
+      req.departmentAccess?.isPrivileged &&
+      selectedDepartments.some((d) => d.toUpperCase() === "CNE")
+    ) {
+      selectedDepartments = [];
+    }
+
+    const isAdmin =
+      String(req.user?.user_level ?? "").toLowerCase() === "admin";
+
+    const visibilityWhere = isAdmin
+      ? {}
+      : buildTransferMovementVisibilityWhere(req);
+
     const departmentWhere = buildTransferMovementDepartmentAccessWhere(req);
 
     const searchCondition = search
@@ -2500,7 +2518,7 @@ export const confirmTransferMovementPut = asyncHandler(
       };
     });
 
-        const user_ref =
+    const user_ref =
       String(
         (req.body as any)?.user_ref ?? (req.body as any)?.confirmed_by ?? "",
       ).trim() || null;
