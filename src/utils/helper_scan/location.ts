@@ -1,6 +1,5 @@
 import { prisma } from "../../lib/prisma";
 import { badRequest, notFound } from "../appError";
-import dayjs from "dayjs";
 
 export async function resolveLocationByFullNameBasic(full_name: string) {
   const loc = await prisma.location.findFirst({
@@ -8,6 +7,7 @@ export async function resolveLocationByFullNameBasic(full_name: string) {
     select: {
       id: true,
       full_name: true,
+      ncr_check: true,
     },
   });
 

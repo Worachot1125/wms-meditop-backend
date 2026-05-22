@@ -33,7 +33,9 @@ import {
 
 import {
   scanOutboundLocation,
+  scanOutboundExpNcrLocation,
   scanOutboundPick,
+  scanOutboundPickNcr,
   confirmOutboundPickToStock,
   scanOutboundReturn,
   scanBarcodeOutboundReturn,
@@ -178,10 +180,12 @@ router.delete(
 // 1) Scan Location
 // POST /api/outbounds/:no/scan/location
 router.post("/:no/scan/location", scanOutboundLocation);
+router.post("/:no/scan/location/ncr", scanOutboundExpNcrLocation);
 
 // 2) Scan Pick (preview)
 // POST /api/outbounds/:no/scan/barcode
 router.post("/:no/scan/barcode", scanOutboundPick);
+router.post("/:no/scan/barcode/ncr", scanOutboundPickNcr);
 router.post("/:no/scan/return", scanOutboundReturn);
 router.post("/:no/scan/barcode/return", scanBarcodeOutboundReturn);
 router.post("/:no/scan/barcode/return-pick", scanOutboundRtcReturnPick);

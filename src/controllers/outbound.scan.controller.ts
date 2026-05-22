@@ -491,6 +491,83 @@ export const scanOutboundLocation = asyncHandler(
   },
 );
 
+export const scanOutboundExpNcrLocation = asyncHandler(
+  async (
+    req: Request<
+      { no: string },
+      {},
+      {
+        location_full_name?: string;
+      }
+    >,
+    res: Response,
+  ) => {
+    const no = decodeURIComponent(req.params.no);
+
+    const outbound = await prisma.outbound.findUnique({
+      where: { no },
+      select: {
+        id: true,
+        no: true,
+        deleted_at: true,
+        location: true,
+      },
+    });
+
+    if (!outbound) throw notFound(`ไม่พบ outbound: ${no}`);
+    if (outbound.deleted_at) throw badRequest("Outbound นี้ถูกลบไปแล้ว");
+
+    const outboundLocation = String(outbound.location ?? "")
+      .trim()
+      .toUpperCase();
+
+    if (outboundLocation !== "WH/M_EXP&NCR") {
+      throw badRequest(
+        `Outbound นี้ไม่ใช่ WH/M_EXP&NCR: ${outbound.location ?? "-"}`,
+      );
+    }
+
+    const fullName = String(req.body?.location_full_name ?? "").trim();
+    if (!fullName) throw badRequest("location_full_name ห้ามว่าง");
+
+    const location = await prisma.location.findFirst({
+      where: {
+        full_name: fullName,
+        deleted_at: null,
+      },
+      select: {
+        id: true,
+        full_name: true,
+        ncr_check: true,
+      },
+    });
+
+    if (!location) throw notFound(`ไม่พบ Location: ${fullName}`);
+
+    if (!location.ncr_check) {
+      throw badRequest(
+        `Location นี้ไม่ใช่ NCR/EXP&NCR ไม่อนุญาตให้สแกน: ${location.full_name}`,
+      );
+    }
+
+    await prisma.outbound.update({
+      where: { id: outbound.id },
+      data: {
+        updated_at: new Date(),
+      },
+    });
+
+    return res.json({
+      success: true,
+      location: {
+        location_id: location.id,
+        location_name: location.full_name,
+        ncr_check: location.ncr_check,
+      },
+    });
+  },
+);
+
 function shouldTreatAsLotAdjustment(
   itemLot: string | null | undefined,
   scannedLot: string | null | undefined,
@@ -891,6 +968,383 @@ export const scanOutboundPick = asyncHandler(
       // ===============================
       // ✅ NORMAL PICK
       // ===============================
+      const requiredQty = Number(freshItem.qty ?? 0);
+      const remaining = Math.max(0, requiredQty - currentPick);
+
+      if (requiredQty > 0 && remaining <= 0) {
+        throw badRequest("pick ครบแล้ว");
+      }
+
+      const willAdd =
+        requiredQty > 0
+          ? Math.min(addQty, remaining, stockQty)
+          : Math.min(addQty, stockQty);
+
+      if (willAdd <= 0) {
+        throw badRequest(
+          `สินค้าไม่พอสำหรับ pick เพิ่ม (stock=${stockQty}, pick แล้ว=${currentPick})`,
+        );
+      }
+
+      const updatedItem = await incrementGoodsOutItemPick(tx, {
+        goods_out_item_id: freshItem.id,
+        add_qty: willAdd,
+      });
+
+      await upsertGoodsOutItemLocationPick(tx, {
+        goods_out_item_id: freshItem.id,
+        location_id: loc.id,
+        qty_pick_delta: willAdd,
+      });
+
+      return {
+        updatedItem,
+        appliedQty: willAdd,
+        is_adjustment: false,
+      };
+    });
+
+    const detail = await buildOutboundDetail(outbound.id, no, loc.id);
+
+    const responsePayload = {
+      ...detail,
+      addQty: saved.appliedQty,
+      is_adjustment: saved.is_adjustment,
+    };
+
+    emitOutboundRealtime(
+      no,
+      saved.is_adjustment
+        ? "outbound:scan_adjustment_pick"
+        : "outbound:scan_pick",
+      {
+        ...responsePayload,
+        outbound_no: no,
+        outbound_id: outbound.id,
+        location_id: loc.id,
+        location_full_name: loc.full_name,
+        addQty: saved.appliedQty,
+        is_adjustment: saved.is_adjustment,
+        message: saved.is_adjustment
+          ? "Scan adjustment pick updated"
+          : "Scan pick updated",
+      },
+      Number(outbound.id),
+    );
+
+    return res.json(responsePayload);
+  },
+);
+
+export const scanOutboundPickNcr = asyncHandler(
+  async (
+    req: Request<
+      { no: string },
+      {},
+      { barcode: string; location_full_name: string; qty_input?: number }
+    >,
+    res: Response,
+  ) => {
+    const no = decodeURIComponent(req.params.no);
+    const barcodeText = String(req.body.barcode ?? "").trim();
+    const location_full_name = String(req.body.location_full_name ?? "").trim();
+
+    if (!barcodeText) throw badRequest("กรุณาส่ง barcode");
+    if (!location_full_name) throw badRequest("กรุณาส่ง location_full_name");
+
+    const outbound = await prisma.outbound.findUnique({
+      where: { no },
+      select: {
+        id: true,
+        no: true,
+        deleted_at: true,
+        location: true,
+      },
+    });
+
+    if (!outbound || outbound.deleted_at) {
+      throw notFound(`ไม่พบ outbound: ${no}`);
+    }
+
+    const outboundLocation = String(outbound.location ?? "")
+      .trim()
+      .toUpperCase();
+
+    if (outboundLocation !== "WH/M_EXP&NCR") {
+      throw badRequest(
+        `Outbound นี้ไม่ใช่ WH/M_EXP&NCR: ${outbound.location ?? "-"}`,
+      );
+    }
+
+    const loc = await resolveLocationByFullNameBasic(location_full_name);
+
+    if (!loc.ncr_check) {
+      throw badRequest(
+        `Location นี้ไม่ใช่ NCR/EXP&NCR ไม่อนุญาตให้สแกน: ${loc.full_name}`,
+      );
+    }
+
+    const masterBc = await findMasterBarcodeForScan(barcodeText);
+
+    const masterBarcodeBase = masterBc
+      ? normalizeBarcodeBaseForMatch(masterBc.barcode ?? "")
+      : "";
+
+    const scannedBarcodeBase = normalizeBarcodeBaseForMatch(barcodeText);
+
+    let candidates = masterBarcodeBase
+      ? await findCandidateGoodsOutItemsByBarcodeBase(
+          outbound.id,
+          masterBarcodeBase,
+        )
+      : [];
+
+    if (!candidates.length) {
+      candidates = await findCandidateGoodsOutItemsByScannedBarcode(
+        outbound.id,
+        scannedBarcodeBase,
+      );
+    }
+
+    if (!candidates.length) {
+      throw badRequest(`ไม่พบสินค้าใน outbound สำหรับ barcode: ${barcodeText}`);
+    }
+
+    let matchedItem: (typeof candidates)[number] | null = null;
+    let parsedResult: any = null;
+
+    for (const item of candidates) {
+      if (item.product_id == null) continue;
+
+      if (
+        masterBc?.product_id != null &&
+        Number(masterBc.product_id) !== Number(item.product_id)
+      ) {
+        continue;
+      }
+
+      const parsed = masterBc
+        ? parseScannedBarcodeByMasterMeta({
+            scannedBarcode: barcodeText,
+            masterBarcode: String(masterBc.barcode ?? ""),
+            lot_start: masterBc.lot_start,
+            lot_stop: masterBc.lot_stop,
+            exp_start: masterBc.exp_start,
+            exp_stop: masterBc.exp_stop,
+          })
+        : parseScannedBarcodeByBaseBarcode(
+            barcodeText,
+            String(item.barcode_text ?? ""),
+          );
+
+      const isNewLotPlaceholder = normalizeScanText(
+        item.lot_serial ?? "",
+      ).startsWith("#");
+
+      const lotMatched = isNewLotPlaceholder
+        ? true
+        : lotMatchedNullable(item.lot_serial, parsed.lot_serial);
+
+      let matchedStock = await findMatchingStockAtLocation({
+        tx: prisma,
+        location_id: loc.id,
+        product_id: item.product_id,
+        lot_serial: parsed.lot_serial,
+        exp: parsed.exp,
+        exp_text: parsed.exp_text,
+      });
+
+      // ✅ NCR fallback
+      if (!matchedStock && loc.ncr_check) {
+        matchedStock = await prisma.stock.findFirst({
+          where: {
+            location_id: loc.id,
+            product_id: item.product_id,
+            quantity: {
+              gt: 0,
+            },
+          },
+          orderBy: [{ quantity: "desc" }, { updated_at: "desc" }],
+        });
+      }
+
+      // ✅ NCR flow: ถ้ามี stock จริงใน EXP&NCR location แล้ว ให้ผ่าน
+      // เพื่อรองรับกรณี lot จาก barcode ไม่ตรงกับ item แล้วไปเข้า Lot Adjustment
+      if (!matchedStock) continue;
+
+      if (!lotMatched && !loc.ncr_check) {
+        console.log("[NCR scan match debug]", {
+          item_id: item.id,
+          product_id: item.product_id,
+          item_lot: item.lot_serial,
+          parsed_lot: parsed.lot_serial,
+          parsed_exp: parsed.exp,
+          parsed_exp_text: parsed.exp_text,
+          lotMatched,
+          matchedStock: matchedStock
+            ? {
+                id: matchedStock.id,
+                quantity: matchedStock.quantity,
+              }
+            : null,
+          location_id: loc.id,
+          location_name: loc.full_name,
+        });
+        continue;
+      }
+
+      matchedItem = item;
+      parsedResult = parsed;
+      break;
+    }
+
+    if (!matchedItem || !parsedResult) {
+      throw badRequest("barcode ไม่ตรงกับ item");
+    }
+
+    const isLotAdjustment = shouldTreatAsLotAdjustment(
+      matchedItem.lot_serial,
+      parsedResult.lot_serial,
+    );
+
+    const inputNumber = await resolveInputNumber(
+      matchedItem.product_id!,
+      matchedItem.lot_id ?? null,
+    );
+
+    let addQty = 1;
+    const q = req.body.qty_input;
+
+    if (q != null && Number.isFinite(Number(q)) && Number(q) > 0) {
+      addQty = Math.floor(Number(q));
+    } else if (inputNumber) {
+      throw badRequest("ต้องกรอก qty_input");
+    }
+
+    const saved = await prisma.$transaction(async (tx) => {
+      const freshItem = await tx.goods_out_item.findUnique({
+        where: { id: matchedItem!.id },
+        select: {
+          id: true,
+          qty: true,
+          pick: true,
+          product_id: true,
+          lot_id: true,
+          lot_serial: true,
+          code: true,
+          name: true,
+          unit: true,
+          barcode_text: true,
+          deleted_at: true,
+        },
+      });
+
+      if (!freshItem || freshItem.deleted_at) {
+        throw badRequest("item หาย");
+      }
+
+      if (freshItem.product_id == null) {
+        throw badRequest("ไม่พบ product_id ของ item");
+      }
+
+      const effectiveLotSerial =
+        parsedResult?.lot_serial ?? freshItem.lot_serial ?? null;
+
+      let stockRow = await findMatchingStockAtLocation({
+        tx,
+        location_id: loc.id,
+        product_id: freshItem.product_id,
+        lot_serial: effectiveLotSerial,
+        exp: parsedResult?.exp ?? null,
+        exp_text: parsedResult?.exp_text ?? null,
+      });
+
+      if (!stockRow && loc.ncr_check === true) {
+        stockRow = await tx.stock.findFirst({
+          where: {
+            location_id: loc.id,
+            product_id: freshItem.product_id,
+            quantity: {
+              gt: 0,
+            },
+          },
+          orderBy: [{ quantity: "desc" }, { updated_at: "desc" }],
+        });
+      }
+
+      if (!stockRow || Number(stockRow.quantity ?? 0) <= 0) {
+        throw badRequest(
+          `location ${loc.full_name} ไม่มี stock ของสินค้า product_id=${freshItem.product_id} lot=${effectiveLotSerial ?? "null"}`,
+        );
+      }
+
+      const stockQty = Math.max(0, Math.floor(Number(stockRow.quantity ?? 0)));
+      const currentPick = Math.max(0, Math.floor(Number(freshItem.pick ?? 0)));
+
+      if (currentPick >= stockQty) {
+        throw badRequest(
+          `สินค้าไม่พอสำหรับ scan เพิ่ม (stock=${stockQty}, pick แล้ว=${currentPick})`,
+        );
+      }
+
+      if (isLotAdjustment) {
+        const adjLines = await tx.outbound_lot_adjustment_line.findMany({
+          where: { goods_out_item_id: freshItem.id },
+          select: { pick: true },
+        });
+
+        const totalAdjusted = adjLines.reduce(
+          (sum, l) => sum + Number(l.pick ?? 0),
+          0,
+        );
+
+        const remaining = Math.max(0, currentPick - totalAdjusted);
+
+        if (remaining <= 0) {
+          throw badRequest("ไม่มีจำนวน pick เหลือให้เปลี่ยน lot");
+        }
+
+        const willUse = Math.min(addQty, remaining, stockQty);
+
+        if (willUse <= 0) {
+          throw badRequest(
+            `สินค้าไม่พอสำหรับ pick เพิ่ม (stock=${stockQty}, ต้องการเพิ่ม=${addQty})`,
+          );
+        }
+
+        const updatedAdjustmentLine = await upsertOutboundLotAdjustmentLinePick(
+          tx,
+          {
+            outbound_id: outbound.id,
+            goods_out_item_id: freshItem.id,
+            location_id: loc.id,
+            location_name: loc.full_name,
+            product_id: freshItem.product_id,
+            code: freshItem.code ?? null,
+            name: freshItem.name ?? null,
+            unit: freshItem.unit ?? null,
+            lot_id: null,
+            lot_serial: parsedResult.lot_serial ?? null,
+            exp: parsedResult.exp ?? null,
+            barcode_text: barcodeText,
+            pick_delta: willUse,
+          },
+        );
+
+        await upsertGoodsOutItemLocationPick(tx, {
+          goods_out_item_id: freshItem.id,
+          location_id: loc.id,
+          qty_pick_delta: willUse,
+        });
+
+        return {
+          updatedItem: freshItem,
+          appliedQty: willUse,
+          is_adjustment: true,
+          adjustment_line: updatedAdjustmentLine,
+        };
+      }
+
       const requiredQty = Number(freshItem.qty ?? 0);
       const remaining = Math.max(0, requiredQty - currentPick);
 
@@ -2205,18 +2659,30 @@ export const scanBarcodeOutboundReturn = asyncHandler(
 
       const parsed: any = parsedRaw;
 
-      const lotMatched = lotMatchedNullable(item.lot_serial, parsed.lot_serial);
+      const isRtcBorReturnMode = returnMode === "RTC" || returnMode === "BOR";
+
+      const lotMatched = isRtcBorReturnMode
+        ? true
+        : lotMatchedNullable(item.lot_serial, parsed.lot_serial);
 
       const stockExp = await findStockExpByProductLot(
         Number(item.product_id),
         item.lot_id ?? null,
       );
 
-      const expMatched = expMatchedNullable(
-        stockExp,
-        parsed.exp ?? null,
-        parsed.exp_text,
-      );
+      const hasParsedExp =
+        parsed.exp != null ||
+        (parsed.exp_text &&
+          String(parsed.exp_text).trim() !== "" &&
+          String(parsed.exp_text).trim() !== "999999");
+
+      const expMatched = isRtcBorReturnMode
+        ? true
+        : stockExp == null && !hasParsedExp
+          ? true
+          : stockExp == null
+            ? true
+            : expMatchedNullable(stockExp, parsed.exp ?? null, parsed.exp_text);
 
       if (!lotMatched) continue;
       if (!expMatched) continue;
@@ -2263,6 +2729,8 @@ export const scanBarcodeOutboundReturn = asyncHandler(
           qty: true,
           pick: true,
           confirmed_pick: true,
+          rtc: true,
+          bor: true,
           return: true,
           return_check: true,
           barcode_text: true,
@@ -2287,11 +2755,24 @@ export const scanBarcodeOutboundReturn = asyncHandler(
 
         maxReturnable = Math.max(0, pickQty - effectiveQty - currentReturn);
       } else {
-        maxReturnable = Math.max(
-          0,
-          Number((freshItem as any).confirmed_pick ?? 0) -
-            Number((freshItem as any).return ?? 0),
-        );
+        const currentReturn = Number((freshItem as any).return ?? 0);
+
+        if (returnMode === "RTC") {
+          maxReturnable = Math.max(
+            0,
+            Number((freshItem as any).rtc ?? 0) - currentReturn,
+          );
+        } else if (returnMode === "BOR") {
+          maxReturnable = Math.max(
+            0,
+            Number((freshItem as any).bor ?? 0) - currentReturn,
+          );
+        } else {
+          maxReturnable = Math.max(
+            0,
+            Number((freshItem as any).confirmed_pick ?? 0) - currentReturn,
+          );
+        }
       }
 
       if (qty > maxReturnable) {
@@ -2719,6 +3200,7 @@ export const confirmOutboundPickToStock = asyncHandler(
         id: true,
         no: true,
         out_type: true,
+        location: true,
         location_dest_id: true,
         location_dest: true,
         location_dest_owner: true,
@@ -2739,6 +3221,11 @@ export const confirmOutboundPickToStock = asyncHandler(
       const locationDest = String(outbound.location_dest ?? "")
         .trim()
         .toUpperCase();
+
+      const isExpNcrOutbound =
+        String((outbound as any).location ?? "")
+          .trim()
+          .toUpperCase() === "WH/M_EXP&NCR";
 
       const isBO = outType === "BO";
       const shouldMoveToBorStock = isBO && locationDest.includes("BOR");
@@ -2862,6 +3349,16 @@ export const confirmOutboundPickToStock = asyncHandler(
                 gt: 0,
               },
             };
+
+            // ✅ EXP&NCR: อย่า strict lot จาก goods_out_item
+            // เพราะ pick อาจมาจาก lot จริงใน NCR stock / lot adjustment
+            if (!isExpNcrOutbound) {
+              if (item.lot_id != null) {
+                stockWhere.lot_id = item.lot_id;
+              } else if (item.lot_serial) {
+                stockWhere.lot_name = item.lot_serial;
+              }
+            }
 
             if (item.lot_id != null) {
               stockWhere.lot_id = item.lot_id;
@@ -3392,10 +3889,10 @@ export const confirmRTCtoStock = asyncHandler(
 
     const returnItems = await prisma.goods_out_item.findMany({
       where: {
-        outbound_id: outbound.id,
+        outbound_id: Number(outbound.id),
         deleted_at: null,
-        [config.qtyField]: { gt: 0 },
-        [config.checkField]: false,
+        return: { gt: 0 },
+        return_check: false,
       } as any,
       orderBy: [{ id: "asc" }],
     });
@@ -3410,6 +3907,7 @@ export const confirmRTCtoStock = asyncHandler(
       let deletedLocationPick = 0;
       let softDeletedGoodsOutItem = 0;
       let deletedBatchOutbound = 0;
+      let deletedPackProductOutbound = 0;
 
       const allItemIds = (
         await tx.goods_out_item.findMany({
@@ -3424,34 +3922,26 @@ export const confirmRTCtoStock = asyncHandler(
       for (const item of returnItems as any[]) {
         const returnQty = Math.max(
           0,
-          Math.floor(Number(item?.[config.qtyField] ?? 0)),
+          Math.floor(Number(item.return ?? 0)),
         );
 
         if (returnQty <= 0) continue;
 
-        const locationModel = (tx as any)[config.locationModel];
-
-        if (!locationModel?.findMany) {
-          throw badRequest(`ไม่พบ model สำหรับ ${config.locationModel}`);
-        }
-
-        const returnRows = await locationModel.findMany({
+        const returnRows = await (tx as any).goods_out_item_location_return.findMany({
           where: {
             goods_out_item_id: Number(item.id),
-            [config.locationQtyField]: { gt: 0 },
+            return: { gt: 0 },
           },
           orderBy: [{ id: "asc" }],
         });
 
         if (!returnRows.length) {
           throw badRequest(
-            `ไม่พบ location ${config.source.toUpperCase()} ของ item=${item.id}`,
+            `ไม่พบ location RETURN ของ item=${item.id}`,
           );
         }
 
-        const pickRows = await (
-          tx as any
-        ).goods_out_item_location_pick.findMany({
+        const pickRows = await (tx as any).goods_out_item_location_pick.findMany({
           where: {
             goods_out_item_id: Number(item.id),
             qty_pick: { gt: 0 },
@@ -3464,8 +3954,7 @@ export const confirmRTCtoStock = asyncHandler(
         }
 
         const totalReturn = returnRows.reduce(
-          (sum: number, r: any) =>
-            sum + Number(r?.[config.locationQtyField] ?? 0),
+          (sum: number, r: any) => sum + Number(r.return ?? 0),
           0,
         );
 
@@ -3474,9 +3963,15 @@ export const confirmRTCtoStock = asyncHandler(
           0,
         );
 
+        if (totalReturn > returnQty) {
+          throw badRequest(
+            `จำนวน location RETURN มากกว่า return item=${item.id}, location_return=${totalReturn}, item_return=${returnQty}`,
+          );
+        }
+
         if (totalReturn > totalPick) {
           throw badRequest(
-            `จำนวน ${config.source.toUpperCase()} มากกว่า pick เดิม item=${item.id}, return=${totalReturn}, pick=${totalPick}`,
+            `จำนวน RETURN มากกว่า pick เดิม item=${item.id}, return=${totalReturn}, pick=${totalPick}`,
           );
         }
 
@@ -3489,8 +3984,8 @@ export const confirmRTCtoStock = asyncHandler(
             0,
             Math.floor(Number(pickRow.qty_pick ?? 0)),
           );
-          const moveQty = Math.min(pickQty, remainingToDecrease);
 
+          const moveQty = Math.min(pickQty, remainingToDecrease);
           if (moveQty <= 0) continue;
 
           const oldStock = await tx.stock.findFirst({
@@ -3543,7 +4038,7 @@ export const confirmRTCtoStock = asyncHandler(
         for (const row of returnRows as any[]) {
           const qty = Math.max(
             0,
-            Math.floor(Number(row?.[config.locationQtyField] ?? 0)),
+            Math.floor(Number(row.return ?? 0)),
           );
 
           if (qty <= 0) continue;
@@ -3560,7 +4055,7 @@ export const confirmRTCtoStock = asyncHandler(
 
           if (!location) {
             throw badRequest(
-              `ไม่พบ location ${config.source.toUpperCase()} id=${row.location_id}`,
+              `ไม่พบ location RETURN id=${row.location_id}`,
             );
           }
 
@@ -3589,6 +4084,7 @@ export const confirmRTCtoStock = asyncHandler(
             id: Number(item.id),
           },
           data: {
+            return_check: true,
             [config.checkField]: true,
             deleted_at: new Date(),
             updated_at: new Date(),
@@ -3599,9 +4095,7 @@ export const confirmRTCtoStock = asyncHandler(
       }
 
       if (allItemIds.length > 0) {
-        const delPick = await (
-          tx as any
-        ).goods_out_item_location_pick.deleteMany({
+        const delPick = await (tx as any).goods_out_item_location_pick.deleteMany({
           where: {
             goods_out_item_id: {
               in: allItemIds,
@@ -3610,6 +4104,14 @@ export const confirmRTCtoStock = asyncHandler(
         });
 
         deletedLocationPick = Number(delPick.count ?? 0);
+
+        await (tx as any).goods_out_item_location_return.deleteMany({
+          where: {
+            goods_out_item_id: {
+              in: allItemIds,
+            },
+          },
+        });
 
         const delItems = await tx.goods_out_item.updateMany({
           where: {
@@ -3636,11 +4138,13 @@ export const confirmRTCtoStock = asyncHandler(
 
       deletedBatchOutbound = Number(delBatch.count ?? 0);
 
-      await tx.pack_product_outbound.deleteMany({
+      const delPackProduct = await tx.pack_product_outbound.deleteMany({
         where: {
           outbound_id: Number(outbound.id),
         },
       });
+
+      deletedPackProductOutbound = Number(delPackProduct.count ?? 0);
 
       await tx.outbound.update({
         where: {
@@ -3660,6 +4164,7 @@ export const confirmRTCtoStock = asyncHandler(
         deletedLocationPick,
         softDeletedGoodsOutItem,
         deletedBatchOutbound,
+        deletedPackProductOutbound,
       };
     });
 
