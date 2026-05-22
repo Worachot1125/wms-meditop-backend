@@ -1128,16 +1128,16 @@ const attachReturnInboundsToPackProduct = async (
       in_type: { in: ["PD", "RTC", "BOR"] },
       OR: [
         ...outboundRefs.map((ref) => ({
-          origin: { contains: ref, mode: "insensitive" as const },
+          origin: { equals: ref, mode: "insensitive" as const },
         })),
         ...outboundRefs.map((ref) => ({
-          reference: { contains: ref, mode: "insensitive" as const },
+          reference: { equals: ref, mode: "insensitive" as const },
         })),
         ...outboundRefs.map((ref) => ({
-          invoice: { contains: ref, mode: "insensitive" as const },
+          invoice: { equals: ref, mode: "insensitive" as const },
         })),
         ...outboundRefs.map((ref) => ({
-          no: { contains: ref, mode: "insensitive" as const },
+          no: { equals: ref, mode: "insensitive" as const },
         })),
       ],
     } as any,
@@ -1164,8 +1164,6 @@ const attachReturnInboundsToPackProduct = async (
       .map(normalizeRefKey)
       .filter(Boolean);
 
-    const haystack = inboundKeys.join(" ");
-
     for (const outbound of outbounds) {
       const candidates = [
         { by: "outbound_no", value: outbound.no },
@@ -1174,11 +1172,10 @@ const attachReturnInboundsToPackProduct = async (
         { by: "reference", value: outbound.reference },
       ];
 
-      const matched = candidates.find(
-        (x) =>
-          normalizeRefKey(x.value) &&
-          haystack.includes(normalizeRefKey(x.value)),
-      );
+      const matched = candidates.find((x) => {
+        const key = normalizeRefKey(x.value);
+        return key && inboundKeys.includes(key);
+      });
 
       if (!matched) continue;
 
@@ -1212,7 +1209,31 @@ export const getPackProductById = asyncHandler(
       throw notFound("ไม่พบ pack_product");
     }
 
-    const formatted = formatPackProduct(applyReturnToPackProduct(row as any));
+    const adjusted = applyReturnToPackProduct(row as any);
+
+    // ✅ คืนค่า pack จาก DB กลับเข้าไป หลัง applyReturnToPackProduct ลด qty แล้ว
+    const originalPackByItemId = new Map<number, number>();
+
+    for (const po of (row as any).pack_outbounds ??
+      (row as any).outbounds ??
+      []) {
+      const outbound = po?.outbound ?? po;
+      for (const item of outbound?.goods_outs ?? outbound?.items ?? []) {
+        originalPackByItemId.set(Number(item.id), Number(item.pack ?? 0));
+      }
+    }
+
+    for (const po of adjusted.pack_outbounds ?? adjusted.outbounds ?? []) {
+      const outbound = po?.outbound ?? po;
+      for (const item of outbound?.goods_outs ?? outbound?.items ?? []) {
+        const originalPack = originalPackByItemId.get(Number(item.id));
+        if (originalPack !== undefined) {
+          item.pack = originalPack;
+        }
+      }
+    }
+
+    const formatted = formatPackProduct(adjusted);
 
     const data = await attachReturnInboundsToPackProduct(row as any, formatted);
 
@@ -1332,6 +1353,14 @@ export const getPackProductSummary = asyncHandler(
   },
 );
 
+const isBlockedOutboundLocation = (location: unknown) => {
+  const loc = String(location ?? "")
+    .trim()
+    .toUpperCase();
+
+  return loc === "WH/M_EXP&NCR";
+};
+
 export const scanPackProductBarcode = asyncHandler(
   async (
     req: Request<{}, {}, { barcode: string; user_ref?: string | null }>,
@@ -1358,6 +1387,19 @@ export const scanPackProductBarcode = asyncHandler(
         : String(req.body.user_ref).trim() || null;
 
     const outbounds = await findOutboundsByDocKeys(parsed.docKeys);
+
+    const blockedOutbounds = outbounds.filter((ob: any) =>
+  isBlockedOutboundLocation(ob.location),
+);
+
+if (blockedOutbounds.length > 0) {
+  throw badRequest(
+    `Outbound location WH/M_EXP&NCR ไม่สามารถ scan เพื่อเปิดกล่องได้: ${blockedOutbounds
+      .map((x: any) => x.no)
+      .filter(Boolean)
+      .join(", ")}`,
+  );
+}
 
     if (outbounds.length === 0) {
       throw notFound(
@@ -2420,6 +2462,128 @@ export const scanPackProductItemReturn = asyncHandler(
   },
 );
 
+async function decrementBorSerStockForReturnTx(
+  tx: any,
+  args: {
+    product_id: number;
+    lot_id?: number | null;
+    lot_serial?: string | null;
+    qty: number;
+    location_name: string;
+    stock_type: "BOR" | "SER";
+    user_ref?: string | null;
+  },
+) {
+  let remaining = Math.max(0, Math.floor(Number(args.qty ?? 0)));
+  if (remaining <= 0) return [];
+
+  const locationName = String(args.location_name ?? "").trim();
+  if (!locationName) {
+    throw badRequest("ไม่พบ location_name สำหรับลด BOR/SER stock");
+  }
+
+  const lotSerial = String(args.lot_serial ?? "").trim();
+
+  const stockWhere: any = {
+    deleted_at: null,
+    active: true,
+    product_id: Number(args.product_id),
+    location_name: locationName,
+    quantity: {
+      gt: 0,
+    },
+  };
+
+  if (args.lot_id != null) {
+    stockWhere.lot_id = args.lot_id;
+  } else if (lotSerial) {
+    stockWhere.lot_name = {
+      equals: lotSerial,
+      mode: "insensitive",
+    };
+  }
+
+  const stocks =
+    args.stock_type === "BOR"
+      ? await tx.bor_stock.findMany({
+          where: stockWhere,
+          orderBy: [{ quantity: "desc" }, { id: "asc" }],
+          select: {
+            id: true,
+            quantity: true,
+          },
+        })
+      : await tx.ser_stock.findMany({
+          where: stockWhere,
+          orderBy: [{ quantity: "desc" }, { id: "asc" }],
+          select: {
+            id: true,
+            quantity: true,
+          },
+        });
+
+  const affected: any[] = [];
+
+  for (const stock of stocks as any[]) {
+    if (remaining <= 0) break;
+
+    const stockQty = Math.max(0, Number(stock.quantity ?? 0));
+    if (stockQty <= 0) continue;
+
+    const cutQty = Math.min(stockQty, remaining);
+
+    if (args.stock_type === "BOR") {
+      await tx.bor_stock.update({
+        where: {
+          id: Number(stock.id),
+        },
+        data: {
+          quantity: {
+            decrement: new Prisma.Decimal(cutQty),
+          },
+          user_pick: args.user_ref ?? null,
+          updated_at: new Date(),
+        } as any,
+      });
+    } else {
+      await tx.ser_stock.update({
+        where: {
+          id: Number(stock.id),
+        },
+        data: {
+          quantity: {
+            decrement: new Prisma.Decimal(cutQty),
+          },
+          user_pick: args.user_ref ?? null,
+          updated_at: new Date(),
+        } as any,
+      });
+    }
+
+    affected.push({
+      stock_id: Number(stock.id),
+      stock_type: args.stock_type,
+      location_name: locationName,
+      cut_qty: cutQty,
+      old_quantity: stockQty,
+      new_quantity: stockQty - cutQty,
+    });
+
+    remaining -= cutQty;
+  }
+
+  if (remaining > 0) {
+    throw badRequest(
+      `${args.stock_type.toLowerCase()}_stock ไม่เพียงพอสำหรับ Return ` +
+        `(product_id=${args.product_id}, lot_id=${args.lot_id ?? "-"}, lot=${
+          args.lot_serial ?? "-"
+        }, location_name=${locationName}, ต้องลด=${args.qty}, ขาด=${remaining})`,
+    );
+  }
+
+  return affected;
+}
+
 export const returnPdPackProductItem = asyncHandler(
   async (
     req: Request<
@@ -2433,6 +2597,7 @@ export const returnPdPackProductItem = asyncHandler(
         location_full_name: string;
         qty?: number;
         user_ref?: string | null;
+        return_mode?: "PD" | "RTC" | "BOR";
       }
     >,
     res: Response,
@@ -2445,6 +2610,10 @@ export const returnPdPackProductItem = asyncHandler(
     const locationFullName = String(req.body.location_full_name ?? "").trim();
     const qty = Math.max(1, Math.floor(Number(req.body.qty ?? 1)));
 
+    const returnMode = String(req.body.return_mode ?? "PD")
+      .trim()
+      .toUpperCase() as "PD" | "RTC" | "BOR";
+
     if (!Number.isFinite(packProductId))
       throw badRequest("packProductId ต้องเป็นตัวเลข");
     if (!outboundNo) throw badRequest("outbound_no is required");
@@ -2453,6 +2622,8 @@ export const returnPdPackProductItem = asyncHandler(
     if (!Number.isFinite(boxId)) throw badRequest("box_id ต้องเป็นตัวเลข");
     if (!rawBarcode) throw badRequest("barcode is required");
     if (!locationFullName) throw badRequest("location_full_name is required");
+    if (!["PD", "RTC", "BOR"].includes(returnMode))
+      throw badRequest("return_mode ไม่ถูกต้อง");
 
     const location = await resolveLocationByFullNameBasic(locationFullName);
     const parsed = await resolveBarcodeScan(rawBarcode);
@@ -2487,7 +2658,15 @@ export const returnPdPackProductItem = asyncHandler(
               barcode_ref: {
                 where: { deleted_at: null },
               },
-              outbound: true,
+              outbound: {
+                select: {
+                  id: true,
+                  no: true,
+                  location_dest: true,
+                  location_dest_owner: true,
+                  location_dest_owner_display: true,
+                },
+              },
             },
           },
         } as any,
@@ -2499,6 +2678,7 @@ export const returnPdPackProductItem = asyncHandler(
 
       const item: any = boxItem.goods_out_item;
       if (!item || item.deleted_at) throw badRequest("ไม่พบสินค้า");
+
       if (String(item.outbound?.no ?? "").trim() !== outboundNo) {
         throw badRequest("สินค้าไม่ตรงกับ outbound_no");
       }
@@ -2518,6 +2698,7 @@ export const returnPdPackProductItem = asyncHandler(
         0,
         Math.floor(Number(boxItem.quantity ?? 0)),
       );
+
       if (qty > currentBoxQty) {
         throw badRequest(
           `จำนวน Return (${qty}) มากกว่าจำนวนในกล่อง (${currentBoxQty})`,
@@ -2525,15 +2706,26 @@ export const returnPdPackProductItem = asyncHandler(
       }
 
       const pdQty = Math.max(0, Math.floor(Number(item.pd ?? 0)));
+      const rtcQty = Math.max(0, Math.floor(Number(item.rtc ?? 0)));
+      const borQty = Math.max(0, Math.floor(Number(item.bor ?? 0)));
       const returnedQty = Math.max(0, Math.floor(Number(item.return ?? 0)));
-      const pendingReturnQty = Math.max(0, pdQty - returnedQty);
 
-      if (pdQty <= 0) throw badRequest("สินค้านี้ไม่มี PD ที่ต้อง Return");
-      if (pendingReturnQty <= 0)
-        throw badRequest("สินค้านี้ Return PD ครบแล้ว");
+      const targetQty =
+        returnMode === "BOR" ? borQty : returnMode === "RTC" ? rtcQty : pdQty;
+
+      const pendingReturnQty = Math.max(0, targetQty - returnedQty);
+
+      if (targetQty <= 0) {
+        throw badRequest(`สินค้านี้ไม่มี ${returnMode} ที่ต้อง Return`);
+      }
+
+      if (pendingReturnQty <= 0) {
+        throw badRequest(`สินค้านี้ Return ${returnMode} ครบแล้ว`);
+      }
+
       if (qty > pendingReturnQty) {
         throw badRequest(
-          `จำนวน Return (${qty}) มากกว่า PD ค้าง Return (${pendingReturnQty})`,
+          `จำนวน Return (${qty}) มากกว่า ${returnMode} ค้าง Return (${pendingReturnQty})`,
         );
       }
 
@@ -2591,6 +2783,41 @@ export const returnPdPackProductItem = asyncHandler(
         });
       }
 
+      let borSerStockAffected: any[] = [];
+
+      if (returnMode === "PD" || returnMode === "BOR") {
+        const outboundDest = String(item.outbound?.location_dest ?? "")
+          .trim()
+          .toUpperCase();
+
+        const shouldCutBorStock = outboundDest.includes("BOR");
+        const shouldCutSerStock = outboundDest.includes("SER");
+
+        const borSerLocationName = String(
+          item.outbound?.location_dest_owner ??
+            item.outbound?.location_dest_owner_display ??
+            "",
+        ).trim();
+
+        if ((shouldCutBorStock || shouldCutSerStock) && !borSerLocationName) {
+          throw badRequest(
+            `ไม่พบ location_dest_owner สำหรับลด BOR/SER stock (outbound=${item.outbound?.no ?? "-"})`,
+          );
+        }
+
+        if (shouldCutBorStock || shouldCutSerStock) {
+          borSerStockAffected = await decrementBorSerStockForReturnTx(tx, {
+            product_id: Number(item.product_id),
+            lot_id: item.lot_id ?? null,
+            lot_serial: item.lot_serial ?? null,
+            qty,
+            location_name: borSerLocationName,
+            stock_type: shouldCutBorStock ? "BOR" : "SER",
+            user_ref: req.body.user_ref ?? null,
+          });
+        }
+      }
+
       if (qty === currentBoxQty) {
         await tx.pack_product_box_item.update({
           where: { id: Number(boxItem.id) },
@@ -2609,7 +2836,6 @@ export const returnPdPackProductItem = asyncHandler(
         });
       }
 
-      const currentPack = Math.max(0, Math.floor(Number(item.pack ?? 0)));
       const currentReturn = Math.max(0, Math.floor(Number(item.return ?? 0)));
       const boxLabel = (boxItem as any).pack_box?.box_label ?? null;
 
@@ -2622,17 +2848,22 @@ export const returnPdPackProductItem = asyncHandler(
       });
 
       return {
+        return_mode: returnMode,
         pack_product_id: packProductId,
         outbound_no: outboundNo,
         goods_out_item_id: goodsOutItemId,
         box_id: boxId,
         box_label: boxLabel,
         returned_qty: qty,
+        target_qty: targetQty,
         pd_qty: pdQty,
+        rtc_qty: rtcQty,
+        bor_qty: borQty,
         total_returned_qty: currentReturn + qty,
-        pending_return_qty: Math.max(0, pdQty - (currentReturn + qty)),
+        pending_return_qty: Math.max(0, targetQty - (currentReturn + qty)),
         location_id: Number(location.id),
         location_full_name: location.full_name,
+        bor_ser_stock_affected: borSerStockAffected,
         item: updatedItem,
       };
     });
@@ -2641,19 +2872,30 @@ export const returnPdPackProductItem = asyncHandler(
 
     io.to(`pack_product:${packProductId}`).emit("pack_product:updated", {
       pack_product_id: packProductId,
-      reason: "pd_return_item",
+      reason:
+        result.return_mode === "PD"
+          ? "pd_return_item"
+          : `${String(result.return_mode).toLowerCase()}_return_item`,
       data: result,
     });
 
     io.to(`outbound:${result.outbound_no}`).emit(
-      "outbound:pd_returned",
+      result.return_mode === "PD"
+        ? "outbound:pd_returned"
+        : "outbound:rtc_bor_returned",
       result,
     );
-    io.emit("packing:pd_returned", result);
+
+    io.emit(
+      result.return_mode === "PD"
+        ? "packing:pd_returned"
+        : "packing:rtc_bor_returned",
+      result,
+    );
 
     return res.json({
       success: true,
-      message: "Return PD สำเร็จ",
+      message: `Return ${result.return_mode} สำเร็จ`,
       data: result,
     });
   },
@@ -3032,6 +3274,10 @@ export const movePdPackingToLocation = asyncHandler(
           no: true,
           origin: true,
           invoice: true,
+          location_dest_id: true,
+          location_dest: true,
+          location_dest_owner: true,
+          location_dest_owner_display: true,
         } as any,
       });
 
@@ -3041,11 +3287,17 @@ export const movePdPackingToLocation = asyncHandler(
 
       const pdInbounds = await getPendingPdInboundForOutboundTx(tx, outbound);
 
+      const pdInboundIds = pdInbounds
+        .map((x: any) => Number(x.id))
+        .filter((x: number) => Number.isFinite(x) && x > 0);
+
       const pdQtyMap = new Map<string, number>();
 
       for (const inbound of pdInbounds as any[]) {
         for (const gi of inbound.goods_ins ?? []) {
           const key = buildPdItemKey(gi);
+          const looseKey = buildPdItemLooseKey(gi);
+
           const qty = Math.max(
             0,
             Math.floor(
@@ -3056,8 +3308,6 @@ export const movePdPackingToLocation = asyncHandler(
           if (qty <= 0) continue;
 
           pdQtyMap.set(key, Number(pdQtyMap.get(key) ?? 0) + qty);
-
-          const looseKey = buildPdItemLooseKey(gi);
           pdQtyMap.set(looseKey, Number(pdQtyMap.get(looseKey) ?? 0) + qty);
         }
       }
@@ -3140,13 +3390,12 @@ export const movePdPackingToLocation = asyncHandler(
           ),
         );
 
-        // ✅ PD ต้องย้ายตามจำนวน PD เท่านั้น ห้าม fallback ไป pack/pick/qty
         if (pdQtyForItem <= 0) continue;
 
         const availableQty =
           packQty > 0 ? packQty : pickQty > 0 ? pickQty : baseQty;
-        const moveQty = Math.min(pdQtyForItem, availableQty);
 
+        const moveQty = Math.min(pdQtyForItem, availableQty);
         if (moveQty <= 0) continue;
 
         const fallback = await resolveWmsLotExpTx(tx, {
@@ -3175,7 +3424,7 @@ export const movePdPackingToLocation = asyncHandler(
             },
             data: {
               quantity: {
-                increment: moveQty,
+                increment: new Prisma.Decimal(moveQty),
               },
               product_code: item.code ?? stock.product_code ?? null,
               product_name: item.name ?? stock.product_name ?? null,
@@ -3193,19 +3442,15 @@ export const movePdPackingToLocation = asyncHandler(
           await tx.stock.create({
             data: {
               bucket_key: bucketKey,
-
               product_id: Number(item.product_id),
               product_code: item.code ?? null,
               product_name: item.name ?? null,
               unit: item.unit ?? null,
-
               location_id: Number(location.id),
               location_name: location.full_name,
-
               lot_id: item.lot_id ?? null,
               lot_name: fallback.lot_name,
               expiration_date: fallback.expiration_date,
-
               quantity: new Prisma.Decimal(moveQty),
               source: "wms",
               active: true,
@@ -3219,14 +3464,17 @@ export const movePdPackingToLocation = asyncHandler(
         });
 
         const currentPick = Math.max(0, Math.floor(Number(item.pick ?? 0)));
+        const currentPack = Math.max(0, Math.floor(Number(item.pack ?? 0)));
+
         const nextPick = Math.max(0, currentPick - moveQty);
+        const nextPack = Math.max(0, currentPack - moveQty);
 
         await tx.goods_out_item.update({
           where: {
             id: Number(item.id),
           },
           data: {
-            pack: 0,
+            pack: nextPack,
             pick: nextPick,
             updated_at: new Date(),
           } as any,
@@ -3248,11 +3496,129 @@ export const movePdPackingToLocation = asyncHandler(
           pd_qty_for_pick_reduce: moveQty,
           old_pick: currentPick,
           new_pick: nextPick,
+          old_pack: currentPack,
+          new_pack: nextPack,
         });
       }
 
       if (!moved.length) {
         throw badRequest("ไม่พบจำนวนสินค้าที่สามารถย้ายไป Location Packing");
+      }
+
+      let borStockCut = 0;
+      let serStockCut = 0;
+
+      const outboundLocationDest = String(outbound.location_dest ?? "")
+        .trim()
+        .toUpperCase();
+
+      const shouldCutBorStock = outboundLocationDest.includes("BOR");
+      const shouldCutSerStock = outboundLocationDest.includes("SER");
+
+      const borSerLocationName = String(
+        outbound.location_dest_owner ??
+          outbound.location_dest_owner_display ??
+          "",
+      ).trim();
+
+      if ((shouldCutBorStock || shouldCutSerStock) && !borSerLocationName) {
+        throw badRequest(
+          `ไม่พบ location_dest_owner สำหรับลด BOR/SER stock (outbound=${outbound.no})`,
+        );
+      }
+
+      if (shouldCutBorStock || shouldCutSerStock) {
+        for (const row of moved) {
+          let remainToCut = Math.max(0, Math.floor(Number(row.qty ?? 0)));
+          if (remainToCut <= 0) continue;
+
+          const stockWhere: any = {
+            deleted_at: null,
+            active: true,
+            product_id: Number(row.product_id),
+            location_name: borSerLocationName,
+            quantity: {
+              gt: 0,
+            },
+          };
+
+          if (row.lot_id != null) {
+            stockWhere.lot_id = row.lot_id;
+          } else if (row.lot_serial) {
+            stockWhere.lot_name = row.lot_serial;
+          }
+
+          const borSerStocks = shouldCutBorStock
+            ? await tx.bor_stock.findMany({
+                where: stockWhere,
+                orderBy: [{ quantity: "desc" }, { id: "asc" }],
+                select: {
+                  id: true,
+                  quantity: true,
+                },
+              })
+            : await tx.ser_stock.findMany({
+                where: stockWhere,
+                orderBy: [{ quantity: "desc" }, { id: "asc" }],
+                select: {
+                  id: true,
+                  quantity: true,
+                },
+              });
+
+          for (const bs of borSerStocks as any[]) {
+            if (remainToCut <= 0) break;
+
+            const currentQty = Number(bs.quantity ?? 0);
+            if (currentQty <= 0) continue;
+
+            const cutQty = Math.min(remainToCut, currentQty);
+
+            if (shouldCutBorStock) {
+              await tx.bor_stock.update({
+                where: {
+                  id: Number(bs.id),
+                },
+                data: {
+                  quantity: {
+                    decrement: new Prisma.Decimal(cutQty),
+                  },
+                  updated_at: new Date(),
+                } as any,
+              });
+
+              borStockCut += cutQty;
+            } else {
+              await tx.ser_stock.update({
+                where: {
+                  id: Number(bs.id),
+                },
+                data: {
+                  quantity: {
+                    decrement: new Prisma.Decimal(cutQty),
+                  },
+                  updated_at: new Date(),
+                } as any,
+              });
+
+              serStockCut += cutQty;
+            }
+
+            remainToCut -= cutQty;
+          }
+
+          if (remainToCut > 0) {
+            throw badRequest(
+              `${
+                shouldCutBorStock ? "bor_stock" : "ser_stock"
+              } ไม่พอสำหรับลด PD (product_id=${row.product_id}, lot_id=${
+                row.lot_id ?? "-"
+              }, lot=${row.lot_serial ?? "-"}, location_name=${
+                borSerLocationName ?? "-"
+              }, ต้องลด=${row.qty}, ขาด=${remainToCut})`,
+            );
+          }
+        }
       }
 
       const remainingLinks = await tx.pack_product_outbound.count({
@@ -3261,62 +3627,24 @@ export const movePdPackingToLocation = asyncHandler(
         } as any,
       });
 
-      let packProductAction: "keep" | "soft_delete" = "keep";
+      const packProductAction: "keep" | "soft_delete" = "keep";
 
-      if (remainingLinks === 0) {
-        await tx.pack_product.update({
-          where: {
-            id: packProductId,
-          },
-          data: {
-            updated_at: new Date(),
-          } as any,
-        });
-
-        packProductAction = "keep";
-      } else {
-        await tx.pack_product.update({
-          where: {
-            id: packProductId,
-          },
-          data: {
-            updated_at: new Date(),
-          } as any,
-        });
-
-        packProductAction = "keep";
-      }
-
-      await tx.inbound.updateMany({
+      await tx.pack_product.update({
         where: {
-          OR: [
-            {
-              origin: {
-                equals: outbound.no,
-                mode: "insensitive",
-              },
-            },
-            {
-              invoice: {
-                equals: outbound.invoice ?? "",
-                mode: "insensitive",
-              },
-            },
-          ],
-          deleted_at: null,
-        } as any,
+          id: packProductId,
+        },
         data: {
-          status: "completed",
           updated_at: new Date(),
         } as any,
       });
 
-      if (pdInbounds.length > 0) {
+      if (pdInboundIds.length > 0) {
         await tx.inbound.updateMany({
           where: {
             id: {
-              in: pdInbounds.map((x: any) => Number(x.id)),
+              in: pdInboundIds,
             },
+            deleted_at: null,
           } as any,
           data: {
             status: "completed",
@@ -3336,7 +3664,20 @@ export const movePdPackingToLocation = asyncHandler(
         outbound_invoice: outbound.invoice,
         location_id: Number(location.id),
         location_full_name: location.full_name,
+        pd_inbound_ids: pdInboundIds,
+        should_cut_bor_stock: shouldCutBorStock,
+        should_cut_ser_stock: shouldCutSerStock,
+        bor_ser_location_name: borSerLocationName,
+        bor_stock_cut: borStockCut,
+        ser_stock_cut: serStockCut,
         moved,
+        applied: moved.map((x) => ({
+          outbound_no: outbound.no,
+          goods_out_item_id: x.goods_out_item_id,
+          pick_added: x.qty,
+          qty: x.qty,
+          location_full_name: location.full_name,
+        })),
       };
     });
 
@@ -3367,6 +3708,7 @@ export const movePdPackingToLocation = asyncHandler(
         message: "PD ถูกย้ายสินค้าไป Location Packing แล้ว",
       });
     } catch {}
+
     return res.json({
       success: true,
       message: "ย้ายสินค้าไป Location Packing สำเร็จ",
@@ -3383,6 +3725,7 @@ export const moveRtcPackingToLocation = asyncHandler(
     if (!outboundNo) throw badRequest("outbound_no is required");
     if (!locationFullName) throw badRequest("location_full_name is required");
 
+    const userRef = String(req.body?.user_ref ?? "").trim() || null;
     const location = await resolveLocationByFullNameBasic(locationFullName);
 
     const result = await prisma.$transaction(async (tx) => {
@@ -3395,6 +3738,98 @@ export const moveRtcPackingToLocation = asyncHandler(
 
       if (!outbound) {
         throw badRequest(`ไม่พบ outbound: ${outboundNo}`);
+      }
+
+      const normalizeReturnOriginRef = (value: unknown) =>
+        String(value ?? "")
+          .trim()
+          .replace(/^การส่งคืนของ\s*/i, "")
+          .replace(/^return of\s*/i, "")
+          .replace(/^return\s*/i, "")
+          .trim();
+
+      const buildRefCandidates = (...values: unknown[]) => {
+        const refs = values.flatMap((v) => {
+          const raw = String(v ?? "").trim();
+          const normalized = normalizeReturnOriginRef(raw);
+
+          return [
+            raw,
+            normalized,
+            raw.replace(/^WH\//i, ""),
+            normalized.replace(/^WH\//i, ""),
+            raw && !raw.toUpperCase().startsWith("WH/") ? `WH/${raw}` : "",
+            normalized && !normalized.toUpperCase().startsWith("WH/")
+              ? `WH/${normalized}`
+              : "",
+          ];
+        });
+
+        return Array.from(
+          new Set(refs.map((x) => String(x ?? "").trim()).filter(Boolean)),
+        );
+      };
+
+      const outboundRefs = buildRefCandidates(
+        outbound.no,
+        outbound.origin,
+        outbound.invoice,
+        outbound.reference,
+      );
+
+      const matchedReturnInbounds = await tx.inbound.findMany({
+        where: {
+          deleted_at: null,
+          in_type: {
+            in: ["RTC", "BOR"],
+          },
+          OR: outboundRefs.flatMap((ref) => [
+            { origin: { equals: ref, mode: "insensitive" as const } },
+            { origin: { contains: ref, mode: "insensitive" as const } },
+            { reference: { equals: ref, mode: "insensitive" as const } },
+            { reference: { contains: ref, mode: "insensitive" as const } },
+            { invoice: { equals: ref, mode: "insensitive" as const } },
+            { invoice: { contains: ref, mode: "insensitive" as const } },
+            { no: { equals: ref, mode: "insensitive" as const } },
+            { no: { contains: ref, mode: "insensitive" as const } },
+          ]),
+        } as any,
+        include: {
+          goods_ins: {
+            where: {
+              deleted_at: null,
+            },
+          },
+        },
+      });
+
+      const borInbound = matchedReturnInbounds.find(
+        (x: any) => String(x.in_type ?? "").toUpperCase() === "BOR",
+      );
+
+      const borInboundLocation = String(borInbound?.location ?? "")
+        .trim()
+        .toUpperCase();
+
+      const shouldCutBorStock =
+        Boolean(borInbound) && borInboundLocation.includes("BOR");
+      const shouldCutSerStock =
+        Boolean(borInbound) && borInboundLocation.includes("SER");
+
+      let borSerLocationName: string | null = null;
+
+      if (shouldCutBorStock || shouldCutSerStock) {
+        borSerLocationName = String(
+          (outbound as any).location_dest_owner ??
+            (outbound as any).location_dest_owner_display ??
+            "",
+        ).trim();
+
+        if (!borSerLocationName) {
+          throw badRequest(
+            `ไม่พบ location_dest_owner ของ BO สำหรับตัด BOR/SER stock (outbound=${outbound.no})`,
+          );
+        }
       }
 
       const items = await tx.goods_out_item.findMany({
@@ -3512,18 +3947,6 @@ export const moveRtcPackingToLocation = asyncHandler(
           return_qty: returnQty,
           pack_qty: packQty,
           pick_qty: pickQty,
-          used_qty_source:
-            rtcQty > 0
-              ? "rtc"
-              : borQty > 0
-                ? "bor"
-                : returnQty > 0
-                  ? "return"
-                  : packQty > 0
-                    ? "pack"
-                    : pickQty > 0
-                      ? "pick"
-                      : "qty",
           location_id: Number(location.id),
           location_full_name: location.full_name,
           lot_name: fallback.lot_name,
@@ -3533,6 +3956,101 @@ export const moveRtcPackingToLocation = asyncHandler(
 
       if (!moved.length) {
         throw badRequest("ไม่พบจำนวนสินค้าที่สามารถย้าย RTC/BOR ไป Location");
+      }
+
+      let borStockCut = 0;
+      let serStockCut = 0;
+
+      if (shouldCutBorStock || shouldCutSerStock) {
+        for (const row of moved) {
+          let remainToCut = Math.max(0, Math.floor(Number(row.qty ?? 0)));
+          if (remainToCut <= 0) continue;
+
+          const stockWhere: any = {
+            deleted_at: null,
+            active: true,
+            product_id: Number(row.product_id),
+            location_name: borSerLocationName,
+            quantity: {
+              gt: 0,
+            },
+          };
+
+          if (row.lot_id != null) {
+            stockWhere.lot_id = row.lot_id;
+          } else if (row.lot_serial) {
+            stockWhere.lot_name = row.lot_serial;
+          }
+
+          const borSerStocks = shouldCutBorStock
+            ? await tx.bor_stock.findMany({
+                where: stockWhere,
+                orderBy: [{ quantity: "desc" }, { id: "asc" }],
+                select: {
+                  id: true,
+                  quantity: true,
+                },
+              })
+            : await tx.ser_stock.findMany({
+                where: stockWhere,
+                orderBy: [{ quantity: "desc" }, { id: "asc" }],
+                select: {
+                  id: true,
+                  quantity: true,
+                },
+              });
+
+          for (const bs of borSerStocks as any[]) {
+            if (remainToCut <= 0) break;
+
+            const currentQty = Number(bs.quantity ?? 0);
+            if (currentQty <= 0) continue;
+
+            const cutQty = Math.min(remainToCut, currentQty);
+
+            if (shouldCutBorStock) {
+              await tx.bor_stock.update({
+                where: { id: Number(bs.id) },
+                data: {
+                  quantity: {
+                    decrement: new Prisma.Decimal(cutQty),
+                  },
+                  user_pick: userRef,
+                  updated_at: new Date(),
+                } as any,
+              });
+
+              borStockCut += cutQty;
+            } else {
+              await tx.ser_stock.update({
+                where: { id: Number(bs.id) },
+                data: {
+                  quantity: {
+                    decrement: new Prisma.Decimal(cutQty),
+                  },
+                  user_pick: userRef,
+                  updated_at: new Date(),
+                } as any,
+              });
+
+              serStockCut += cutQty;
+            }
+
+            remainToCut -= cutQty;
+          }
+
+          if (remainToCut > 0) {
+            throw badRequest(
+              `${
+                shouldCutBorStock ? "bor_stock" : "ser_stock"
+              } ไม่พอสำหรับตัด BOR (product_id=${row.product_id}, lot_id=${
+                row.lot_id ?? "-"
+              }, lot=${row.lot_serial ?? "-"}, location_name=${
+                borSerLocationName ?? "-"
+              }, ต้องตัด=${row.qty}, ขาด=${remainToCut})`,
+            );
+          }
+        }
       }
 
       if (itemIds.length > 0) {
@@ -3573,7 +4091,10 @@ export const moveRtcPackingToLocation = asyncHandler(
           id: { in: itemIds },
         } as any,
         data: {
+          status: "completed",
+          in_process: true,
           rtc_check: false,
+          return_check: false,
           deleted_at: new Date(),
           updated_at: new Date(),
         } as any,
@@ -3584,17 +4105,65 @@ export const moveRtcPackingToLocation = asyncHandler(
           id: Number(outbound.id),
         },
         data: {
+          in_process: true,
           deleted_at: new Date(),
           updated_at: new Date(),
         } as any,
       });
 
+      if (matchedReturnInbounds.length > 0) {
+        const returnInboundIds = matchedReturnInbounds.map((x: any) =>
+          Number(x.id),
+        );
+
+        await tx.goods_in.updateMany({
+          where: {
+            inbound_id: {
+              in: returnInboundIds,
+            },
+            deleted_at: null,
+          } as any,
+          data: {
+            in_process: true,
+            updated_at: new Date(),
+          } as any,
+        });
+
+        await tx.inbound.updateMany({
+          where: {
+            id: {
+              in: returnInboundIds,
+            },
+          } as any,
+          data: {
+            status: "completed",
+            updated_at: new Date(),
+          } as any,
+        });
+      }
+
       return {
         outbound_id: Number(outbound.id),
         outbound_no: outbound.no,
-        out_type: outbound.out_type,
+        outbound_origin: outbound.origin,
+        outbound_invoice: outbound.invoice,
         location_id: Number(location.id),
         location_full_name: location.full_name,
+        bor_ser_location_name: borSerLocationName,
+        should_cut_bor_stock: shouldCutBorStock,
+        should_cut_ser_stock: shouldCutSerStock,
+        bor_stock_cut: borStockCut,
+        ser_stock_cut: serStockCut,
+        matched_return_inbounds: matchedReturnInbounds.map((x: any) => ({
+          id: x.id,
+          no: x.no,
+          in_type: x.in_type,
+          origin: x.origin,
+          invoice: x.invoice,
+          reference: x.reference,
+          location: x.location,
+          status: "completed",
+        })),
         deleted_pack_product_outbound_count: deletedPackProductOutbound.count,
         moved,
         deleted: {

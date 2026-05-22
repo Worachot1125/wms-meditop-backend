@@ -5,6 +5,37 @@ import { handleInboundTransfer } from "./inbound.transfer.helper";
 import { rtcAdjustmentMatchKey } from "./inbound.key.helper";
 import { io } from "../../index";
 
+const normalizeReturnOriginRef = (value: unknown) => {
+  return String(value ?? "")
+    .trim()
+    .replace(/^การส่งคืนของ\s*/i, "")
+    .replace(/^return of\s*/i, "")
+    .replace(/^return\s*/i, "")
+    .trim();
+};
+
+const buildOutboundRefCandidates = (input: {
+  origin?: unknown;
+  reference?: unknown;
+  invoice?: unknown;
+  no?: unknown;
+  number?: unknown;
+}) => {
+  const values = [
+    input.origin,
+    normalizeReturnOriginRef(input.origin),
+    input.reference,
+    normalizeReturnOriginRef(input.reference),
+    input.invoice,
+    input.no,
+    input.number,
+  ];
+
+  return Array.from(
+    new Set(values.map((v) => String(v ?? "").trim()).filter(Boolean)),
+  );
+};
+
 export async function handleRTCReturnTransfer(input: {
   picking_id?: any;
   number?: string;
@@ -39,6 +70,7 @@ export async function handleRTCReturnTransfer(input: {
   const documentNo = String(number ?? no ?? "").trim();
   const outboundRefs = buildOutboundRefCandidates({
     origin,
+    reference,
     no,
     number: documentNo,
     invoice,
@@ -86,11 +118,12 @@ export async function handleRTCReturnTransfer(input: {
   const outbound = await prisma.outbound.findFirst({
     where: {
       deleted_at: null,
-      OR: [
-        { no: { in: outboundRefs } },
-        { origin: { in: outboundRefs } },
-        { invoice: { in: outboundRefs } },
-      ],
+      OR: outboundRefs.flatMap((ref) => [
+        { no: { equals: ref, mode: "insensitive" as const } },
+        { origin: { equals: ref, mode: "insensitive" as const } },
+        { invoice: { equals: ref, mode: "insensitive" as const } },
+        { reference: { equals: ref, mode: "insensitive" as const } },
+      ]),
     },
     select: {
       id: true,
@@ -174,8 +207,7 @@ export async function handleRTCReturnTransfer(input: {
     const hasPickedOrPacked =
       dbItems.some(
         (x: any) => Number(x.pick ?? 0) > 0 || Number(x.pack ?? 0) > 0,
-      ) ||
-      (adjustmentLines as any[]).some((x: any) => Number(x.pick ?? 0) > 0);
+      ) || (adjustmentLines as any[]).some((x: any) => Number(x.pick ?? 0) > 0);
 
     const shouldKeepOutboundForReturn = hasPickedOrPacked;
 
@@ -702,17 +734,24 @@ export async function handleRTCReturnTransfer(input: {
   return result;
 }
 
-
 function detectRtcBorMode(input: {
   number?: any;
   no?: any;
   origin?: any;
   out_type?: any;
 }): "RTC" | "BOR" {
-  const numberText = String(input.number ?? "").trim().toUpperCase();
-  const noText = String(input.no ?? "").trim().toUpperCase();
-  const originText = String(input.origin ?? "").trim().toUpperCase();
-  const outTypeText = String(input.out_type ?? "").trim().toUpperCase();
+  const numberText = String(input.number ?? "")
+    .trim()
+    .toUpperCase();
+  const noText = String(input.no ?? "")
+    .trim()
+    .toUpperCase();
+  const originText = String(input.origin ?? "")
+    .trim()
+    .toUpperCase();
+  const outTypeText = String(input.out_type ?? "")
+    .trim()
+    .toUpperCase();
 
   if (
     numberText.includes("BOR") ||
@@ -764,51 +803,6 @@ export async function getOutboundLotAdjustmentLinesByGoodsOutItemIds(
   });
 }
 
-export function buildOutboundRefCandidates(input: {
-  origin?: any;
-  no?: any;
-  number?: any;
-  invoice?: any;
-}) {
-  const refs = [input.origin, input.no, input.number, input.invoice]
-    .map((x) => String(x ?? "").trim())
-    .filter(Boolean);
-
-  const result = new Set<string>();
-
-  for (const ref of refs) {
-    const upper = ref.toUpperCase();
-
-    result.add(upper);
-
-    // BO-5 -> WH/BO-5
-    if (/^BO-/.test(upper)) {
-      result.add(`WH/${upper}`);
-    }
-
-    // DO-5 -> WH/DO-5
-    if (/^DO-/.test(upper)) {
-      result.add(`WH/${upper}`);
-    }
-
-    // BO26-xxx -> WH/BO26-xxx เผื่อบางเคสเก็บแบบ WH/
-    if (/^BO\d/.test(upper)) {
-      result.add(`WH/${upper}`);
-    }
-
-    // DO26-xxx -> WH/DO26-xxx
-    if (/^DO\d/.test(upper)) {
-      result.add(`WH/${upper}`);
-    }
-
-    // WH/BO-5 -> BO-5
-    if (upper.startsWith("WH/")) {
-      result.add(upper.replace(/^WH\//, ""));
-    }
-  }
-
-  return Array.from(result);
-}
 
 export function extractOutboundNoFromOrigin(origin: any): string | null {
   const s = String(origin ?? "").trim();

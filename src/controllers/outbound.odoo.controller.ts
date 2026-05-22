@@ -103,6 +103,18 @@ import type {
 } from "../utils/outbound/outbound.adjustment";
 import { buildAutoLocationPackKey } from "../utils/helper_scan/location";
 
+const normalizeOdooNullableString = (value: unknown): string | null => {
+  if (value == null || value === false) return null;
+
+  if (Array.isArray(value)) {
+    const first = value.find((x) => String(x ?? "").trim());
+    return first == null ? null : String(first).trim() || null;
+  }
+
+  const text = String(value).trim();
+  return text || null;
+};
+
 // ================================
 // ✅ RECEIVE OUTBOUND FROM ODOO
 // ================================
@@ -821,14 +833,16 @@ export const receiveOutboundFromOdoo = asyncHandler(
                   location,
                   location_dest_id: mappedVirtualLocationId,
                   location_dest,
-                  location_dest_owner: location_dest_owner ?? null,
-                  location_dest_owner_display:
-                    location_dest_owner_display ?? null,
+                  location_dest_owner:
+                    normalizeOdooNullableString(location_dest_owner),
+                  location_dest_owner_display: normalizeOdooNullableString(
+                    location_dest_owner_display,
+                  ),
                   department_id: department_id?.toString(),
                   department: department?.toString() || "",
-                  reference: convertedReference,
-                  origin: convertedOrigin,
-                  invoice: convertedInvoice,
+                  reference: normalizeOdooNullableString(reference),
+                  origin: normalizeOdooNullableString(origin),
+                  invoice: normalizeOdooNullableString(invoice),
                   out_type: outType,
                   ...(autoProcess ? { in_process: true } : {}),
                   updated_at: new Date(),
@@ -842,14 +856,16 @@ export const receiveOutboundFromOdoo = asyncHandler(
                   location,
                   location_dest_id: mappedVirtualLocationId,
                   location_dest,
-                  location_dest_owner: location_dest_owner ?? null,
-                  location_dest_owner_display:
-                    location_dest_owner_display ?? null,
+                  location_dest_owner:
+                    normalizeOdooNullableString(location_dest_owner),
+                  location_dest_owner_display: normalizeOdooNullableString(
+                    location_dest_owner_display,
+                  ),
                   department_id: department_id?.toString(),
                   department: department?.toString() || "",
-                  reference: convertedReference,
-                  origin: convertedOrigin,
-                  invoice: convertedInvoice,
+                  reference: normalizeOdooNullableString(reference),
+                  origin: normalizeOdooNullableString(origin),
+                  invoice: normalizeOdooNullableString(invoice),
                   date: new Date(),
                   out_type: outType,
                   outbound_barcode: no,
@@ -2073,6 +2089,7 @@ export const getOdooOutboundsAvailable = asyncHandler(
   },
 );
 
+
 type WaitPackMode = "normal" | "return_pack";
 
 const getOdooOutboundsInProcessBase = async (
@@ -2233,12 +2250,28 @@ const getOdooOutboundsInProcessBase = async (
           },
         };
 
-  const baseWhere: Prisma.outboundWhereInput = {
-    deleted_at: null,
-    in_process: true,
-    ...selectedDepartmentWhere,
-    ...packActionWhere,
-  };
+const blockedLocationWhere: Prisma.outboundWhereInput = {
+  NOT: [
+    {
+      location: {
+        equals: "WH/M_EXP&NCR",
+        mode: "insensitive",
+      },
+    },
+  ],
+};
+
+const baseWhere: Prisma.outboundWhereInput = {
+  AND: [
+    {
+      deleted_at: null,
+      in_process: true,
+      ...selectedDepartmentWhere,
+    },
+    packActionWhere,
+    blockedLocationWhere,
+  ],
+};
 
   let where: Prisma.outboundWhereInput = baseWhere;
 
@@ -6677,6 +6710,12 @@ export const applyAutoLocationPack = asyncHandler(
       const updatedItems: any[] = [];
       const stockCuts: any[] = [];
 
+      const appliedRows: Array<{
+        outbound_no: string;
+        goods_out_item_id: number;
+        pick_added: number;
+      }> = [];
+
       for (const row of matchedItems) {
         if (totalAvailable <= 0) break;
 
@@ -6697,6 +6736,12 @@ export const applyAutoLocationPack = asyncHandler(
         });
 
         updatedItems.push(updated);
+
+        appliedRows.push({
+          outbound_no: String(row.item.outbound?.no ?? "").trim(),
+          goods_out_item_id: Number(row.item.id),
+          pick_added: useQty,
+        });
 
         const existingPick = await tx.goods_out_item_location_pick.findFirst({
           where: {
@@ -6768,12 +6813,13 @@ export const applyAutoLocationPack = asyncHandler(
         mode,
         source_location_name: sourceLocationName,
         updated_count: updatedItems.length,
-        total_picked: updatedItems.reduce(
-          (sum, item) => sum + Number(item.pick ?? 0),
+        total_picked: appliedRows.reduce(
+          (sum, item) => sum + Number(item.pick_added ?? 0),
           0,
         ),
         remaining_location_pack_qty: totalAvailable,
         stock_cuts: stockCuts,
+        applied: appliedRows,
       };
     });
 

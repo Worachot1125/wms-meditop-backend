@@ -2706,6 +2706,10 @@ export const confirmOutboundPickToStock = asyncHandler(
     const user_ref =
       user_ref_raw == null ? null : String(user_ref_raw).trim() || null;
 
+    const skipStockDecrement =
+      (req.body as any)?.skip_stock_decrement === true ||
+      String((req.body as any)?.source ?? "").trim() === "AUTO_LOCATION_PACK";
+
     const outbound = await prisma.outbound.findFirst({
       where: {
         no,
@@ -2827,89 +2831,95 @@ export const confirmOutboundPickToStock = asyncHandler(
         let remainToCut = qtyToConfirm;
         let firstExpirationDate: Date | null = null;
 
-        for (const pickRow of pickRows as any[]) {
-          if (remainToCut <= 0) break;
-
-          const locationName = String(
-            pickRow.location?.full_name ??
-              pickRow.location_name ??
-              pickRow.full_name ??
-              "",
-          ).trim();
-
-          if (!locationName) continue;
-
-          if (locationName.toLowerCase().includes("_location_pack")) {
-            const lpQty = Math.max(
-              0,
-              Math.floor(Number(pickRow.qty_pick ?? 0)),
-            );
-            const skipQty = Math.min(remainToCut, lpQty);
-            remainToCut -= skipQty;
-            continue;
-          }
-
-          const stockWhere: any = {
-            active: true,
-            product_id: item.product_id,
-            location_name: locationName,
-            quantity: {
-              gt: 0,
-            },
-          };
-
-          if (item.lot_id != null) {
-            stockWhere.lot_id = item.lot_id;
-          } else if (item.lot_serial) {
-            stockWhere.lot_name = item.lot_serial;
-          }
-
-          const stockRows = await tx.stock.findMany({
-            where: stockWhere,
-            orderBy: {
-              quantity: "desc",
-            },
-            select: {
-              id: true,
-              bucket_key: true,
-              quantity: true,
-              expiration_date: true,
-            },
-          });
-
-          for (const stock of stockRows as any[]) {
+        if (!skipStockDecrement) {
+          for (const pickRow of pickRows as any[]) {
             if (remainToCut <= 0) break;
 
-            const stockQty = Number(stock.quantity ?? 0);
-            if (stockQty <= 0) continue;
+            const locationName = String(
+              pickRow.location?.full_name ??
+                pickRow.location_name ??
+                pickRow.full_name ??
+                "",
+            ).trim();
 
-            const cutQty = Math.min(remainToCut, stockQty);
+            if (!locationName) continue;
 
-            await tx.stock.update({
-              where: {
-                bucket_key: stock.bucket_key,
+            if (locationName.toLowerCase().includes("_location_pack")) {
+              const lpQty = Math.max(
+                0,
+                Math.floor(Number(pickRow.qty_pick ?? 0)),
+              );
+              const skipQty = Math.min(remainToCut, lpQty);
+              remainToCut -= skipQty;
+              continue;
+            }
+
+            const stockWhere: any = {
+              active: true,
+              product_id: item.product_id,
+              location_name: locationName,
+              quantity: {
+                gt: 0,
               },
-              data: {
-                quantity: {
-                  decrement: cutQty,
-                },
-                updated_at: new Date(),
+            };
+
+            if (item.lot_id != null) {
+              stockWhere.lot_id = item.lot_id;
+            } else if (item.lot_serial) {
+              stockWhere.lot_name = item.lot_serial;
+            }
+
+            const stockRows = await tx.stock.findMany({
+              where: stockWhere,
+              orderBy: {
+                quantity: "desc",
+              },
+              select: {
+                id: true,
+                bucket_key: true,
+                quantity: true,
+                expiration_date: true,
               },
             });
 
-            if (!firstExpirationDate && stock.expiration_date) {
-              firstExpirationDate = stock.expiration_date;
+            for (const stock of stockRows as any[]) {
+              if (remainToCut <= 0) break;
+
+              const stockQty = Number(stock.quantity ?? 0);
+              if (stockQty <= 0) continue;
+
+              const cutQty = Math.min(remainToCut, stockQty);
+
+              await tx.stock.update({
+                where: {
+                  bucket_key: stock.bucket_key,
+                },
+                data: {
+                  quantity: {
+                    decrement: cutQty,
+                  },
+                  updated_at: new Date(),
+                },
+              });
+
+              if (!firstExpirationDate && stock.expiration_date) {
+                firstExpirationDate = stock.expiration_date;
+              }
+
+              remainToCut -= cutQty;
+              stockUpdated++;
             }
-
-            remainToCut -= cutQty;
-            stockUpdated++;
           }
-        }
 
-        if (remainToCut > 0) {
-          throw badRequest(
-            `stock ไม่พอสำหรับตัดออก (item_id=${item.id}, product_id=${item.product_id}, lot_id=${item.lot_id ?? "-"}, lot=${item.lot_serial ?? "-"}, ต้องตัด=${qtyToConfirm}, ขาด=${remainToCut})`,
-          );
+          if (remainToCut > 0) {
+            throw badRequest(
+              `stock ไม่พอสำหรับตัดออก (item_id=${item.id}, product_id=${item.product_id}, lot_id=${item.lot_id ?? "-"}, lot=${item.lot_serial ?? "-"}, ต้องตัด=${qtyToConfirm}, ขาด=${remainToCut})`,
+            );
+          }
+        } else {
+          // ✅ Auto-LocationPack ตัด stock จาก _Location_Pack ไปแล้ว
+          // ให้ข้ามการตัด stock แต่ยังให้ qtyToConfirm ไปเพิ่ม BOR/SER stock ต่อ
+          remainToCut = 0;
         }
 
         if (shouldMoveToBorStock && qtyToConfirm > 0) {
@@ -2917,12 +2927,13 @@ export const confirmOutboundPickToStock = asyncHandler(
             where: {
               deleted_at: null,
               active: true,
-              no: outbound.no,
               product_id: item.product_id,
               lot_id: item.lot_id,
               lot_name: item.lot_serial,
-              location_id: outbound.location_dest_id,
               location_name: borSerLocationName,
+            },
+            orderBy: {
+              id: "asc",
             },
             select: {
               id: true,
@@ -2973,12 +2984,13 @@ export const confirmOutboundPickToStock = asyncHandler(
             where: {
               deleted_at: null,
               active: true,
-              no: outbound.no,
               product_id: item.product_id,
               lot_id: item.lot_id,
               lot_name: item.lot_serial,
-              location_id: outbound.location_dest_id,
               location_name: borSerLocationName,
+            },
+            orderBy: {
+              id: "asc",
             },
             select: {
               id: true,
