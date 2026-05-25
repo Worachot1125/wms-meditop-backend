@@ -439,3 +439,71 @@ export const deleteUser = asyncHandler(
     return res.json({ message: "ลบผู้ใช้เรียบร้อยแล้ว" });
   },
 );
+
+
+export const getAdjustmentApprovers = asyncHandler(
+  async (_req: Request, res: Response) => {
+    const users = await prisma.user.findMany({
+      where: {
+        deleted_at: null,
+        user_level: {
+          in: ["Supervisor", "Admin"],
+        },
+      } as any,
+      orderBy: [{ first_name: "asc" }, { username: "asc" }],
+      select: {
+        id: true,
+        first_name: true,
+        last_name: true,
+        username: true,
+        user_level: true,
+      },
+    });
+
+    return res.json({
+      success: true,
+      data: users,
+    });
+  },
+);
+
+export const verifyAdjustmentApproverPin = asyncHandler(
+  async (req: Request, res: Response) => {
+    const userId = Number(req.body?.user_id);
+    const pin = String(req.body?.pin ?? "").trim();
+
+    if (!userId || !pin) {
+      throw badRequest("user_id และ pin จำเป็น");
+    }
+
+    const user = await prisma.user.findFirst({
+      where: {
+        id: userId,
+        deleted_at: null,
+        user_level: {
+          in: ["Supervisor", "Admin"],
+        },
+      } as any,
+    });
+
+    if (!user) {
+      throw badRequest("ไม่พบ Supervisor/Admin");
+    }
+
+    // 🔥 ถ้า hash pin ค่อยเปลี่ยนตรงนี้
+    if (String((user as any).pin ?? "").trim() !== pin) {
+      throw badRequest("PIN ไม่ถูกต้อง");
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        id: user.id,
+        first_name: (user as any).first_name ?? null,
+        last_name: (user as any).last_name ?? null,
+        username: (user as any).username ?? null,
+        user_level: (user as any).user_level ?? null,
+      },
+    });
+  },
+);

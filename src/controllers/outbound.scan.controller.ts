@@ -3331,13 +3331,16 @@ export const confirmOutboundPickToStock = asyncHandler(
 
             if (!locationName) continue;
 
+            const rowPickQty = Math.max(
+              0,
+              Math.floor(Number(pickRow.qty_pick ?? 0)),
+            );
+            if (rowPickQty <= 0) continue;
+
+            let remainInThisLocation = Math.min(remainToCut, rowPickQty);
+
             if (locationName.toLowerCase().includes("_location_pack")) {
-              const lpQty = Math.max(
-                0,
-                Math.floor(Number(pickRow.qty_pick ?? 0)),
-              );
-              const skipQty = Math.min(remainToCut, lpQty);
-              remainToCut -= skipQty;
+              remainToCut -= remainInThisLocation;
               continue;
             }
 
@@ -3345,13 +3348,9 @@ export const confirmOutboundPickToStock = asyncHandler(
               active: true,
               product_id: item.product_id,
               location_name: locationName,
-              quantity: {
-                gt: 0,
-              },
+              quantity: { gt: 0 },
             };
 
-            // ✅ EXP&NCR: อย่า strict lot จาก goods_out_item
-            // เพราะ pick อาจมาจาก lot จริงใน NCR stock / lot adjustment
             if (!isExpNcrOutbound) {
               if (item.lot_id != null) {
                 stockWhere.lot_id = item.lot_id;
@@ -3360,17 +3359,9 @@ export const confirmOutboundPickToStock = asyncHandler(
               }
             }
 
-            if (item.lot_id != null) {
-              stockWhere.lot_id = item.lot_id;
-            } else if (item.lot_serial) {
-              stockWhere.lot_name = item.lot_serial;
-            }
-
             const stockRows = await tx.stock.findMany({
               where: stockWhere,
-              orderBy: {
-                quantity: "desc",
-              },
+              orderBy: { quantity: "desc" },
               select: {
                 id: true,
                 bucket_key: true,
@@ -3380,21 +3371,17 @@ export const confirmOutboundPickToStock = asyncHandler(
             });
 
             for (const stock of stockRows as any[]) {
-              if (remainToCut <= 0) break;
+              if (remainInThisLocation <= 0) break;
 
               const stockQty = Number(stock.quantity ?? 0);
               if (stockQty <= 0) continue;
 
-              const cutQty = Math.min(remainToCut, stockQty);
+              const cutQty = Math.min(remainInThisLocation, stockQty);
 
               await tx.stock.update({
-                where: {
-                  bucket_key: stock.bucket_key,
-                },
+                where: { bucket_key: stock.bucket_key },
                 data: {
-                  quantity: {
-                    decrement: cutQty,
-                  },
+                  quantity: { decrement: cutQty },
                   updated_at: new Date(),
                 },
               });
@@ -3403,8 +3390,15 @@ export const confirmOutboundPickToStock = asyncHandler(
                 firstExpirationDate = stock.expiration_date;
               }
 
+              remainInThisLocation -= cutQty;
               remainToCut -= cutQty;
               stockUpdated++;
+            }
+
+            if (remainInThisLocation > 0) {
+              throw badRequest(
+                `stock ไม่พอที่ location ${locationName} (item_id=${item.id}, ต้องตัด=${rowPickQty}, ขาด=${remainInThisLocation})`,
+              );
             }
           }
 
@@ -3414,8 +3408,6 @@ export const confirmOutboundPickToStock = asyncHandler(
             );
           }
         } else {
-          // ✅ Auto-LocationPack ตัด stock จาก _Location_Pack ไปแล้ว
-          // ให้ข้ามการตัด stock แต่ยังให้ qtyToConfirm ไปเพิ่ม BOR/SER stock ต่อ
           remainToCut = 0;
         }
 
@@ -3920,14 +3912,13 @@ export const confirmRTCtoStock = asyncHandler(
       ).map((x) => Number(x.id));
 
       for (const item of returnItems as any[]) {
-        const returnQty = Math.max(
-          0,
-          Math.floor(Number(item.return ?? 0)),
-        );
+        const returnQty = Math.max(0, Math.floor(Number(item.return ?? 0)));
 
         if (returnQty <= 0) continue;
 
-        const returnRows = await (tx as any).goods_out_item_location_return.findMany({
+        const returnRows = await (
+          tx as any
+        ).goods_out_item_location_return.findMany({
           where: {
             goods_out_item_id: Number(item.id),
             return: { gt: 0 },
@@ -3936,12 +3927,12 @@ export const confirmRTCtoStock = asyncHandler(
         });
 
         if (!returnRows.length) {
-          throw badRequest(
-            `ไม่พบ location RETURN ของ item=${item.id}`,
-          );
+          throw badRequest(`ไม่พบ location RETURN ของ item=${item.id}`);
         }
 
-        const pickRows = await (tx as any).goods_out_item_location_pick.findMany({
+        const pickRows = await (
+          tx as any
+        ).goods_out_item_location_pick.findMany({
           where: {
             goods_out_item_id: Number(item.id),
             qty_pick: { gt: 0 },
@@ -4036,10 +4027,7 @@ export const confirmRTCtoStock = asyncHandler(
         }
 
         for (const row of returnRows as any[]) {
-          const qty = Math.max(
-            0,
-            Math.floor(Number(row.return ?? 0)),
-          );
+          const qty = Math.max(0, Math.floor(Number(row.return ?? 0)));
 
           if (qty <= 0) continue;
 
@@ -4054,9 +4042,7 @@ export const confirmRTCtoStock = asyncHandler(
           });
 
           if (!location) {
-            throw badRequest(
-              `ไม่พบ location RETURN id=${row.location_id}`,
-            );
+            throw badRequest(`ไม่พบ location RETURN id=${row.location_id}`);
           }
 
           await increaseStockFromOutboundReturnTx(tx, {
@@ -4095,7 +4081,9 @@ export const confirmRTCtoStock = asyncHandler(
       }
 
       if (allItemIds.length > 0) {
-        const delPick = await (tx as any).goods_out_item_location_pick.deleteMany({
+        const delPick = await (
+          tx as any
+        ).goods_out_item_location_pick.deleteMany({
           where: {
             goods_out_item_id: {
               in: allItemIds,

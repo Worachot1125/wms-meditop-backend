@@ -115,7 +115,7 @@ function normalizeOwnerOrLocationText(v: unknown): string | null {
   return s.length ? s : null;
 }
 
-function normalizeAdjustmentExp(v: unknown): Date | null {
+export function normalizeAdjustmentExp(v: unknown): Date | null {
   if (!v) return null;
 
   if (v instanceof Date) {
@@ -1941,7 +1941,11 @@ export const receiveOdooAdjustments = asyncHandler(
               no,
               deleted_at: null,
             },
-            select: { id: true },
+            select: {
+              id: true,
+              no: true,
+              inventory_id: true,
+            },
           });
 
           let adjustmentId: number;
@@ -2009,7 +2013,6 @@ export const receiveOdooAdjustments = asyncHandler(
               tx,
               mergedItems,
             );
-
           if (hydratedItems.length > 0) {
             await tx.adjustment_item.createMany({
               data: hydratedItems.map((item) => ({
@@ -2471,10 +2474,7 @@ const attachAdjustmentLocations = async <T extends any>(rowsInput: T[]) => {
             created_at: true,
             updated_at: true,
           },
-          orderBy: [
-            { location_name: "asc" },
-            { id: "asc" },
-          ],
+          orderBy: [{ location_name: "asc" }, { id: "asc" }],
         })
       : [];
 
@@ -2935,10 +2935,7 @@ export const getAdjustmentDetail = asyncHandler(
     data.items = Array.isArray(data.items)
       ? data.items.map((item: any) => {
           const rawLocations =
-            item.lock_locations ??
-            item.locations ??
-            item.location_list ??
-            [];
+            item.lock_locations ?? item.locations ?? item.location_list ?? [];
 
           const sortedLocations = Array.isArray(rawLocations)
             ? sortByLocationNameAsc(rawLocations)
@@ -3211,6 +3208,8 @@ export const scanAdjustmentLocation = asyncHandler(
   async (req: Request, res: Response) => {
     const no = decodeNoParam((req.params as any).no);
     const location_full_name = normalizeText(req.body?.location_full_name);
+    const user_ref = normalizeText(req.body?.user_ref) || null;
+    const client_id = normalizeText(req.body?.client_id) || null;
 
     if (!no) throw badRequest("Invalid no");
 
@@ -3282,6 +3281,7 @@ export const scanAdjustmentLocation = asyncHandler(
                   location_id: location.id,
                   location_name: location.full_name,
                   confirmed_qty: 0,
+                  user_ref,
                   created_at: new Date(),
                   updated_at: new Date(),
                 },
@@ -3300,6 +3300,8 @@ export const scanAdjustmentLocation = asyncHandler(
           ...(detail as any),
           scanned: {
             location_full_name: location.full_name,
+            user_ref,
+            client_id,
           },
           impact: (detail as any)?.items ?? [],
           location: {
@@ -3770,10 +3772,226 @@ function parseIntSafe(v: unknown, def = 0) {
   return Math.floor(n);
 }
 
+type MinusImpactLockInput = {
+  location_id?: number | null;
+  location_name?: string | null;
+  qty?: number | string | null;
+};
+
+type MinusImpactLineInput = {
+  adjustment_item_id?: number | string | null;
+  qty?: number | string | null;
+  locks?: MinusImpactLockInput[];
+};
+
+function pickMinusImpactLines(body: any): MinusImpactLineInput[] {
+  return Array.isArray(body?.minus_impact_lines) ? body.minus_impact_lines : [];
+}
+
+export const saveMinusLockPick = asyncHandler(
+  async (req: Request, res: Response) => {
+    const no = decodeNoParam((req.params as any).no);
+    if (!no) throw badRequest("Invalid no");
+
+    const itemId = Number(req.body?.adjustment_item_id);
+    const totalQty = Math.max(0, Math.floor(Number(req.body?.qty ?? 0)));
+    const locks = Array.isArray(req.body?.locks) ? req.body.locks : [];
+    const userRef = normalizeText(req.body?.user_ref) || null;
+
+    if (!Number.isFinite(itemId) || itemId <= 0) {
+      throw badRequest("adjustment_item_id ไม่ถูกต้อง");
+    }
+
+    if (totalQty <= 0) {
+      throw badRequest("qty ต้องมากกว่า 0");
+    }
+
+    if (!locks.length) {
+      throw badRequest("กรุณาเลือก Lock No. ที่ตัด");
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const adj = await tx.adjustment.findFirst({
+        where: { no, deleted_at: null },
+        select: { id: true, no: true, status: true },
+      });
+
+      if (!adj) throw badRequest(`Adjustment not found: ${no}`);
+
+      if (adj.status !== "pending" && adj.status !== "in-progress") {
+        throw badRequest(
+          `แก้ไข QTY ได้เฉพาะ pending/in-progress เท่านั้น current=${adj.status}`,
+        );
+      }
+
+      const item = await tx.adjustment_item.findFirst({
+        where: {
+          id: itemId,
+          adjustment_id: adj.id,
+          deleted_at: null,
+        },
+      });
+
+      if (!item) {
+        throw badRequest(`ไม่พบ adjustment_item id=${itemId}`);
+      }
+
+      const fromInv = isInventoryAdjustment(item.location);
+      const toInv = isInventoryAdjustment(item.location_dest);
+
+      if (fromInv || !toInv) {
+        throw badRequest("เลือก Lock No. ใช้ได้เฉพาะ Impact - เท่านั้น");
+      }
+
+      const impactQty = Math.abs(Number(item.qty ?? 0));
+
+      const normalizedLocks = locks
+        .map((lock: any) => {
+          const qty = Math.max(0, Math.floor(Number(lock?.qty ?? 0)));
+          const locationName = normalizeText(lock?.location_name);
+          const locationId = safeInt(lock?.location_id);
+
+          return {
+            location_id: locationId,
+            location_name: locationName,
+            confirmed_qty: qty,
+          };
+        })
+        .filter(
+          (x: {
+            location_id: number | null;
+            location_name: string;
+            confirmed_qty: number;
+          }) => x.confirmed_qty > 0,
+        );
+
+      const sumLockQty = normalizedLocks.reduce(
+        (sum: number, x: { confirmed_qty: number }) => sum + x.confirmed_qty,
+        0,
+      );
+
+      if (sumLockQty <= 0) {
+        throw badRequest("กรุณาเลือกจำนวน");
+      }
+
+      if (sumLockQty !== totalQty) {
+        throw badRequest("จำนวนรวม Lock No. ไม่ตรงกับ qty");
+      }
+
+      if (sumLockQty > impactQty) {
+        throw badRequest(`จำนวนรวมต้องไม่เกิน Impact ${impactQty}`);
+      }
+
+      for (const lock of normalizedLocks) {
+        if (!lock.location_name) {
+          throw badRequest("location_name ของ Lock No. ห้ามว่าง");
+        }
+
+        const stock = await tx.stock.findFirst({
+          where: {
+            source: "wms",
+            product_id: item.product_id,
+            lot_name: item.lot_serial ?? null,
+            ...(lock.location_id ? { location_id: lock.location_id } : {}),
+            location_name: lock.location_name,
+          } as any,
+          orderBy: { id: "desc" },
+        });
+
+        if (!stock) {
+          throw badRequest(
+            `stock ไม่มี product=${item.product_id ?? "-"} lot=${item.lot_serial ?? "-"} location=${lock.location_name}`,
+          );
+        }
+
+        const stockQty = Number(stock.quantity ?? 0);
+        if (stockQty < lock.confirmed_qty) {
+          throw badRequest(
+            `stock ไม่พอ location=${lock.location_name} need=${lock.confirmed_qty} have=${stockQty}`,
+          );
+        }
+      }
+
+      await tx.adjust_location_confirm.updateMany({
+        where: {
+          adjustment_id: adj.id,
+          adjustment_item_id: item.id,
+          deleted_at: null,
+        },
+        data: {
+          deleted_at: new Date(),
+          updated_at: new Date(),
+        },
+      });
+
+      for (const lock of normalizedLocks) {
+        await tx.adjust_location_confirm.create({
+          data: {
+            adjustment_id: adj.id,
+            adjustment_item_id: item.id,
+            location_id: lock.location_id,
+            location_name: lock.location_name,
+            confirmed_qty: lock.confirmed_qty,
+            user_ref: userRef,
+            created_at: new Date(),
+            updated_at: new Date(),
+          },
+        });
+      }
+
+      await tx.adjustment_item.update({
+        where: { id: item.id },
+        data: {
+          qty_pick: sumLockQty,
+          updated_at: new Date(),
+        },
+      });
+
+      await tx.adjustment.update({
+        where: { id: adj.id },
+        data: {
+          status: adj.status === "pending" ? "in-progress" : adj.status,
+          updated_at: new Date(),
+        },
+      });
+
+      return {
+        adjustment_id: adj.id,
+        adjustment_no: adj.no,
+      };
+    });
+
+    const detail = await buildAdjustmentDetail(result.adjustment_id, no);
+
+    const payload = {
+      ...detail,
+      updated_by: userRef,
+    };
+
+    emitAdjustmentRealtime(
+      no,
+      "adjustment:minus_lock_pick",
+      payload,
+      result.adjustment_id,
+    );
+
+    return res.json({
+      success: true,
+      no,
+      data: payload,
+    });
+  },
+);
+
 export const confirmAdjustmentCompleteByNo = asyncHandler(
   async (req: Request, res: Response) => {
     const no = decodeNoParam((req.params as any).no);
     if (!no) throw badRequest("Invalid no");
+
+    const userRef = normalizeText(req.body?.user_ref) || null;
+    const approvedByUserId = safeInt(req.body?.approved_by_user_id);
+    const minusImpactLines = pickMinusImpactLines(req.body);
+    const hasMinusImpactLines = minusImpactLines.length > 0;
 
     const adj = await prisma.adjustment.findFirst({
       where: { no, deleted_at: null },
@@ -3797,18 +4015,19 @@ export const confirmAdjustmentCompleteByNo = asyncHandler(
         },
       });
 
-      if (confirms.length === 0) {
+      if (confirms.length === 0 && !hasMinusImpactLines) {
         throw badRequest("ยังไม่ได้ scan");
       }
 
       let increase = 0;
       let decrease = 0;
 
+      // ✅ Impact + จาก scan เดิม
       for (const c of confirms) {
         const item = c.adjustment_item;
         if (!item) continue;
 
-        const qty = Number(c.confirmed_qty ?? 0);
+        const qty = Math.max(0, Math.floor(Number(c.confirmed_qty ?? 0)));
         if (qty <= 0) continue;
 
         const fromInv = isInventoryAdjustment(item.location);
@@ -3818,13 +4037,14 @@ export const confirmAdjustmentCompleteByNo = asyncHandler(
 
         const existing = await tx.stock.findFirst({
           where: {
+            source: "wms",
             product_id: item.product_id,
             lot_name: item.lot_serial ?? null,
             location_name: locationName,
           } as any,
+          orderBy: { id: "desc" },
         });
 
-        // ➕ เพิ่ม stock
         if (fromInv && !toInv) {
           if (existing) {
             await tx.stock.update({
@@ -3832,49 +4052,201 @@ export const confirmAdjustmentCompleteByNo = asyncHandler(
               data: {
                 quantity: { increment: new Prisma.Decimal(qty) },
                 count: { increment: qty },
+                updated_at: new Date(),
               } as any,
             });
           } else {
             await tx.stock.create({
               data: {
+                bucket_key: buildAdjustmentStockBucketKey({
+                  source: "wms",
+                  product_id: item.product_id,
+                  product_code: item.code ?? null,
+                  lot_id: item.lot_id ?? null,
+                  location_id: c.location_id ?? null,
+                }),
                 product_id: item.product_id,
+                product_code: item.code ?? null,
+                product_name: item.name ?? null,
+                unit: item.unit ?? null,
+                location_id: c.location_id ?? null,
                 location_name: locationName,
+                lot_id: item.lot_id ?? null,
                 lot_name: item.lot_serial ?? null,
+                expiration_date: item.exp ?? null,
+                source: "wms",
                 quantity: new Prisma.Decimal(qty),
                 count: qty,
-                source: "wms",
+                updated_at: new Date(),
               } as any,
             });
           }
 
           increase += qty;
+          continue;
         }
 
-        // ➖ ลด stock
+        // กัน Impact - ที่ถูก scan มาปน
         if (!fromInv && toInv) {
-          if (!existing) throw badRequest("stock ไม่มี");
+          continue;
+        }
 
-          const remain = Number(existing.quantity) - qty;
-          if (remain < 0) throw badRequest("stock ไม่พอ");
+        throw badRequest(
+          `ไม่รองรับ adjustment flow location=${item.location ?? "-"} location_dest=${item.location_dest ?? "-"}`,
+        );
+      }
+
+      // ✅ Impact - จาก Modal Lock No. ไม่ใช้ scan
+      for (const line of minusImpactLines) {
+        const itemId = Number(line?.adjustment_item_id);
+        const totalQty = Math.max(0, Math.floor(Number(line?.qty ?? 0)));
+        const locks = Array.isArray(line?.locks) ? line.locks : [];
+
+        if (!Number.isFinite(itemId) || itemId <= 0) {
+          throw badRequest("minus_impact_lines.adjustment_item_id ไม่ถูกต้อง");
+        }
+
+        if (totalQty <= 0) {
+          throw badRequest("minus_impact_lines.qty ต้องมากกว่า 0");
+        }
+
+        if (!locks.length) {
+          throw badRequest("กรุณาเลือก Lock No. ที่ตัด");
+        }
+
+        const item = await tx.adjustment_item.findFirst({
+          where: {
+            id: itemId,
+            adjustment_id: adj.id,
+            deleted_at: null,
+          },
+        });
+
+        if (!item) {
+          throw badRequest(`ไม่พบ adjustment_item id=${itemId}`);
+        }
+
+        const fromInv = isInventoryAdjustment(item.location);
+        const toInv = isInventoryAdjustment(item.location_dest);
+
+        if (fromInv || !toInv) {
+          throw badRequest(
+            `minus_impact_lines ใช้ได้เฉพาะ Impact - เท่านั้น item=${itemId}`,
+          );
+        }
+
+        const alreadyConfirmed = await tx.adjust_location_confirm.findFirst({
+          where: {
+            adjustment_id: adj.id,
+            adjustment_item_id: item.id,
+            deleted_at: null,
+            confirmed_qty: { gt: 0 },
+          },
+          select: { id: true },
+        });
+
+        if (alreadyConfirmed) {
+          throw badRequest(`รายการนี้ถูก confirm แล้ว item=${item.id}`);
+        }
+
+        const impactQty = Math.abs(Number(item.qty ?? 0));
+
+        const sumLockQty = locks.reduce((sum: number, lock: any) => {
+          return sum + Math.max(0, Math.floor(Number(lock?.qty ?? 0)));
+        }, 0);
+
+        if (sumLockQty !== totalQty) {
+          throw badRequest(`จำนวนรวม Lock No. ไม่ตรงกับ qty item=${itemId}`);
+        }
+
+        if (sumLockQty > impactQty) {
+          throw badRequest(`จำนวนที่ตัดเกิน Impact item=${itemId}`);
+        }
+
+        for (const lock of locks) {
+          const qty = Math.max(0, Math.floor(Number(lock?.qty ?? 0)));
+          if (qty <= 0) continue;
+
+          const locationName = normalizeText(lock?.location_name);
+          const locationId = safeInt(lock?.location_id);
+
+          if (!locationName) {
+            throw badRequest("location_name ของ Lock No. ห้ามว่าง");
+          }
+
+          const existing = await tx.stock.findFirst({
+            where: {
+              source: "wms",
+              product_id: item.product_id,
+              lot_name: item.lot_serial ?? null,
+              ...(locationId ? { location_id: locationId } : {}),
+              location_name: locationName,
+            } as any,
+            orderBy: { id: "desc" },
+          });
+
+          if (!existing) {
+            throw badRequest(
+              `stock ไม่มี product=${item.product_id ?? "-"} lot=${item.lot_serial ?? "-"} location=${locationName}`,
+            );
+          }
+
+          const currentQty = Number(existing.quantity ?? 0);
+          const remain = currentQty - qty;
+
+          if (remain < 0) {
+            throw badRequest(
+              `stock ไม่พอ product=${item.product_id ?? "-"} lot=${item.lot_serial ?? "-"} location=${locationName} need=${qty} have=${currentQty}`,
+            );
+          }
 
           await tx.stock.update({
             where: { id: existing.id },
             data: {
               quantity: new Prisma.Decimal(remain),
-              count: remain,
+              count: Math.max(0, Math.floor(remain)),
+              updated_at: new Date(),
             } as any,
+          });
+
+          await tx.adjust_location_confirm.create({
+            data: {
+              adjustment_id: adj.id,
+              adjustment_item_id: item.id,
+              location_id: locationId,
+              location_name: locationName,
+              confirmed_qty: qty,
+              user_ref: userRef,
+              created_at: new Date(),
+              updated_at: new Date(),
+            },
           });
 
           decrease += qty;
         }
+
+        await tx.adjustment_item.update({
+          where: { id: item.id },
+          data: {
+            qty_pick: sumLockQty,
+            updated_at: new Date(),
+          },
+        });
       }
 
       await tx.adjustment.update({
         where: { id: adj.id },
-        data: { status: "completed" },
+        data: {
+          status: "completed",
+          updated_at: new Date(),
+        },
       });
 
-      return { increase, decrease };
+      return {
+        increase,
+        decrease,
+        approved_by_user_id: approvedByUserId,
+      };
     });
 
     const detail = await buildAdjustmentDetail(adj.id, no);
@@ -3885,6 +4257,7 @@ export const confirmAdjustmentCompleteByNo = asyncHandler(
     };
 
     emitAdjustmentRealtime(no, "adjustment:confirm", payload, adj.id);
+    emitAdjustmentRealtime(no, "adjustment:confirmed", payload, adj.id);
 
     return res.json({
       success: true,

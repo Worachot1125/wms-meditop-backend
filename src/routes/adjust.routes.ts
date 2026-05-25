@@ -12,6 +12,7 @@ import {
 	scanAdjustmentBarcode,
 	deleteAdjustmentItem,
 	confirmAdjustmentByLocation,
+	saveMinusLockPick,
 } from "../controllers/adjust.controller";
 
 const router = Router();
@@ -28,6 +29,7 @@ router.post("/odoo", receiveOdooAdjustments);
 router.post("/:no/scan/location", scanAdjustmentLocation);
 router.post("/:no/scan/barcode", scanAdjustmentBarcode);
 router.post("/:no/scan/confirm", confirmAdjustmentByLocation);
+router.patch("/:no/minus-lock-pick", saveMinusLockPick);
 router.post("/:no/draft", saveAdjustmentDraft);
 router.post("/:no/complete", confirmAdjustmentCompleteByNo);
 

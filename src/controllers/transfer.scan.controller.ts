@@ -1685,6 +1685,9 @@ export const confirmTransferDocPutToStock = asyncHandler(
 
     if (!no) throw badRequest("no is required");
 
+    const user_ref =
+      String(body?.user_ref ?? body?.confirmed_by ?? "").trim() || null;
+
     const transfer = await prisma.transfer_doc.findFirst({
       where: { no, deleted_at: null },
     });
@@ -1846,10 +1849,19 @@ export const confirmTransferDocPutToStock = asyncHandler(
               confirmed_put: row.qty,
             },
           });
+          await tx.transfer_doc_item.update({
+            where: {
+              id: row.transfer_doc_item_id,
+            },
+            data: {
+              user_ref,
+              updated_at: new Date(),
+            },
+          });
         }
       }
 
-      await prisma.transfer_doc.update({
+      await tx.transfer_doc.update({
         where: { no },
         data: {
           status: "completed",
@@ -1858,12 +1870,10 @@ export const confirmTransferDocPutToStock = asyncHandler(
       });
     });
 
-        const user_ref =
-      String(body?.user_ref ?? body?.confirmed_by ?? "").trim() || null;
-
     io.to(`transfer_doc:${no}`).emit("transfer_doc:confirm_put", {
       no,
       confirmed_by: user_ref,
+      user_ref,
     });
 
     return res.json({ success: true });

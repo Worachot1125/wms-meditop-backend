@@ -1226,6 +1226,8 @@ model borrow_stock {
   id            Int    @id @default(autoincrement())
   location_name String
 
+  movement_type String @default("borrow") // borrow | return | adjust_in | adjust_out
+
   department_id Int?
   department    department? @relation(fields: [department_id], references: [id])
 
@@ -1273,6 +1275,39 @@ model borrow_stock_item {
   deleted_at      DateTime?
 
   @@map("borrow_stock_items")
+}
+
+model borrow_stock_daily {
+  id            Int      @id @default(autoincrement())
+  snapshot_date DateTime
+
+  borrow_stock_id Int?
+  item_id         Int?
+
+  department_id   Int?
+  department_name String?
+
+  location_name String
+
+  product_code    String
+  product_name    String?
+  lot_serial      String
+  expiration_date DateTime?
+
+  in_qty  Int @default(0) // คืนเข้า / เพิ่ม
+  out_qty Int @default(0) // ยืมออก / ลด
+  net_qty Int @default(0) // in_qty - out_qty
+
+  status   String?
+  user_ref String?
+  remark   String?
+
+  created_at DateTime @default(now())
+
+  @@index([snapshot_date])
+  @@index([product_code, lot_serial])
+  @@index([department_id])
+  @@map("borrow_stock_dailies")
 }
 
 model swap {

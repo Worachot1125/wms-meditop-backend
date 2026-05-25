@@ -5,6 +5,7 @@ import {
   createTransferMovement,
   getTransferMovements,
   getTransferMovementsPaginated,
+  getLatestTransferMovement,
   getTransferMovementByNo,
   updateTransferMovement,
   deleteTransferMovement,
@@ -22,6 +23,7 @@ const router = Router();
 router.post("/create", auth, denyOperatorCreateTransferMovement, createTransferMovement);
 router.get("/getAll", auth, getTransferMovements);
 router.get("/get", auth, attachDepartmentAccess, getTransferMovementsPaginated);
+router.get("/latest", auth, getLatestTransferMovement);
 router.get("/get/:no", getTransferMovementByNo);
 router.get("/get/:id",   getTransferMovementById,);
 router.patch("/update/:id", updateTransferMovement);

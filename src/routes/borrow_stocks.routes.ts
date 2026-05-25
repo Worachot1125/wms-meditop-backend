@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { auth, attachDepartmentAccess } from "../middleware/auth"
+import { auth, attachDepartmentAccess } from "../middleware/auth";
 import {
   startBorrowStock,
   scanBorrowStockBarcode,
@@ -15,17 +15,26 @@ import {
   scanBorrowStockBarcodePreview,
   getAllBorStocks,
   getBorStocksPaginated,
+  getBorrowStockDailyPaginated,
   getBorStockById,
-  getBorrowStocksByLocationName
+  getBorrowStocksByLocationName,
+  runBorrowStockDailySnapshot,
 } from "../controllers/borrow_stock.controller";
 
 const router = Router();
 
+router.post("/sync", runBorrowStockDailySnapshot);
 router.get("/getAll", getBorrowStocks);
 router.get("/bor/get", getAllBorStocks);
 router.get("/get", auth, attachDepartmentAccess, getBorrowStocksPaginated);
+router.get("/daily", getBorrowStockDailyPaginated);
 router.get("/bor/get", getBorStocksPaginated);
-router.get("/bor/get/location", auth, attachDepartmentAccess, getBorrowStocksByLocationName);
+router.get(
+  "/bor/get/location",
+  auth,
+  attachDepartmentAccess,
+  getBorrowStocksByLocationName,
+);
 router.get("/get/:id", getBorrowStockById);
 router.get("/bor/get/:id", getBorStockById);
 router.patch("/update/:id", updateBorrowStock);

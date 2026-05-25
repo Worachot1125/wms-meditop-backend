@@ -16,6 +16,7 @@ import {
 } from "../utils/helper_scan/barcode";
 import { resolveLocationByFullNameBasic } from "../utils/helper_scan/location";
 import { io } from "../index";
+import { borrowStockDailyService } from "../services/borrow_stockdaily.service";
 
 const emitBorrowStockRealtime = (
   borrowStock: { id: number },
@@ -1775,7 +1776,9 @@ export const getBorStocksPaginated = asyncHandler(
 
     const skip = (page - 1) * limit;
 
-    const where: Prisma.bor_stockWhereInput = {};
+    const where: Prisma.bor_stockWhereInput = {
+      deleted_at: null,
+    };
 
     if (req.query.product_id) {
       where.product_id = Number(req.query.product_id);
@@ -1819,6 +1822,114 @@ export const getBorStocksPaginated = asyncHandler(
       total,
       totalPages: Math.ceil(total / limit),
       data: rows,
+    });
+  },
+);
+
+export const getBorrowStockDailyPaginated = asyncHandler(
+  async (req: Request, res: Response) => {
+    const page = Number(req.query.page) || 1;
+    const limit =
+      req.query.limit !== undefined ? Number(req.query.limit) || 10 : 10;
+
+    if (page < 1) throw badRequest("page ต้องมากกว่า 0");
+    if (limit < 1) throw badRequest("limit ต้องมากกว่า 0");
+
+    const search =
+      typeof req.query.search === "string" ? req.query.search.trim() : "";
+
+    const department_id =
+      req.query.department_id != null && req.query.department_id !== ""
+        ? Number(req.query.department_id)
+        : null;
+
+    const status =
+      typeof req.query.status === "string" ? req.query.status.trim() : "";
+
+    const date =
+      typeof req.query.date === "string" ? req.query.date.trim() : "";
+
+    const from =
+      typeof req.query.from === "string" ? req.query.from.trim() : "";
+
+    const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+
+    const andWhere: Prisma.borrow_stock_dailyWhereInput[] = [];
+
+    if (search) {
+      andWhere.push({
+        OR: [
+          { product_code: { contains: search, mode: "insensitive" } },
+          { product_name: { contains: search, mode: "insensitive" } },
+          { lot_serial: { contains: search, mode: "insensitive" } },
+          { location_name: { contains: search, mode: "insensitive" } },
+          { department_name: { contains: search, mode: "insensitive" } },
+          { user_ref: { contains: search, mode: "insensitive" } },
+        ],
+      });
+    }
+
+    if (department_id) {
+      andWhere.push({ department_id });
+    }
+
+    if (status) {
+      andWhere.push({ status });
+    }
+
+    if (date) {
+      const start = new Date(date);
+      start.setHours(0, 0, 0, 0);
+
+      const end = new Date(start);
+      end.setDate(end.getDate() + 1);
+
+      andWhere.push({
+        snapshot_date: {
+          gte: start,
+          lt: end,
+        },
+      });
+    } else if (from || to) {
+      const dateWhere: any = {};
+
+      if (from) {
+        const start = new Date(from);
+        start.setHours(0, 0, 0, 0);
+        dateWhere.gte = start;
+      }
+
+      if (to) {
+        const end = new Date(to);
+        end.setHours(0, 0, 0, 0);
+        end.setDate(end.getDate() + 1);
+        dateWhere.lt = end;
+      }
+
+      andWhere.push({ snapshot_date: dateWhere });
+    }
+
+    const where: Prisma.borrow_stock_dailyWhereInput =
+      andWhere.length > 0 ? { AND: andWhere } : {};
+
+    const [total, rows] = await Promise.all([
+      prisma.borrow_stock_daily.count({ where }),
+      prisma.borrow_stock_daily.findMany({
+        where,
+        orderBy: [{ snapshot_date: "desc" }, { id: "desc" }],
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+    ]);
+
+    return res.json({
+      data: rows,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
     });
   },
 );
@@ -1959,6 +2070,7 @@ export const getBorrowStocksByLocationName = asyncHandler(
     const [borRows, serRows] = await Promise.all([
       prisma.bor_stock.findMany({
         where: {
+          deleted_at: null,
           location_name: {
             equals: locationName,
             mode: "insensitive",
@@ -1974,6 +2086,7 @@ export const getBorrowStocksByLocationName = asyncHandler(
       }),
       prisma.ser_stock.findMany({
         where: {
+          deleted_at: null,
           location_name: {
             equals: locationName,
             mode: "insensitive",
@@ -2129,5 +2242,23 @@ export const confirmBorrowStocksBulk = asyncHandler(
       total: updatedDocs.length,
       data: updatedDocs.map((doc) => formatBorrowStock(doc as any)),
     });
+  },
+);
+
+
+export const runBorrowStockDailySnapshot = asyncHandler(
+  async (req: Request, res: Response) => {
+    const date =
+      typeof req.query.date === "string"
+        ? req.query.date.trim()
+        : undefined;
+
+    const result =
+      await borrowStockDailyService.createDailySnapshot(
+        "manual-api",
+        date,
+      );
+
+    return res.json(result);
   },
 );

@@ -6,6 +6,7 @@ import { zoneTypeSyncService } from "../services/zone_type.sync.service";
 import { stockSyncService } from "../services/stock.sync.service";
 import { odooDbService } from "../services/odoo.db.service";
 import { wmsDailySnapshotService } from "../services/stockdaily.snapshot.service";
+import { borrowStockDailyService } from "../services/borrow_stockdaily.service";
 import { logger } from "../lib/logger";
 
 const TZ = "Asia/Bangkok";
@@ -137,6 +138,28 @@ export function initializeScheduler() {
     { timezone: TZ },
   );
 
+  // ✅ Borrow stock daily movement snapshot - every 20 minutes
+  cron.schedule(
+    "*/20 * * * *",
+    async () => {
+      logger.info("Starting BORROW STOCK DAILY movement snapshot...");
+
+      try {
+        const result =
+          await borrowStockDailyService.createDailySnapshot("cron-hourly");
+
+        logger.info(
+          `✅ Borrow STOCK DAILY refreshed: Date=${result.snapshot_date}, Total=${result.total_snapshot}`,
+        );
+      } catch (error) {
+        logger.error("❌ Borrow STOCK DAILY snapshot failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    { timezone: TZ },
+  );
+
   logger.info("Odoo sync scheduler initialized:");
   logger.info(`- Timezone: ${TZ}`);
   logger.info("- Master data sync will run daily at 23:59");
@@ -144,4 +167,7 @@ export function initializeScheduler() {
   logger.info(
     "- WMS DAILY report snapshot will run hourly at minute 03 (stocks -> wms_stock_daily)",
   );
+  logger.info(
+  "- Borrow STOCK DAILY movement snapshot will run every 20 minutes",
+);
 }

@@ -1028,6 +1028,45 @@ export const getTransferMovementsPaginated = asyncHandler(
   },
 );
 
+export const getLatestTransferMovement = asyncHandler(
+  async (req: AuthRequest, res: Response) => {
+    const latest = await prisma.transfer_movement.findFirst({
+      where: {
+        deleted_at: null,
+      },
+      orderBy: {
+        created_at: "desc",
+      },
+      include: TM_INCLUDE_FULL,
+    });
+
+    if (!latest) {
+      return res.json({
+        data: null,
+      });
+    }
+
+    const items = latest.items ?? [];
+
+    const barcodePayload = await buildBarcodePayloadFromItems(items);
+    const userWorkMap = await buildUserWorkMapFromRows([latest]);
+    const inputNumberMap = await buildInputNumberMap(items);
+
+    const data = formatTransferMovement(
+      latest as any,
+      {
+        ...barcodePayload,
+        inputNumberMap,
+        userWorkMap,
+      } as any,
+    );
+
+    return res.json({
+      data,
+    });
+  },
+);
+
 export const getTransferMovementById = asyncHandler(
   async (req: Request<{ id: string }>, res: Response) => {
     const id = pickIdParam(req);

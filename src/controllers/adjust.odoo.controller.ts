@@ -3,7 +3,10 @@ import { prisma } from "../lib/prisma";
 import { asyncHandler } from "../utils/asyncHandler";
 import { badRequest } from "../utils/appError";
 import { OdooAdjustRequest, OdooAdjustRequestParams } from "../types/adjust";
-import { receiveOdooAdjustments } from "./adjust.controller";
+import {
+  receiveOdooAdjustments,
+  normalizeAdjustmentExp,
+} from "./adjust.controller";
 
 type AdjustMode = "manual" | "auto";
 
@@ -236,34 +239,19 @@ async function upsertAdjustmentHeader(adjust: any) {
   const level = deriveLevel({ picking_id, picking_no });
   const systemGenerated = is_system_generated === true;
 
-  if (inventory_id != null) {
-    const existing = await prisma.adjustment.findFirst({
-      where: { inventory_id },
-    });
-
-    if (existing) {
-      return prisma.adjustment.update({
-        where: { id: existing.id },
-        data: {
+  const existing = no
+    ? await prisma.adjustment.findFirst({
+        where: {
           no,
-          picking_id,
-          picking_no,
-          department_id: depIdFinal,
-          department: depNameFinal || "",
-          reference: normalizeRef(reference),
-          origin: normalizeOrigin(origin),
-          description: normalizeDescription(description),
-          type,
-          level,
-          is_system_generated: systemGenerated,
-          updated_at: new Date(),
+          deleted_at: null,
         },
-      });
-    }
+      })
+    : null;
 
-    return prisma.adjustment.create({
+  if (existing) {
+    return prisma.adjustment.update({
+      where: { id: existing.id },
       data: {
-        no,
         inventory_id,
         picking_id,
         picking_no,
@@ -275,7 +263,7 @@ async function upsertAdjustmentHeader(adjust: any) {
         type,
         level,
         is_system_generated: systemGenerated,
-        date: new Date(),
+        updated_at: new Date(),
       },
     });
   }
@@ -283,7 +271,7 @@ async function upsertAdjustmentHeader(adjust: any) {
   return prisma.adjustment.create({
     data: {
       no,
-      inventory_id: null,
+      inventory_id,
       picking_id,
       picking_no,
       department_id: depIdFinal,
@@ -311,9 +299,11 @@ async function upsertAdjustmentItems(adjustmentId: number, items: any[]) {
         },
       });
 
-      const expDate = parseOdooExpireDate(
-        item.expire_date ?? item.exp ?? item.expiration_date,
-      );
+      const expDate = await resolveManualItemExp({
+        product_id: item.product_id,
+        lot_id: item.lot_id,
+        expire_date: item.expire_date ?? item.exp ?? item.expiration_date,
+      });
 
       const masterBarcode = await findMasterBarcodeByProductId(
         item.product_id != null ? Number(item.product_id) : null,
@@ -341,7 +331,7 @@ async function upsertAdjustmentItems(adjustmentId: number, items: any[]) {
         unit: item.unit,
 
         barcode_id: masterBarcode?.id ?? null,
-  barcode_text: masterBarcode?.barcode ?? null,
+        barcode_text: masterBarcode?.barcode ?? null,
 
         location_id: item.location_id ?? null,
         location: normalizeString(item.location),
@@ -410,6 +400,30 @@ async function processSingleAdjust(adjust: any, mode: AdjustMode) {
   };
 }
 
+async function resolveManualItemExp(input: {
+  product_id: number | null;
+  lot_id: number | null;
+  expire_date: unknown;
+}) {
+  const directExp = normalizeAdjustmentExp(input.expire_date);
+  if (directExp) return directExp;
+
+  if (!input.product_id || !input.lot_id) return null;
+
+  const goods = await prisma.wms_mdt_goods.findFirst({
+    where: {
+      product_id: input.product_id,
+      lot_id: input.lot_id,
+    },
+    select: {
+      expiration_date: true,
+    },
+    orderBy: { id: "desc" },
+  });
+
+  return goods?.expiration_date ?? null;
+}
+
 async function processManualAdjust(adjust: any) {
   return processSingleAdjust(adjust, "manual");
 }
@@ -463,6 +477,7 @@ export const receiveAdjustFromOdoo = asyncHandler(
 
       for (const adjust of adjusts) {
         const result = await processManualAdjust(adjust);
+
         manualResults.push(result);
         results.push(result);
       }
