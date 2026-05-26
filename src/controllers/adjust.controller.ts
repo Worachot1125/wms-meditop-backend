@@ -3797,9 +3797,14 @@ export const saveMinusLockPick = asyncHandler(
     const totalQty = Math.max(0, Math.floor(Number(req.body?.qty ?? 0)));
     const locks = Array.isArray(req.body?.locks) ? req.body.locks : [];
     const userRef = normalizeText(req.body?.user_ref) || null;
+    const userApprove = normalizeText(req.body?.user_approve) || null;
 
     if (!Number.isFinite(itemId) || itemId <= 0) {
       throw badRequest("adjustment_item_id ไม่ถูกต้อง");
+    }
+
+    if (!userApprove) {
+      throw badRequest("กรุณายืนยัน PIN ผู้อนุมัติก่อน");
     }
 
     if (totalQty <= 0) {
@@ -3905,6 +3910,7 @@ export const saveMinusLockPick = asyncHandler(
         }
 
         const stockQty = Number(stock.quantity ?? 0);
+
         if (stockQty < lock.confirmed_qty) {
           throw badRequest(
             `stock ไม่พอ location=${lock.location_name} need=${lock.confirmed_qty} have=${stockQty}`,
@@ -3943,6 +3949,7 @@ export const saveMinusLockPick = asyncHandler(
         where: { id: item.id },
         data: {
           qty_pick: sumLockQty,
+          user_approve: userApprove,
           updated_at: new Date(),
         },
       });
@@ -3958,6 +3965,7 @@ export const saveMinusLockPick = asyncHandler(
       return {
         adjustment_id: adj.id,
         adjustment_no: adj.no,
+        user_approve: userApprove,
       };
     });
 
@@ -3966,6 +3974,7 @@ export const saveMinusLockPick = asyncHandler(
     const payload = {
       ...detail,
       updated_by: userRef,
+      user_approve: result.user_approve,
     };
 
     emitAdjustmentRealtime(

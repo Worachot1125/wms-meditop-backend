@@ -1389,17 +1389,17 @@ export const scanPackProductBarcode = asyncHandler(
     const outbounds = await findOutboundsByDocKeys(parsed.docKeys);
 
     const blockedOutbounds = outbounds.filter((ob: any) =>
-  isBlockedOutboundLocation(ob.location),
-);
+      isBlockedOutboundLocation(ob.location),
+    );
 
-if (blockedOutbounds.length > 0) {
-  throw badRequest(
-    `Outbound location WH/M_EXP&NCR ไม่สามารถ scan เพื่อเปิดกล่องได้: ${blockedOutbounds
-      .map((x: any) => x.no)
-      .filter(Boolean)
-      .join(", ")}`,
-  );
-}
+    if (blockedOutbounds.length > 0) {
+      throw badRequest(
+        `Outbound location WH/M_EXP&NCR ไม่สามารถ scan เพื่อเปิดกล่องได้: ${blockedOutbounds
+          .map((x: any) => x.no)
+          .filter(Boolean)
+          .join(", ")}`,
+      );
+    }
 
     if (outbounds.length === 0) {
       throw notFound(
@@ -2583,6 +2583,321 @@ async function decrementBorSerStockForReturnTx(
 
   return affected;
 }
+async function softDeletePackingDocTx(params: { tx: any; outboundId: number }) {
+  const { tx, outboundId } = params;
+
+  const itemIds = (
+    await tx.goods_out_item.findMany({
+      where: {
+        outbound_id: outboundId,
+        deleted_at: null,
+      } as any,
+      select: {
+        id: true,
+      },
+    })
+  )
+    .map((x: any) => Number(x.id))
+    .filter((x: number) => x > 0);
+
+  if (itemIds.length > 0) {
+    await tx.pack_product_box_item.deleteMany({
+      where: {
+        goods_out_item_id: {
+          in: itemIds,
+        },
+      } as any,
+    });
+
+    await tx.goods_out_item.updateMany({
+      where: {
+        id: {
+          in: itemIds,
+        },
+      } as any,
+      data: {
+        deleted_at: new Date(),
+        updated_at: new Date(),
+      } as any,
+    });
+  }
+
+  await tx.batch_outbound.deleteMany({
+    where: {
+      outbound_id: outboundId,
+    } as any,
+  });
+
+  await tx.pack_product_outbound.deleteMany({
+    where: {
+      outbound_id: outboundId,
+    } as any,
+  });
+
+  await tx.outbound.update({
+    where: {
+      id: outboundId,
+    },
+    data: {
+      deleted_at: new Date(),
+      updated_at: new Date(),
+    } as any,
+  });
+
+  return {
+    item_ids: itemIds,
+    goods_out_item_count: itemIds.length,
+    batch_outbound_deleted: true,
+    pack_product_outbound_deleted: true,
+    outbound_deleted: true,
+  };
+}
+
+async function movePackedQtyToOtherDocInSamePackTx(params: {
+  tx: any;
+  packProductId: number;
+  sourceOutboundId: number;
+}) {
+  const { tx, packProductId, sourceOutboundId } = params;
+
+  const result = {
+    moved_qty: 0,
+    targets: [] as any[],
+  };
+
+  const sourceItems = await tx.goods_out_item.findMany({
+    where: {
+      outbound_id: sourceOutboundId,
+      deleted_at: null,
+      pack: {
+        gt: 0,
+      },
+    } as any,
+    orderBy: [{ id: "asc" }],
+  });
+
+  if (!sourceItems.length) return result;
+
+  const targetLinks = await tx.pack_product_outbound.findMany({
+    where: {
+      pack_product_id: packProductId,
+      outbound_id: {
+        not: sourceOutboundId,
+      },
+    } as any,
+    select: {
+      outbound_id: true,
+      outbound: {
+        select: {
+          no: true,
+          deleted_at: true,
+        },
+      },
+    },
+    orderBy: [{ id: "asc" }],
+  });
+
+  const targetOutboundIds = targetLinks
+    .filter((x: any) => !x.outbound?.deleted_at)
+    .map((x: any) => Number(x.outbound_id))
+    .filter((x: number) => x > 0);
+
+  if (!targetOutboundIds.length) return result;
+
+  for (const sourceItem of sourceItems as any[]) {
+    let remainSourcePack = Math.max(
+      0,
+      Math.floor(Number(sourceItem.pack ?? 0)),
+    );
+
+    if (remainSourcePack <= 0) continue;
+
+    const sourceBoxItems = await tx.pack_product_box_item.findMany({
+      where: {
+        goods_out_item_id: Number(sourceItem.id),
+        deleted_at: null,
+      } as any,
+      orderBy: [{ id: "asc" }],
+    });
+
+    if (!sourceBoxItems.length) continue;
+
+    const targetItems = await tx.goods_out_item.findMany({
+      where: {
+        outbound_id: {
+          in: targetOutboundIds,
+        },
+        deleted_at: null,
+        product_id: Number(sourceItem.product_id),
+        ...(sourceItem.lot_id != null
+          ? { lot_id: sourceItem.lot_id }
+          : { lot_serial: sourceItem.lot_serial ?? null }),
+      } as any,
+      include: {
+        outbound: {
+          select: {
+            no: true,
+          },
+        },
+      },
+      orderBy: [{ outbound_id: "asc" }, { id: "asc" }],
+    });
+
+    for (const targetItem of targetItems as any[]) {
+      if (remainSourcePack <= 0) break;
+
+      const targetQty = Math.max(0, Math.floor(Number(targetItem.qty ?? 0)));
+      const targetPack = Math.max(0, Math.floor(Number(targetItem.pack ?? 0)));
+      const targetCapacity = Math.max(0, targetQty - targetPack);
+
+      if (targetCapacity <= 0) continue;
+
+      let needMove = Math.min(remainSourcePack, targetCapacity);
+      let movedToThisTarget = 0;
+
+      for (const boxItem of sourceBoxItems as any[]) {
+        if (needMove <= 0) break;
+
+        const currentBoxQty = Math.max(
+          0,
+          Math.floor(Number(boxItem.quantity ?? 0)),
+        );
+
+        if (currentBoxQty <= 0) continue;
+
+        const take = Math.min(currentBoxQty, needMove);
+        if (take <= 0) continue;
+
+        if (take === currentBoxQty) {
+          await tx.pack_product_box_item.update({
+            where: {
+              id: Number(boxItem.id),
+            },
+            data: {
+              goods_out_item_id: Number(targetItem.id),
+              updated_at: new Date(),
+            } as any,
+          });
+
+          boxItem.quantity = 0;
+        } else {
+          await tx.pack_product_box_item.update({
+            where: {
+              id: Number(boxItem.id),
+            },
+            data: {
+              quantity: currentBoxQty - take,
+              updated_at: new Date(),
+            } as any,
+          });
+
+          await tx.pack_product_box_item.create({
+            data: {
+              pack_product_box_id: Number(boxItem.pack_product_box_id),
+              goods_out_item_id: Number(targetItem.id),
+              quantity: take,
+            } as any,
+          });
+
+          boxItem.quantity = currentBoxQty - take;
+        }
+
+        needMove -= take;
+        remainSourcePack -= take;
+        movedToThisTarget += take;
+        result.moved_qty += take;
+      }
+
+      if (movedToThisTarget > 0) {
+        await tx.goods_out_item.update({
+          where: {
+            id: Number(targetItem.id),
+          },
+          data: {
+            pack: {
+              increment: movedToThisTarget,
+            },
+            pick: {
+              increment: movedToThisTarget,
+            },
+            updated_at: new Date(),
+          } as any,
+        });
+
+        await tx.goods_out_item.update({
+          where: {
+            id: Number(sourceItem.id),
+          },
+          data: {
+            pack: {
+              decrement: movedToThisTarget,
+            },
+            pick: {
+              decrement: movedToThisTarget,
+            },
+            updated_at: new Date(),
+          } as any,
+        });
+
+        result.targets.push({
+          source_goods_out_item_id: Number(sourceItem.id),
+          target_goods_out_item_id: Number(targetItem.id),
+          target_outbound_no: targetItem.outbound?.no ?? null,
+          moved_qty: movedToThisTarget,
+        });
+      }
+    }
+  }
+
+  return result;
+}
+
+async function reducePackingBoxItemsForRtcBorMoveTx(
+  tx: any,
+  args: {
+    goods_out_item_id: number;
+    reduce_qty: number;
+  },
+) {
+  let remaining = Math.max(0, Math.floor(Number(args.reduce_qty ?? 0)));
+  if (remaining <= 0) return;
+
+  const rows = await tx.pack_product_box_item.findMany({
+    where: {
+      goods_out_item_id: Number(args.goods_out_item_id),
+      deleted_at: null,
+      quantity: { gt: 0 },
+    } as any,
+    orderBy: [{ id: "asc" }],
+  });
+
+  for (const row of rows) {
+    if (remaining <= 0) break;
+
+    const currentQty = Math.max(0, Math.floor(Number(row.quantity ?? 0)));
+    const cutQty = Math.min(remaining, currentQty);
+    if (cutQty <= 0) continue;
+
+    const nextQty = Math.max(0, currentQty - cutQty);
+
+    await tx.pack_product_box_item.update({
+      where: { id: Number(row.id) },
+      data: {
+        quantity: nextQty,
+        ...(nextQty <= 0 ? { deleted_at: new Date() } : {}),
+        updated_at: new Date(),
+      } as any,
+    });
+
+    remaining -= cutQty;
+  }
+
+  if (remaining > 0) {
+    throw badRequest(
+      `จำนวนสินค้าในกล่องไม่พอสำหรับย้าย RTC/BOR ไป Location Packing (ขาด ${remaining})`,
+    );
+  }
+}
 
 export const returnPdPackProductItem = asyncHandler(
   async (
@@ -2613,6 +2928,8 @@ export const returnPdPackProductItem = asyncHandler(
     const returnMode = String(req.body.return_mode ?? "PD")
       .trim()
       .toUpperCase() as "PD" | "RTC" | "BOR";
+
+    const isRtcBorReturn = returnMode === "RTC" || returnMode === "BOR";
 
     if (!Number.isFinite(packProductId))
       throw badRequest("packProductId ต้องเป็นตัวเลข");
@@ -2837,19 +3154,63 @@ export const returnPdPackProductItem = asyncHandler(
       }
 
       const currentReturn = Math.max(0, Math.floor(Number(item.return ?? 0)));
-      const boxLabel = (boxItem as any).pack_box?.box_label ?? null;
+      const currentPick = Math.max(0, Math.floor(Number(item.pick ?? 0)));
+      const currentPack = Math.max(0, Math.floor(Number(item.pack ?? 0)));
+
+      const nextReturn = currentReturn + qty;
+      const nextPack = Math.max(0, currentPack - qty);
+      const nextPick = Math.max(nextPack, currentPick - qty);
+      const isReturnCompleted = nextReturn >= targetQty;
 
       const updatedItem = await tx.goods_out_item.update({
         where: { id: goodsOutItemId },
         data: {
-          return: currentReturn + qty,
+          return: nextReturn,
+          pack: nextPack,
+          pick: nextPick,
+          ...(returnMode === "BOR"
+            ? { return_check: !isReturnCompleted }
+            : returnMode === "RTC"
+              ? { rtc_check: !isReturnCompleted }
+              : {}),
           updated_at: new Date(),
         } as any,
       });
 
+      let movedPackToOtherDoc: any = {
+        moved_qty: 0,
+        targets: [],
+      };
+      let deleted: any = null;
+      let outboundAction: "keep" | "soft_delete" = "keep";
+      let batchAction: "keep" | "remove_relation" = "keep";
+      let packProductAction: "keep" | "remove_relation" = "keep";
+
+      if (isRtcBorReturn) {
+        movedPackToOtherDoc = await movePackedQtyToOtherDocInSamePackTx({
+          tx,
+          packProductId,
+          sourceOutboundId: Number(item.outbound.id),
+        });
+
+        deleted = await softDeletePackingDocTx({
+          tx,
+          outboundId: Number(item.outbound.id),
+        });
+
+        outboundAction = "soft_delete";
+        batchAction = "remove_relation";
+        packProductAction = "remove_relation";
+      }
+
+      const boxLabel = (boxItem as any).pack_box?.box_label ?? null;
+
       return {
         return_mode: returnMode,
         pack_product_id: packProductId,
+        outbound_action: outboundAction,
+        batch_action: batchAction,
+        pack_product_action: packProductAction,
         outbound_no: outboundNo,
         goods_out_item_id: goodsOutItemId,
         box_id: boxId,
@@ -2859,11 +3220,13 @@ export const returnPdPackProductItem = asyncHandler(
         pd_qty: pdQty,
         rtc_qty: rtcQty,
         bor_qty: borQty,
-        total_returned_qty: currentReturn + qty,
-        pending_return_qty: Math.max(0, targetQty - (currentReturn + qty)),
+        total_returned_qty: nextReturn,
+        pending_return_qty: Math.max(0, targetQty - nextReturn),
         location_id: Number(location.id),
         location_full_name: location.full_name,
         bor_ser_stock_affected: borSerStockAffected,
+        moved_pack_to_other_doc: movedPackToOtherDoc,
+        deleted,
         item: updatedItem,
       };
     });
@@ -3240,10 +3603,12 @@ export const movePdPackingToLocation = asyncHandler(
     const packProductId = Number(req.params.packProductId || 0);
     const outboundNo = String(req.body?.outbound_no || "").trim();
     const locationFullName = String(req.body?.location_full_name || "").trim();
+    const requestItems = Array.isArray(req.body?.items) ? req.body.items : [];
 
     if (!packProductId) throw badRequest("packProductId is required");
     if (!outboundNo) throw badRequest("outbound_no is required");
     if (!locationFullName) throw badRequest("location_full_name is required");
+    if (requestItems.length === 0) throw badRequest("items is required");
 
     const location = await resolveLocationByFullNameBasic(locationFullName);
 
@@ -3291,27 +3656,6 @@ export const movePdPackingToLocation = asyncHandler(
         .map((x: any) => Number(x.id))
         .filter((x: number) => Number.isFinite(x) && x > 0);
 
-      const pdQtyMap = new Map<string, number>();
-
-      for (const inbound of pdInbounds as any[]) {
-        for (const gi of inbound.goods_ins ?? []) {
-          const key = buildPdItemKey(gi);
-          const looseKey = buildPdItemLooseKey(gi);
-
-          const qty = Math.max(
-            0,
-            Math.floor(
-              Number(gi.qty ?? gi.quantity_receive ?? gi.quantity ?? 0),
-            ),
-          );
-
-          if (qty <= 0) continue;
-
-          pdQtyMap.set(key, Number(pdQtyMap.get(key) ?? 0) + qty);
-          pdQtyMap.set(looseKey, Number(pdQtyMap.get(looseKey) ?? 0) + qty);
-        }
-      }
-
       const link = await tx.pack_product_outbound.findFirst({
         where: {
           pack_product_id: packProductId,
@@ -3328,10 +3672,36 @@ export const movePdPackingToLocation = asyncHandler(
         );
       }
 
+      const allowedItemIds = requestItems
+        .map((x: any) => Number(x.goods_out_item_id))
+        .filter((x: number) => Number.isFinite(x) && x > 0);
+
+      if (!allowedItemIds.length) {
+        throw badRequest("goods_out_item_id is invalid");
+      }
+
+      const requestQtyMap = new Map<number, number>();
+
+      for (const x of requestItems) {
+        const id = Number(x.goods_out_item_id);
+        const qty = Math.max(0, Math.floor(Number(x.qty ?? 0)));
+
+        if (Number.isFinite(id) && id > 0 && qty > 0) {
+          requestQtyMap.set(id, qty);
+        }
+      }
+
+      if (requestQtyMap.size === 0) {
+        throw badRequest("items.qty is required");
+      }
+
       const items: any[] = await tx.goods_out_item.findMany({
         where: {
           outbound_id: Number(outbound.id),
           deleted_at: null,
+          id: {
+            in: allowedItemIds,
+          },
         } as any,
         select: {
           id: true,
@@ -3360,6 +3730,13 @@ export const movePdPackingToLocation = asyncHandler(
           throw badRequest(`goods_out_item id=${item.id} ไม่มี product_id`);
         }
 
+        const moveQty = Math.max(
+          0,
+          Math.floor(Number(requestQtyMap.get(Number(item.id)) ?? 0)),
+        );
+
+        if (moveQty <= 0) continue;
+
         const boxPackedQtyAgg = await tx.pack_product_box_item.aggregate({
           where: {
             goods_out_item_id: Number(item.id),
@@ -3375,28 +3752,10 @@ export const movePdPackingToLocation = asyncHandler(
           Math.floor(Number(boxPackedQtyAgg?._sum?.quantity ?? 0)),
         );
 
+        const currentPick = Math.max(0, Math.floor(Number(item.pick ?? 0)));
         const rawPackQty = Math.max(0, Math.floor(Number(item.pack ?? 0)));
-        const packQty = Math.max(rawPackQty, boxQty);
-        const pickQty = Math.max(0, Math.floor(Number(item.pick ?? 0)));
+        const currentPack = Math.max(rawPackQty, boxQty);
         const baseQty = Math.max(0, Math.floor(Number(item.qty ?? 0)));
-
-        const itemKey = buildPdItemKey(item);
-        const looseItemKey = buildPdItemLooseKey(item);
-
-        const pdQtyForItem = Math.max(
-          0,
-          Math.floor(
-            Number(pdQtyMap.get(itemKey) ?? pdQtyMap.get(looseItemKey) ?? 0),
-          ),
-        );
-
-        if (pdQtyForItem <= 0) continue;
-
-        const availableQty =
-          packQty > 0 ? packQty : pickQty > 0 ? pickQty : baseQty;
-
-        const moveQty = Math.min(pdQtyForItem, availableQty);
-        if (moveQty <= 0) continue;
 
         const fallback = await resolveWmsLotExpTx(tx, {
           product_id: Number(item.product_id),
@@ -3458,24 +3817,19 @@ export const movePdPackingToLocation = asyncHandler(
           });
         }
 
-        await reducePackingBoxItemsForPdTx(tx, {
-          goods_out_item_id: Number(item.id),
-          reduce_qty: moveQty,
-        });
-
-        const currentPick = Math.max(0, Math.floor(Number(item.pick ?? 0)));
-        const currentPack = Math.max(0, Math.floor(Number(item.pack ?? 0)));
-
-        const nextPick = Math.max(0, currentPick - moveQty);
-        const nextPack = Math.max(0, currentPack - moveQty);
+        // ✅ ห้ามลด qty และห้ามลด pack ใน route นี้
+        // qty ถูกปรับจาก PD flow ไปแล้ว
+        // pack ต้องเหลือไว้สำหรับ Return flow
+        const nextPick = Math.max(currentPack, currentPick - moveQty);
+        const nextPack = currentPack;
 
         await tx.goods_out_item.update({
           where: {
             id: Number(item.id),
           },
           data: {
-            pack: nextPack,
             pick: nextPick,
+            pack: nextPack,
             updated_at: new Date(),
           } as any,
         });
@@ -3488,12 +3842,13 @@ export const movePdPackingToLocation = asyncHandler(
           lot_id: item.lot_id,
           lot_serial: item.lot_serial,
           qty: moveQty,
-          used_qty_source: packQty > 0 ? "pack" : pickQty > 0 ? "pick" : "qty",
           location_id: Number(location.id),
           location_full_name: location.full_name,
           lot_name: fallback.lot_name,
           expiration_date: fallback.expiration_date,
-          pd_qty_for_pick_reduce: moveQty,
+          used_qty_source: "request_items",
+          old_qty: baseQty,
+          new_qty: baseQty,
           old_pick: currentPick,
           new_pick: nextPick,
           old_pack: currentPack,
@@ -3627,7 +3982,9 @@ export const movePdPackingToLocation = asyncHandler(
         } as any,
       });
 
-      const packProductAction: "keep" | "soft_delete" = "keep";
+      let outboundAction: "keep" | "soft_delete" = "keep";
+      let batchAction: "keep" | "remove_relation" = "keep";
+      let packProductAction: "keep" | "remove_relation" = "keep";
 
       await tx.pack_product.update({
         where: {
@@ -3638,25 +3995,67 @@ export const movePdPackingToLocation = asyncHandler(
         } as any,
       });
 
-      if (pdInboundIds.length > 0) {
-        await tx.inbound.updateMany({
+      const returnMode = String(req.body?.return_mode ?? "")
+        .trim()
+        .toUpperCase();
+
+      const isRtcBorMove = returnMode === "RTC" || returnMode === "BOR";
+
+      if (isRtcBorMove) {
+        const remainingReturnItems = await tx.goods_out_item.count({
           where: {
-            id: {
-              in: pdInboundIds,
-            },
+            outbound_id: Number(outbound.id),
             deleted_at: null,
-          } as any,
-          data: {
-            status: "completed",
-            updated_at: new Date(),
+            OR:
+              returnMode === "BOR"
+                ? [{ bor: { gt: 0 } }, { return_check: true }]
+                : [{ rtc: { gt: 0 } }, { rtc_check: true }],
           } as any,
         });
+
+        const remainingActiveItems = await tx.goods_out_item.count({
+          where: {
+            outbound_id: Number(outbound.id),
+            deleted_at: null,
+            qty: { gt: 0 },
+          } as any,
+        });
+
+        if (remainingReturnItems === 0 && remainingActiveItems === 0) {
+          await tx.batch_outbound.deleteMany({
+            where: {
+              outbound_id: Number(outbound.id),
+            },
+          });
+
+          await tx.pack_product_outbound.deleteMany({
+            where: {
+              outbound_id: Number(outbound.id),
+            },
+          });
+
+          await tx.outbound.update({
+            where: {
+              id: Number(outbound.id),
+            },
+            data: {
+              deleted_at: new Date(),
+              updated_at: new Date(),
+            } as any,
+          });
+
+          outboundAction = "soft_delete";
+          batchAction = "remove_relation";
+          packProductAction = "remove_relation";
+        }
       }
 
       return {
         pack_product_id: packProductId,
         pack_product_name: packProduct.name,
         pack_product_action: packProductAction,
+        outbound_action: outboundAction,
+        batch_action: batchAction,
         remaining_pack_outbounds: remainingLinks,
         outbound_id: Number(outbound.id),
         outbound_no: outbound.no,

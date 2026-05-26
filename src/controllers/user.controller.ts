@@ -409,16 +409,45 @@ export const updateUserPin = asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
   const pin = String(req.body?.pin ?? "").trim();
 
-  if (!Number.isFinite(id)) throw badRequest("invalid user id");
-  if (!/^\d{6}$/.test(pin)) throw badRequest("PIN ต้องเป็นตัวเลข 6 หลัก");
+  if (!Number.isFinite(id)) {
+    throw badRequest("invalid user id");
+  }
+
+  if (!/^\d{6}$/.test(pin)) {
+    throw badRequest("PIN ต้องเป็นตัวเลข 6 หลัก");
+  }
+
+  const duplicatePinUser = await prisma.user.findFirst({
+    where: {
+      pin,
+      deleted_at: null,
+      NOT: {
+        id,
+      },
+    },
+    select: {
+      id: true,
+      username: true,
+    },
+  });
+
+  if (duplicatePinUser) {
+    throw badRequest("PIN นี้ถูกใช้งานแล้ว");
+  }
 
   const user = await prisma.user.update({
     where: { id },
     data: { pin },
-    select: { id: true, pin: true },
+    select: {
+      id: true,
+      pin: true,
+    },
   });
 
-  res.json({ message: "PIN updated", data: user });
+  res.json({
+    message: "PIN updated",
+    data: user,
+  });
 });
 
 // DELETE User (soft delete)
@@ -469,40 +498,72 @@ export const getAdjustmentApprovers = asyncHandler(
 
 export const verifyAdjustmentApproverPin = asyncHandler(
   async (req: Request, res: Response) => {
-    const userId = Number(req.body?.user_id);
     const pin = String(req.body?.pin ?? "").trim();
 
-    if (!userId || !pin) {
-      throw badRequest("user_id และ pin จำเป็น");
+    const adjustmentItemIds = Array.isArray(req.body?.adjustment_item_ids)
+      ? req.body.adjustment_item_ids
+          .map((v: any) => Number(v))
+          .filter((v: number) => Number.isFinite(v) && v > 0)
+      : req.body?.adjustment_item_id != null
+        ? [Number(req.body.adjustment_item_id)]
+        : [];
+
+    if (!/^\d{6}$/.test(pin)) {
+      throw badRequest("PIN ต้องเป็นตัวเลข 6 หลัก");
     }
 
     const user = await prisma.user.findFirst({
       where: {
-        id: userId,
+        pin,
         deleted_at: null,
-        user_level: {
-          in: ["Supervisor", "Admin"],
-        },
       } as any,
+      select: {
+        id: true,
+        first_name: true,
+        last_name: true,
+        username: true,
+        user_level: true,
+      },
     });
 
     if (!user) {
-      throw badRequest("ไม่พบ Supervisor/Admin");
+      throw badRequest("PIN ไม่ถูกต้อง");
     }
 
-    // 🔥 ถ้า hash pin ค่อยเปลี่ยนตรงนี้
-    if (String((user as any).pin ?? "").trim() !== pin) {
-      throw badRequest("PIN ไม่ถูกต้อง");
+    const approverName =
+      [user.first_name, user.last_name]
+        .map((v) => String(v ?? "").trim())
+        .filter(Boolean)
+        .join(" ") ||
+      user.username ||
+      String(user.id);
+
+    if (adjustmentItemIds.length > 0) {
+      await prisma.adjustment_item.updateMany({
+        where: {
+          id: {
+            in: adjustmentItemIds,
+          },
+          deleted_at: null,
+        },
+        data: {
+          user_approve: approverName,
+          updated_at: new Date(),
+        },
+      });
     }
 
     return res.json({
       success: true,
       data: {
         id: user.id,
-        first_name: (user as any).first_name ?? null,
-        last_name: (user as any).last_name ?? null,
-        username: (user as any).username ?? null,
-        user_level: (user as any).user_level ?? null,
+        first_name: user.first_name ?? null,
+        last_name: user.last_name ?? null,
+        username: user.username ?? null,
+        user_level: user.user_level ?? null,
+        full_name: approverName,
+        user_approve: approverName,
+        adjustment_item_ids: adjustmentItemIds,
       },
     });
   },

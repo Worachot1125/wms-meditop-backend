@@ -707,6 +707,7 @@ model adjustment_item {
   lot_serial                  String?
   qty                         Int?
   exp                         DateTime?
+  user_approve                String?
   barcode_id                  Int?
   barcode_text                String?
   barcode_payload             String?

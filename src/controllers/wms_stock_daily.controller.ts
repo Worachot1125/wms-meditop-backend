@@ -1580,9 +1580,33 @@ export const getTransactionReportPaginated = asyncHandler(
       }),
 
       prisma.adjustment.findMany({
-        where: withDeletedAtNull(
-          buildAdjustmentReportWhere(createdAtFilter, search, selectedColumns),
-        ),
+        where: {
+          AND: [
+            withDeletedAtNull(
+              buildAdjustmentReportWhere(
+                createdAtFilter,
+                search,
+                selectedColumns,
+              ),
+            ),
+            {
+              NOT: [
+                {
+                  type: {
+                    equals: "BOS",
+                    mode: "insensitive",
+                  },
+                },
+                {
+                  type: {
+                    equals: "GA",
+                    mode: "insensitive",
+                  },
+                },
+              ],
+            },
+          ],
+        },
         include: {
           items: {
             where: { deleted_at: null },
@@ -2121,7 +2145,13 @@ export const getTransactionReportPaginated = asyncHandler(
     );
 
     const adjustmentRows: ReportRow[] = adjustments
-      .filter((doc: any) => !hasSVInNo(doc.no))
+      .filter((doc: any) => {
+        const adjType = String(doc.type ?? "")
+          .trim()
+          .toUpperCase();
+
+        return !hasSVInNo(doc.no) && !["BOS", "GA"].includes(adjType);
+      })
       .flatMap((doc: any) => {
         const formatted = formatOdooAdjustment(doc);
 
@@ -2419,18 +2449,12 @@ export const getTransactionReportPaginated = asyncHandler(
   },
 );
 
-
 export const createWmsDailySnapshotManual = asyncHandler(
   async (req: Request, res: Response) => {
-    const date =
-      req.body?.date ??
-      req.query?.date ??
-      undefined;
+    const date = req.body?.date ?? req.query?.date ?? undefined;
 
     const triggeredBy =
-      req.body?.triggered_by ??
-      req.query?.triggered_by ??
-      "manual";
+      req.body?.triggered_by ?? req.query?.triggered_by ?? "manual";
 
     const result = await wmsDailySnapshotService.createDailySnapshot(
       String(triggeredBy || "manual"),
