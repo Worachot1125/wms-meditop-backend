@@ -5,6 +5,7 @@ import type {
   outbound,
   goods_out_item,
   barcode,
+  transport_bkk,
 } from "@prisma/client";
 import {
   formatOdooOutbound,
@@ -26,6 +27,15 @@ export interface PackProductBoxItemFormatter {
     pack: number;
     status: string;
   } | null;
+}
+
+export interface TransportBkkFormatter {
+  id: number;
+  full_name: string;
+  barcode_text: string;
+  created_at: string;
+  updated_at: string | null;
+  deleted_at: string | null;
 }
 
 export interface PackProductBoxFormatter {
@@ -94,8 +104,12 @@ export interface PackProductFormatter {
   scan_prefix: string;
   max_box: number;
   status: string;
+  isbk_pack: boolean;
+  note: string | null;
   remark: string | null;
   batch_name: string | null;
+  transport_bkk_id: number | null;
+  transport_bkk: TransportBkkFormatter | null;
   created_at: string;
   updated_at: string | null;
   outbounds: OdooOutboundFormatter[];
@@ -475,6 +489,7 @@ function buildPackSummary(input: {
 
 export function formatPackProduct(
   row: pack_product & {
+    transport_bkk?: transport_bkk | null;
     outbounds?: Array<{
       outbound?:
         | (outbound & {
@@ -483,6 +498,8 @@ export function formatPackProduct(
               barcode_ref?: barcode | null;
               boxes?: any[];
               barcode_text?: string | null;
+              isbk_pack: boolean;
+              note: string | null;
               location_picks?: Array<{
                 location_id: number;
                 qty_pick: number;
@@ -492,6 +509,7 @@ export function formatPackProduct(
                 } | null;
               }>;
             })[];
+
             department_code?: string | null;
             department_raw?: string | null;
           })
@@ -521,6 +539,9 @@ export function formatPackProduct(
       box_label: packBox.box_label,
       box_code: packBox.box_code,
       status: packBox.status,
+      isbk_pack: Boolean((row as any).isbk_pack),
+      note: String((packBox as any).note ?? ""),
+
       created_at: packBox.created_at.toISOString(),
       updated_at: packBox.updated_at ? packBox.updated_at.toISOString() : null,
       items: (packBox.items ?? []).map((item) => ({
@@ -555,8 +576,27 @@ export function formatPackProduct(
     scan_prefix: row.scan_prefix,
     max_box: row.max_box,
     status: row.status,
+    isbk_pack: Boolean((row as any).isbk_pack),
+    note: row.note ?? null,
     batch_name: row.batch_name ?? null,
     remark: row.remark ?? null,
+    transport_bkk_id: row.transport_bkk_id ?? null,
+
+    transport_bkk: (row as any).transport_bkk
+      ? {
+          id: (row as any).transport_bkk.id,
+          full_name: (row as any).transport_bkk.full_name,
+          barcode_text: (row as any).transport_bkk.barcode_text,
+          created_at: (row as any).transport_bkk.created_at.toISOString(),
+          updated_at: (row as any).transport_bkk.updated_at
+            ? (row as any).transport_bkk.updated_at.toISOString()
+            : null,
+          deleted_at: (row as any).transport_bkk.deleted_at
+            ? (row as any).transport_bkk.deleted_at.toISOString()
+            : null,
+        }
+      : null,
+
     created_at: row.created_at.toISOString(),
     updated_at: row.updated_at ? row.updated_at.toISOString() : null,
     outbounds: formattedOutbounds,

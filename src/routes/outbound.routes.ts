@@ -56,6 +56,11 @@ import {
   movePdPackingToLocation,
   moveRtcPackingToLocation,
   returnPdPackProductItem,
+  closeBangkokPackBox,
+  createBangkokPackProduct,
+  getLatestPackProduct,
+  validateBangkokPackDoc,
+  scanTransportBKKBarcode,
 } from "../controllers/pack_product.controller";
 
 const router = Router();
@@ -108,6 +113,7 @@ router.patch("/:no/items/:itemId", updateOutboundItem);
 router.patch("/update/rtc/:id", updateGoodsOutItemRtc);
 // list
 router.get("/pack-products", getPackProducts);
+router.get("/pack-products/latest", getLatestPackProduct);
 router.get("/pack-products/by-prefix/:prefix", getPackProductByPrefix);
 router.post(
   "/pack-products/:packProductId/pd/move-to-pack-location",
@@ -131,6 +137,13 @@ router.post(
 router.get("/pack-products/:packProductId/summary", getPackProductSummary);
 router.get("/pack-products/:id", getPackProductById);
 router.post("/pack-products/scan", scanPackProductBarcode);
+router.post("/pack-products/transport/scan", scanTransportBKKBarcode);
+router.post("/pack-products/bangkok/validate-doc", validateBangkokPackDoc);
+router.post("/pack-products/bangkok", createBangkokPackProduct);
+router.post(
+  "/pack-products/:packProductId/boxes/:boxId/close-bangkok",
+  closeBangkokPackBox,
+);
 router.post(
   "/pack-products/:packProductId/pd/return-item",
   returnPdPackProductItem,

@@ -255,6 +255,20 @@ model stock {
   @@map("stocks")
 }
 
+model transport_bkk {
+  id           Int    @id @default(autoincrement())
+  full_name    String
+  barcode_text String
+
+  created_at DateTime  @default(now())
+  updated_at DateTime?
+  deleted_at DateTime?
+
+  pack_products pack_product[]
+
+  @@map("transports_bkk")
+}
+
 model inbound {
   lot              String?
   date             DateTime
@@ -383,6 +397,7 @@ model outbound {
   out_type                    String                    @default("DO")
   invoice                     String?
   in_process                  Boolean                   @default(false)
+  istrans                     Boolean                   @default(false)
   created_at                  DateTime                  @default(now())
   updated_at                  DateTime?
   deleted_at                  DateTime?
@@ -398,16 +413,20 @@ model outbound {
 }
 
 model pack_product {
-  id          Int       @id @default(autoincrement())
-  name        String    @unique
-  scan_prefix String
-  max_box     Int
-  status      String    @default("process")
-  remark      String?
-  batch_name  String?
-  created_at  DateTime  @default(now())
-  updated_at  DateTime?
-  deleted_at  DateTime?
+  id               Int            @id @default(autoincrement())
+  name             String         @unique
+  scan_prefix      String
+  max_box          Int
+  isbk_pack        Boolean        @default(false)
+  status           String         @default("process")
+  remark           String?
+  note             String?
+  transport_bkk_id Int?
+  transport_bkk    transport_bkk? @relation(fields: [transport_bkk_id], references: [id])
+  batch_name       String?
+  created_at       DateTime       @default(now())
+  updated_at       DateTime?
+  deleted_at       DateTime?
 
   outbounds pack_product_outbound[]
   boxes     pack_product_box[]

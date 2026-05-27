@@ -2089,7 +2089,6 @@ export const getOdooOutboundsAvailable = asyncHandler(
   },
 );
 
-
 type WaitPackMode = "normal" | "return_pack";
 
 const getOdooOutboundsInProcessBase = async (
@@ -2250,28 +2249,42 @@ const getOdooOutboundsInProcessBase = async (
           },
         };
 
-const blockedLocationWhere: Prisma.outboundWhereInput = {
-  NOT: [
-    {
-      location: {
-        equals: "WH/M_EXP&NCR",
-        mode: "insensitive",
+  const blockedLocationWhere: Prisma.outboundWhereInput = {
+    NOT: [
+      {
+        location: {
+          equals: "WH/M_EXP&NCR",
+          mode: "insensitive",
+        },
+      },
+    ],
+  };
+
+  const notInPackProductWhere: Prisma.outboundWhereInput = {
+    packProductOutbounds: {
+      none: {
+        pack_product: {
+          deleted_at: null,
+          status: {
+            in: ["process", "completed"],
+          },
+        },
       },
     },
-  ],
-};
+  };
 
-const baseWhere: Prisma.outboundWhereInput = {
-  AND: [
-    {
-      deleted_at: null,
-      in_process: true,
-      ...selectedDepartmentWhere,
-    },
-    packActionWhere,
-    blockedLocationWhere,
-  ],
-};
+  const baseWhere: Prisma.outboundWhereInput = {
+    AND: [
+      {
+        deleted_at: null,
+        in_process: true,
+        ...selectedDepartmentWhere,
+      },
+      packActionWhere,
+      blockedLocationWhere,
+      notInPackProductWhere,
+    ],
+  };
 
   let where: Prisma.outboundWhereInput = baseWhere;
 

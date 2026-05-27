@@ -164,8 +164,9 @@ export async function decrementBorSerStocksForGaBosSv(
     };
     mergedItems: DeductMergedItem[];
   },
-) {
+): Promise<{ adjustmentStatus: "completed" | "waiting"; waitingReason?: string | null }> {
   const { outType, transfer, mergedItems } = args;
+  const isBos = String(outType).toUpperCase() === "BOS";
 
   const target =
     (await resolveBorSerTargetFromSource(tx, {
@@ -222,16 +223,30 @@ export async function decrementBorSerStocksForGaBosSv(
       null;
 
     if (!row) {
-      throw badRequest(
-        `ไม่พบ ${stockName} สำหรับตัด (product_id=${it.product_id}, lot_id=${it.lot_id ?? "null"}, lot_serial=${it.lot_serial ?? "null"}, exp=${toDateOnlyKey(effectiveExp) ?? "null"})`,
-      );
+      const reason = `ไม่พบ ${stockName} สำหรับตัด (product_id=${it.product_id}, lot_id=${it.lot_id ?? "null"}, lot_serial=${it.lot_serial ?? "null"}, exp=${toDateOnlyKey(effectiveExp) ?? "null"})`;
+
+      if (isBos) {
+        return {
+          adjustmentStatus: "waiting",
+          waitingReason: reason,
+        };
+      }
+
+      throw badRequest(reason);
     }
 
     const current = Number(row.quantity ?? 0);
     if (current < qty) {
-      throw badRequest(
-        `${stockName} ไม่พอ (need=${qty}, have=${current}) product_id=${it.product_id} lot_id=${it.lot_id ?? "null"} lot_serial=${it.lot_serial ?? "null"} exp=${toDateOnlyKey(effectiveExp) ?? "null"}`,
-      );
+      const reason = `${stockName} ไม่พอ (need=${qty}, have=${current}) product_id=${it.product_id} lot_id=${it.lot_id ?? "null"} lot_serial=${it.lot_serial ?? "null"} exp=${toDateOnlyKey(effectiveExp) ?? "null"}`;
+
+      if (isBos) {
+        return {
+          adjustmentStatus: "waiting",
+          waitingReason: reason,
+        };
+      }
+
+      throw badRequest(reason);
     }
 
     const remain = current - qty;
@@ -247,6 +262,11 @@ export async function decrementBorSerStocksForGaBosSv(
       });
     }
   }
+
+  return {
+    adjustmentStatus: "completed",
+    waitingReason: null,
+  };
 }
 
 export async function replaceBorSerStocksForExBoa(

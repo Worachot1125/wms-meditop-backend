@@ -935,6 +935,601 @@ function applyReturnToPackProduct(row: any) {
   };
 }
 
+function getBangkokPackDateKey(date = new Date()) {
+  const yy = String(date.getFullYear()).slice(-2);
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+
+  return `${yy}${mm}${dd}`;
+}
+
+function getPackProductDateKey(date = new Date()) {
+  const yy = String(date.getFullYear()).slice(-2);
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+
+  return `${yy}${mm}${dd}`;
+}
+
+async function generatePackProductNameTx(tx: any) {
+  const dateKey = getPackProductDateKey();
+  const prefix = `PACK_${dateKey}_`;
+
+  const latest = await tx.pack_product.findFirst({
+    where: {
+      name: {
+        startsWith: prefix,
+      },
+    },
+    orderBy: {
+      name: "desc",
+    },
+    select: {
+      name: true,
+    },
+  });
+
+  const latestSeq = latest?.name
+    ? Number(String(latest.name).replace(prefix, ""))
+    : 0;
+
+  const nextSeq = Number.isFinite(latestSeq) ? latestSeq + 1 : 1;
+
+  return `${prefix}${String(nextSeq).padStart(3, "0")}`;
+}
+
+export const validateBangkokPackDoc = asyncHandler(
+  async (
+    req: Request<{}, {}, { doc: string; current_docs?: string[] }>,
+    res: Response,
+  ) => {
+    const doc = normalizeSpaces(String(req.body?.doc ?? ""));
+    const currentDocs = Array.isArray(req.body?.current_docs)
+      ? req.body.current_docs
+          .map((x) => normalizeSpaces(String(x ?? "")))
+          .filter(Boolean)
+      : [];
+
+    if (!doc) throw badRequest("doc is required");
+
+    const duplicated = currentDocs.some(
+      (x) => normalizePrefixForCompare(x) === normalizePrefixForCompare(doc),
+    );
+
+    if (duplicated) {
+      throw badRequest("เอกสารนี้ถูกสแกนแล้ว");
+    }
+
+    const rawBarcode = `${doc}_ 1/1`;
+    const parsed = parsePackBarcode(rawBarcode);
+
+    const outbounds = await findOutboundsByDocKeys(parsed.docKeys);
+
+    if (outbounds.length === 0) {
+      throw notFound(`ไม่พบ outbound จากเอกสาร: ${doc}`);
+    }
+
+    const missingDocKeys = parsed.docKeys.filter((docKey) => {
+      const normalized = normalizePrefixForCompare(docKey);
+
+      return !outbounds.some((ob) => {
+        const no = normalizePrefixForCompare(ob.no ?? "");
+        const origin = normalizePrefixForCompare(ob.origin ?? "");
+        const invoice = normalizePrefixForCompare(ob.invoice ?? "");
+
+        return (
+          normalized === no || normalized === origin || normalized === invoice
+        );
+      });
+    });
+
+    if (missingDocKeys.length > 0) {
+      throw badRequest(`ไม่พบ outbound: ${missingDocKeys.join(", ")}`);
+    }
+
+    const blockedOutbounds = outbounds.filter((ob: any) =>
+      isBlockedOutboundLocation(ob.location),
+    );
+
+    if (blockedOutbounds.length > 0) {
+      throw badRequest(
+        `Outbound location WH/M_EXP&NCR ไม่สามารถสร้าง Batch Pack ได้: ${blockedOutbounds
+          .map((x: any) => x.no)
+          .filter(Boolean)
+          .join(", ")}`,
+      );
+    }
+
+    const matched = outbounds[0];
+
+    const alreadyPacked = await prisma.pack_product_outbound.findFirst({
+      where: {
+        outbound_id: matched.id,
+        pack_product: {
+          deleted_at: null,
+          status: {
+            in: ["process", "completed"],
+          },
+        },
+      } as any,
+      include: {
+        pack_product: {
+          select: {
+            id: true,
+            name: true,
+            status: true,
+            isbk_pack: true,
+          } as any,
+        },
+      },
+    });
+
+    if (alreadyPacked) {
+      throw badRequest(
+        `เอกสารนี้ถูกนำไปสร้าง Batch Pack แล้ว (${alreadyPacked.pack_product?.name ?? "-"})`,
+      );
+    }
+
+    return res.json({
+      success: true,
+      message: "ตรวจสอบเอกสารสำเร็จ",
+      data: {
+        doc,
+        outbound: {
+          id: matched.id,
+          no: matched.no,
+          invoice: matched.invoice ?? null,
+          origin: matched.origin ?? null,
+          out_type: matched.out_type ?? null,
+        },
+      },
+    });
+  },
+);
+
+export const scanTransportBKKBarcode = asyncHandler(
+  async (
+    req: Request<{}, {}, { barcode_text?: string; barcode?: string }>,
+    res: Response,
+  ) => {
+    const barcodeText = String(
+      req.body?.barcode_text ?? req.body?.barcode ?? "",
+    ).trim();
+
+    if (!barcodeText) {
+      throw badRequest("barcode_text is required");
+    }
+
+    const transport = await prisma.transport_bkk.findFirst({
+      where: {
+        barcode_text: barcodeText,
+        deleted_at: null,
+      },
+      select: {
+        id: true,
+        full_name: true,
+        barcode_text: true,
+      },
+    });
+
+    if (!transport) {
+      throw notFound("ไม่พบข้อมูลขนส่ง กทม. จาก barcode นี้");
+    }
+
+    return res.json({
+      data: {
+        transport_bkk_id: transport.id,
+        full_name: transport.full_name,
+        barcode_text: transport.barcode_text,
+      },
+    });
+  },
+);
+
+export const createBangkokPackProduct = asyncHandler(
+  async (
+    req: Request<
+      {},
+      {},
+      {
+        barcode: string;
+        user_ref?: string | null;
+        note?: string | null;
+        transport_bkk_id?: number | null;
+      }
+    >,
+    res: Response,
+  ) => {
+    const rawBarcode = normalizeSpaces(String(req.body?.barcode ?? ""));
+
+    if (!rawBarcode) {
+      throw badRequest("barcode is required");
+    }
+
+    const parsed = parsePackBarcode(rawBarcode);
+
+    const userRef =
+      req.body?.user_ref == null
+        ? null
+        : String(req.body.user_ref).trim() || null;
+
+    const note =
+      req.body?.note == null ? null : String(req.body.note).trim() || null;
+
+    const outbounds = await findOutboundsByDocKeys(parsed.docKeys);
+
+    if (outbounds.length === 0) {
+      throw notFound(
+        `ไม่พบ outbound จาก prefix: ${parsed.prefixRaw} (ค้นจาก no/origin/invoice)`,
+      );
+    }
+
+    const missingDocKeys = parsed.docKeys.filter((docKey) => {
+      const normalized = normalizePrefixForCompare(docKey);
+
+      return !outbounds.some((ob: any) => {
+        const no = normalizePrefixForCompare(ob.no ?? "");
+        const origin = normalizePrefixForCompare(ob.origin ?? "");
+        const invoice = normalizePrefixForCompare(ob.invoice ?? "");
+
+        return (
+          normalized === no || normalized === origin || normalized === invoice
+        );
+      });
+    });
+
+    if (missingDocKeys.length > 0) {
+      throw badRequest(
+        `ไม่พบ outbound ครบทุกใบใน prefix นี้ ขาด: ${missingDocKeys.join(", ")}`,
+      );
+    }
+
+    const blockedOutbounds = outbounds.filter((ob: any) =>
+      isBlockedOutboundLocation(ob.location),
+    );
+
+    if (blockedOutbounds.length > 0) {
+      throw badRequest(
+        `Outbound location WH/M_EXP&NCR ไม่สามารถสร้าง Batch Pack ได้: ${blockedOutbounds
+          .map((x: any) => x.no)
+          .filter(Boolean)
+          .join(", ")}`,
+      );
+    }
+
+    const packedLinks = await prisma.pack_product_outbound.findMany({
+      where: {
+        outbound_id: {
+          in: outbounds.map((x: any) => Number(x.id)),
+        },
+        pack_product: {
+          deleted_at: null,
+          status: {
+            in: ["process", "completed"],
+          },
+        },
+      } as any,
+      include: {
+        outbound: {
+          select: {
+            no: true,
+          },
+        },
+        pack_product: {
+          select: {
+            name: true,
+            status: true,
+          },
+        },
+      },
+    });
+
+    if (packedLinks.length > 0) {
+      throw badRequest(
+        `มีเอกสารถูกนำไปสร้าง Batch Pack แล้ว: ${packedLinks
+          .map(
+            (x: any) =>
+              `${x.outbound?.no ?? "-"} (${x.pack_product?.name ?? "-"})`,
+          )
+          .join(", ")}`,
+      );
+    }
+
+    const batchNames = Array.from(
+      new Set(
+        outbounds
+          .map((ob: any) =>
+            String(ob.batch_lock?.name ?? ob.batch_name ?? "").trim(),
+          )
+          .filter(Boolean),
+      ),
+    );
+
+    const batchStatuses = Array.from(
+      new Set(
+        outbounds
+          .map((ob: any) =>
+            String(ob.batch_lock?.status ?? ob.batch_status ?? "").trim(),
+          )
+          .filter(Boolean),
+      ),
+    );
+
+    const batchInfo = {
+      batch_name: batchNames.join(", "),
+      batch_names: batchNames,
+      batch_statuses: batchStatuses,
+    };
+
+    const matchSummary = buildMatchSummary(
+      outbounds.map((ob: any) => ({
+        id: ob.id,
+        no: ob.no,
+        origin: ob.origin ?? null,
+        invoice: ob.invoice ?? null,
+      })),
+      parsed.docKeys,
+    );
+
+    const transportBkkIdRaw = req.body?.transport_bkk_id;
+
+    let transportBkkId: number | null = null;
+
+    if (transportBkkIdRaw != null) {
+      const parsedId = Number(transportBkkIdRaw);
+
+      if (!Number.isFinite(parsedId) || parsedId <= 0) {
+        throw badRequest("transport_bkk_id ต้องเป็นตัวเลข");
+      }
+
+      transportBkkId = parsedId;
+
+      const transport = await prisma.transport_bkk.findFirst({
+        where: {
+          id: parsedId,
+          deleted_at: null,
+        },
+        select: { id: true },
+      });
+
+      if (!transport) {
+        throw badRequest("ไม่พบข้อมูลขนส่ง กทม.");
+      }
+    }
+
+    const txResult = await prisma.$transaction(async (tx) => {
+      let packProduct = await tx.pack_product.findFirst({
+        where: {
+          deleted_at: null,
+          scan_prefix: parsed.prefixRaw,
+        },
+        include: {
+          outbounds: {
+            include: {
+              outbound: true,
+            },
+          },
+          boxes: {
+            where: {
+              deleted_at: null,
+            },
+            orderBy: [{ box_no: "asc" }, { id: "asc" }],
+          },
+        },
+      });
+
+      if (
+        packProduct &&
+        String(packProduct.status ?? "").toLowerCase() !== "process"
+      ) {
+        throw badRequest(
+          `งาน pack นี้ไม่ได้อยู่ในสถานะ process แล้ว (status: ${packProduct.status})`,
+        );
+      }
+
+      if (!packProduct) {
+        const generatedName = await generatePackProductNameTx(tx);
+
+        packProduct = await tx.pack_product.create({
+          data: {
+            name: generatedName,
+            scan_prefix: parsed.prefixRaw,
+            max_box: parsed.boxMax,
+            status: "process",
+            remark: userRef
+              ? `created_by=${userRef};bk_pack=true`
+              : "bk_pack=true",
+            note,
+            batch_name: batchInfo.batch_name,
+            transport_bkk_id: transportBkkId,
+            isbk_pack: true,
+          } as any,
+          include: {
+            outbounds: {
+              include: {
+                outbound: true,
+              },
+            },
+            boxes: {
+              where: {
+                deleted_at: null,
+              },
+              orderBy: [{ box_no: "asc" }, { id: "asc" }],
+            },
+          },
+        });
+      }
+
+      const existingOutboundIds = new Set(
+        (packProduct.outbounds ?? []).map((row: any) =>
+          Number(row.outbound_id),
+        ),
+      );
+
+      for (const outbound of outbounds as any[]) {
+        if (!existingOutboundIds.has(Number(outbound.id))) {
+          await tx.pack_product_outbound.create({
+            data: {
+              pack_product_id: packProduct.id,
+              outbound_id: outbound.id,
+            },
+          });
+        }
+      }
+
+      let currentBox = await tx.pack_product_box.findFirst({
+        where: {
+          pack_product_id: packProduct.id,
+          box_no: parsed.boxNo,
+          deleted_at: null,
+        },
+        orderBy: {
+          id: "desc",
+        },
+      });
+
+      let boxAction: "created" | "opened" | "closed" | "reopened" = "opened";
+
+      if (!currentBox) {
+        currentBox = await tx.pack_product_box.create({
+          data: {
+            pack_product_id: packProduct.id,
+            box_no: parsed.boxNo,
+            box_max: parsed.boxMax,
+            box_label: parsed.boxLabel,
+            box_code: parsed.fullBoxCode,
+            status: "open",
+          },
+        });
+
+        boxAction = "created";
+      } else if (String(currentBox.status ?? "").toLowerCase() !== "open") {
+        currentBox = await tx.pack_product_box.update({
+          where: {
+            id: currentBox.id,
+          },
+          data: {
+            status: "open",
+            box_max: parsed.boxMax,
+            box_label: parsed.boxLabel,
+            box_code: parsed.fullBoxCode,
+            updated_at: new Date(),
+          },
+        });
+
+        boxAction = "reopened";
+      }
+
+      return {
+        packProductId: packProduct.id,
+        activeBoxId: currentBox.id,
+        boxAction,
+      };
+    });
+
+    const full = await loadPackProductFull(txResult.packProductId);
+
+    if (!full) {
+      throw notFound("ไม่พบ pack_product หลังจากบันทึกข้อมูล");
+    }
+
+    const currentBox =
+      (full.boxes ?? []).find(
+        (b: any) => Number(b.id) === Number(txResult.activeBoxId),
+      ) ?? null;
+
+    const adjustedFull = applyReturnToPackProduct(full as any);
+
+    await emitPackProductSocketUpdate(txResult.packProductId);
+
+    return res.json({
+      success: true,
+      message: "สร้าง Batch Pack กทม. สำเร็จ",
+      data: {
+        parsed: {
+          raw: parsed.raw,
+          prefix: parsed.prefixRaw,
+          doc_keys: parsed.docKeys,
+          box_no: parsed.boxNo,
+          box_max: parsed.boxMax,
+          box_label: parsed.boxLabel,
+          box_code: parsed.fullBoxCode,
+        },
+        matches: matchSummary,
+        batch_statuses: batchInfo.batch_statuses,
+        box_action: txResult.boxAction,
+        current_box: currentBox
+          ? {
+              id: currentBox.id,
+              box_no: currentBox.box_no,
+              box_max: currentBox.box_max,
+              box_label: currentBox.box_label,
+              box_code: currentBox.box_code,
+              status: currentBox.status,
+              created_at: currentBox.created_at,
+              updated_at: currentBox.updated_at,
+            }
+          : null,
+        ...formatPackProduct(adjustedFull as any),
+      },
+    });
+  },
+);
+
+export const closeBangkokPackBox = asyncHandler(
+  async (
+    req: Request<
+      { packProductId: string; boxId: string },
+      {},
+      { user_ref?: string | null }
+    >,
+    res: Response,
+  ) => {
+    const packProductId = Number(req.params.packProductId);
+    const boxId = Number(req.params.boxId);
+
+    if (!Number.isFinite(packProductId))
+      throw badRequest("packProductId ต้องเป็นตัวเลข");
+    if (!Number.isFinite(boxId)) throw badRequest("boxId ต้องเป็นตัวเลข");
+
+    const result = await prisma.$transaction(async (tx) => {
+      const packProduct = await tx.pack_product.findFirst({
+        where: { id: packProductId, deleted_at: null } as any,
+        select: { id: true, isbk_pack: true, status: true },
+      });
+
+      if (!packProduct) throw notFound("ไม่พบ pack_product");
+      if (!packProduct.isbk_pack) throw badRequest("งานนี้ไม่ใช่ BK Pack");
+
+      const box = await tx.pack_product_box.findFirst({
+        where: {
+          id: boxId,
+          pack_product_id: packProductId,
+          deleted_at: null,
+        } as any,
+      });
+
+      if (!box) throw notFound("ไม่พบ box ใน pack_product นี้");
+
+      return tx.pack_product_box.update({
+        where: { id: box.id },
+        data: {
+          status: "closed",
+          updated_at: new Date(),
+        },
+      });
+    });
+
+    await emitPackProductSocketUpdate(packProductId);
+
+    return res.json({
+      success: true,
+      message: "ปิดกล่อง BK Pack สำเร็จ",
+      data: result,
+    });
+  },
+);
+
 export const getPackProducts = asyncHandler(
   async (req: Request, res: Response) => {
     const page = parsePositiveInt(req.query.page, 1);
@@ -967,6 +1562,8 @@ export const getPackProducts = asyncHandler(
       prisma.pack_product.findMany({
         where,
         include: {
+          transport_bkk: true,
+
           outbounds: {
             include: {
               outbound: {
@@ -985,6 +1582,7 @@ export const getPackProducts = asyncHandler(
             },
             orderBy: { id: "asc" },
           },
+
           boxes: {
             where: { deleted_at: null },
             include: {
@@ -1032,6 +1630,80 @@ export const getPackProducts = asyncHandler(
           process: processCount,
           completed: completedCount,
         },
+      },
+    });
+  },
+);
+
+export const getLatestPackProduct = asyncHandler(
+  async (_req: Request, res: Response) => {
+    const dateKey = getPackProductDateKey();
+    const prefix = `PACK_${dateKey}_`;
+
+    const row = await prisma.pack_product.findFirst({
+      where: {
+        deleted_at: null,
+        name: {
+          startsWith: prefix,
+        },
+      },
+      include: {
+        outbounds: {
+          include: {
+            outbound: {
+              include: {
+                goods_outs: {
+                  where: {
+                    deleted_at: null,
+                  },
+                  include: {
+                    barcode_ref: {
+                      where: {
+                        deleted_at: null,
+                      },
+                    },
+                  },
+                  orderBy: [{ sequence: "asc" }, { id: "asc" }],
+                },
+              },
+            },
+          },
+          orderBy: {
+            id: "asc",
+          },
+        },
+        boxes: {
+          where: {
+            deleted_at: null,
+          },
+          include: {
+            items: {
+              where: {
+                deleted_at: null,
+              },
+              include: {
+                goods_out_item: true,
+              },
+            },
+          },
+          orderBy: [{ box_no: "asc" }, { id: "asc" }],
+        },
+      },
+      orderBy: [{ name: "desc" }],
+    });
+
+    const latestSeq = row?.name
+      ? Number(String(row.name).replace(prefix, ""))
+      : 0;
+
+    const nextSeq = Number.isFinite(latestSeq) ? latestSeq + 1 : 1;
+
+    return res.json({
+      data: {
+        latest: row
+          ? formatPackProduct(applyReturnToPackProduct(row as any))
+          : null,
+        next_name: `${prefix}${String(nextSeq).padStart(3, "0")}`,
       },
     });
   },
@@ -1363,7 +2035,11 @@ const isBlockedOutboundLocation = (location: unknown) => {
 
 export const scanPackProductBarcode = asyncHandler(
   async (
-    req: Request<{}, {}, { barcode: string; user_ref?: string | null }>,
+    req: Request<
+      {},
+      {},
+      { barcode: string; user_ref?: string | null; note?: string | null }
+    >,
     res: Response,
   ) => {
     const isValidPackBoxCode = (value: string) => {
@@ -1385,6 +2061,8 @@ export const scanPackProductBarcode = asyncHandler(
       req.body?.user_ref == null
         ? null
         : String(req.body.user_ref).trim() || null;
+    const note =
+      req.body?.note == null ? null : String(req.body.note).trim() || null;
 
     const outbounds = await findOutboundsByDocKeys(parsed.docKeys);
 
@@ -1427,7 +2105,27 @@ export const scanPackProductBarcode = asyncHandler(
       );
     }
 
-    const batchInfo = validatePackBatchName(outbounds as OutboundWithBatch[]);
+    const batchNames = Array.from(
+      new Set(
+        outbounds
+          .map((ob: any) => String(ob.batch_name ?? "").trim())
+          .filter(Boolean),
+      ),
+    );
+
+    const batchStatuses = Array.from(
+      new Set(
+        outbounds
+          .map((ob: any) => String(ob.batch_status ?? "").trim())
+          .filter(Boolean),
+      ),
+    );
+
+    const batchInfo = {
+      batch_name: batchNames.join(", "),
+      batch_names: batchNames,
+      batch_statuses: batchStatuses,
+    };
 
     const matchSummary = buildMatchSummary(
       outbounds.map((ob) => ({
@@ -1462,15 +2160,6 @@ export const scanPackProductBarcode = asyncHandler(
         if (String(packProduct.status ?? "").toLowerCase() !== "process") {
           throw badRequest(
             `งาน pack นี้ไม่ได้อยู่ในสถานะ process แล้ว (status: ${packProduct.status})`,
-          );
-        }
-
-        if (
-          String(packProduct.batch_name ?? "").trim() &&
-          String(packProduct.batch_name ?? "").trim() !== batchInfo.batch_name
-        ) {
-          throw badRequest(
-            `prefix นี้มี pack เดิมอยู่แล้ว แต่ batch pick ไม่ตรงกัน (pack batch: ${packProduct.batch_name}, scanned batch: ${batchInfo.batch_name})`,
           );
         }
 
@@ -1546,11 +2235,12 @@ export const scanPackProductBarcode = asyncHandler(
       if (!packProduct) {
         packProduct = await tx.pack_product.create({
           data: {
-            name: buildPackName(parsed.prefixRaw),
+            name: await generatePackProductNameTx(tx),
             scan_prefix: parsed.prefixRaw,
             max_box: parsed.boxMax,
             status: "process",
             remark: userRef ? `created_by=${userRef}` : null,
+            note,
             batch_name: batchInfo.batch_name,
           },
           include: {

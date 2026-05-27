@@ -31,6 +31,7 @@ import swapRoutes from "./swap.routes"
 import reportAllRoutes from "./reportall.route"
 import goodsRoutes from "./goods.routes";
 import localPrintRoutes from "./local_print.routes";
+import transportsBKKRoutes from "./transports_bkk.routes";
 import {
   cancelAdjustment,
   confirmAdjustment,
@@ -90,4 +91,5 @@ router.use("/swaps", swapRoutes);
 router.use("/all", reportAllRoutes);
 router.use("/goods", goodsRoutes);
 router.use("/local-print", localPrintRoutes);
+router.use("/transports-bkk", transportsBKKRoutes);
 export default router;
