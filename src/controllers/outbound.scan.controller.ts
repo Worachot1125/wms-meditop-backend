@@ -3187,8 +3187,10 @@ export const confirmOutboundPickToStock = asyncHandler(
     const user_ref =
       user_ref_raw == null ? null : String(user_ref_raw).trim() || null;
 
+    const istrans = (req.body as any)?.istrans === true;
+
     const skipStockDecrement =
-      (req.body as any)?.skip_stock_decrement === true ||
+      istrans || (req.body as any)?.skip_stock_decrement === true ||
       String((req.body as any)?.source ?? "").trim() === "AUTO_LOCATION_PACK";
 
     const outbound = await prisma.outbound.findFirst({
@@ -3554,6 +3556,7 @@ export const confirmOutboundPickToStock = asyncHandler(
         where: { id: outbound.id },
         data: {
           in_process: outboundCompleted,
+          istrans: istrans,
           updated_at: new Date(),
         } as any,
       });

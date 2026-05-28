@@ -29,6 +29,8 @@ import {
   applyAutoLocationPack,
   getOdooOutboundsInProcess,
   getOdooOutboundsWaitReturnPack,
+  scanReversePackingDoc,
+  confirmReversePackingDocs,
 } from "../controllers/outbound.odoo.controller";
 
 import {
@@ -61,6 +63,8 @@ import {
   getLatestPackProduct,
   validateBangkokPackDoc,
   scanTransportBKKBarcode,
+  scanReceiveNoPackDoc,
+  confirmReceiveNoPackDocs,
 } from "../controllers/pack_product.controller";
 
 const router = Router();
@@ -165,6 +169,12 @@ router.delete("/delete/odoo/transfers/:no", deleteOdooOutbound);
 
 // Bulk Delete Outbounds
 router.post("/bulk-delete", bulkDeleteOutbounds);
+
+//revert pack | no pack
+router.post("/no-packing/reverse/scan", scanReversePackingDoc);
+router.post("/no-packing/reverse/confirm", confirmReversePackingDocs);
+router.post("/no-packing/receive/scan", scanReceiveNoPackDoc);
+router.post("/no-packing/receive/confirm", confirmReceiveNoPackDocs);
 
 // Barcode Management for Outbound
 router.post(

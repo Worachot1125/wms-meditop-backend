@@ -68,6 +68,9 @@ export interface OdooOutboundItemFormatter {
   return_qty: number;
   pd_returned_qty: number;
   pending_return_qty: number;
+  istrans: boolean;
+status_nopack: boolean;
+user_ref_nopack: string | null;
 
   boxes: BoxFormatter[];
   status: string;
@@ -109,6 +112,10 @@ export interface OdooOutboundFormatter {
   invoice: string | null;
   in_process: Boolean;
   outbound_barcode: string | null;
+  istrans: boolean;
+  status_nopack: boolean;
+  user_ref_nopack: string | null;
+  time_ref_nopack: string | null;
   created_at: string;
   updated_at: string | null;
   items: OdooOutboundItemFormatter[];
@@ -185,6 +192,10 @@ export function formatOdooOutbound(
     invoice: outbound.invoice,
     in_process: outbound.in_process,
     outbound_barcode: outbound.outbound_barcode ?? null,
+    istrans: outbound.istrans ?? false,
+    status_nopack: outbound.status_nopack ?? false,
+    user_ref_nopack: outbound.user_ref_nopack ?? null,
+    time_ref_nopack: outbound.time_ref_nopack ? outbound.time_ref_nopack.toISOString() : null,
     created_at: outbound.created_at.toISOString(),
     updated_at: outbound.updated_at ? outbound.updated_at.toISOString() : null,
 
@@ -247,6 +258,9 @@ export function formatOdooOutbound(
                 location_name: String(lr.location?.full_name ?? ""),
                 return: Number(lr.return ?? 0),
               })),
+              status_nopack: item.status_nopack ?? false,
+              user_ref_nopack: item.user_ref_nopack ?? null,
+              istrans: item.istrans ?? false,
 
               pick: item.pick,
               pack: item.pack,

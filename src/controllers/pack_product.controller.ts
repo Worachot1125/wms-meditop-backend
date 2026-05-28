@@ -165,8 +165,13 @@ function parseFlexibleDateSearch(search: string): {
   return null;
 }
 
+const isValidDate = (value: unknown): value is Date => {
+  return value instanceof Date && !Number.isNaN(value.getTime());
+};
+
 function buildPackProductSearchWhere(
   search: string,
+  searchFields: string[] = [],
 ): Prisma.pack_productWhereInput {
   const trimmed = String(search ?? "").trim();
 
@@ -174,90 +179,177 @@ function buildPackProductSearchWhere(
     return { deleted_at: null };
   }
 
+  const words = trimmed.split(/\s+/).filter(Boolean);
+
+  const buildTextSearch = (value: string): Prisma.StringFilter => ({
+    contains: value,
+  });
+
+  const allowedFields = new Set([
+    "date",
+    "created_at",
+    "name",
+    "max_box",
+    "status",
+    "remark",
+    "transport",
+    "transport_bkk",
+    "outbound",
+    "box",
+  ]);
+
+  const activeFields =
+    searchFields.length > 0
+      ? searchFields.filter((x) => allowedFields.has(x))
+      : ["created_at", "name", "max_box", "status", "remark", "transport_bkk"];
+
   const orConditions: Prisma.pack_productWhereInput[] = [];
 
-  orConditions.push(
-    { name: { contains: trimmed, mode: "insensitive" } },
-    { scan_prefix: { contains: trimmed, mode: "insensitive" } },
-    { batch_name: { contains: trimmed, mode: "insensitive" } },
-    { status: { contains: trimmed, mode: "insensitive" } },
-    { remark: { contains: trimmed, mode: "insensitive" } },
-  );
+  for (const word of words) {
+    if (activeFields.includes("name")) {
+      orConditions.push(
+        { name: buildTextSearch(word) },
+        { scan_prefix: buildTextSearch(word) },
+        { batch_name: buildTextSearch(word) },
+      );
+    }
 
-  const num = toSearchNumber(trimmed);
-  if (num !== null) {
-    orConditions.push({ id: num }, { max_box: num });
+    if (activeFields.includes("status")) {
+      orConditions.push({
+        status: buildTextSearch(word),
+      });
+    }
+
+    if (activeFields.includes("remark")) {
+      orConditions.push({
+        remark: buildTextSearch(word),
+      });
+    }
+
+    if (
+      activeFields.includes("transport") ||
+      activeFields.includes("transport_bkk")
+    ) {
+      orConditions.push({
+        transport_bkk: {
+          is: {
+            OR: [
+              { full_name: buildTextSearch(word) },
+              { barcode_text: buildTextSearch(word) },
+            ],
+          },
+        },
+      });
+    }
   }
 
-  const parsedDate = parseFlexibleDateSearch(trimmed);
-  if (parsedDate?.exact) {
-    orConditions.push(
-      { created_at: { gte: parsedDate.exact.gte, lt: parsedDate.exact.lt } },
-      { updated_at: { gte: parsedDate.exact.gte, lt: parsedDate.exact.lt } },
-    );
-  } else if (parsedDate?.day) {
-    orConditions.push(
-      { created_at: { gte: parsedDate.day.gte, lt: parsedDate.day.lt } },
-      { updated_at: { gte: parsedDate.day.gte, lt: parsedDate.day.lt } },
-    );
+  if (activeFields.includes("max_box")) {
+    const num = toSearchNumber(trimmed);
+
+    if (num !== null) {
+      orConditions.push({ id: num }, { max_box: num });
+    }
   }
 
-  orConditions.push(
-    {
-      outbounds: {
-        some: {
-          outbound: {
-            is: {
-              deleted_at: null,
-              OR: [
-                { no: { contains: trimmed, mode: "insensitive" } },
-                { origin: { contains: trimmed, mode: "insensitive" } },
-                { invoice: { contains: trimmed, mode: "insensitive" } },
-                { department: { contains: trimmed, mode: "insensitive" } },
-                { out_type: { contains: trimmed, mode: "insensitive" } },
-                {
-                  goods_outs: {
-                    some: {
-                      deleted_at: null,
-                      OR: [
-                        { code: { contains: trimmed, mode: "insensitive" } },
-                        { name: { contains: trimmed, mode: "insensitive" } },
-                        { sku: { contains: trimmed, mode: "insensitive" } },
-                        {
-                          lot_serial: {
-                            contains: trimmed,
-                            mode: "insensitive",
-                          },
-                        },
-                        {
-                          barcode_text: {
-                            contains: trimmed,
-                            mode: "insensitive",
-                          },
-                        },
-                      ],
+  if (activeFields.includes("date") || activeFields.includes("created_at")) {
+    const parsedDate = parseFlexibleDateSearch(trimmed);
+
+    if (
+      parsedDate?.exact &&
+      isValidDate(parsedDate.exact.gte) &&
+      isValidDate(parsedDate.exact.lt)
+    ) {
+      orConditions.push(
+        {
+          created_at: {
+            gte: parsedDate.exact.gte,
+            lt: parsedDate.exact.lt,
+          },
+        },
+        {
+          updated_at: {
+            gte: parsedDate.exact.gte,
+            lt: parsedDate.exact.lt,
+          },
+        },
+      );
+    } else if (
+      parsedDate?.day &&
+      isValidDate(parsedDate.day.gte) &&
+      isValidDate(parsedDate.day.lt)
+    ) {
+      orConditions.push(
+        {
+          created_at: {
+            gte: parsedDate.day.gte,
+            lt: parsedDate.day.lt,
+          },
+        },
+        {
+          updated_at: {
+            gte: parsedDate.day.gte,
+            lt: parsedDate.day.lt,
+          },
+        },
+      );
+    }
+  }
+
+  for (const word of words) {
+    if (activeFields.includes("outbound")) {
+      orConditions.push({
+        outbounds: {
+          some: {
+            outbound: {
+              is: {
+                deleted_at: null,
+                OR: [
+                  { no: buildTextSearch(word) },
+                  { origin: buildTextSearch(word) },
+                  { invoice: buildTextSearch(word) },
+                  { department: buildTextSearch(word) },
+                  { out_type: buildTextSearch(word) },
+                  {
+                    goods_outs: {
+                      some: {
+                        deleted_at: null,
+                        OR: [
+                          { code: buildTextSearch(word) },
+                          { name: buildTextSearch(word) },
+                          { sku: buildTextSearch(word) },
+                          { lot_serial: buildTextSearch(word) },
+                          { barcode_text: buildTextSearch(word) },
+                        ],
+                      },
                     },
                   },
-                },
-              ],
+                ],
+              },
             },
           },
         },
-      },
-    },
-    {
-      boxes: {
-        some: {
-          deleted_at: null,
-          OR: [
-            { box_code: { contains: trimmed, mode: "insensitive" } },
-            { box_label: { contains: trimmed, mode: "insensitive" } },
-            { status: { contains: trimmed, mode: "insensitive" } },
-          ],
+      });
+    }
+
+    if (activeFields.includes("box")) {
+      orConditions.push({
+        boxes: {
+          some: {
+            deleted_at: null,
+            OR: [
+              { box_code: buildTextSearch(word) },
+              { box_label: buildTextSearch(word) },
+              { status: buildTextSearch(word) },
+            ],
+          },
         },
-      },
-    },
-  );
+      });
+    }
+  }
+
+  if (orConditions.length === 0) {
+    return { deleted_at: null };
+  }
 
   return {
     deleted_at: null,
@@ -1042,6 +1134,12 @@ export const validateBangkokPackDoc = asyncHandler(
 
     const matched = outbounds[0];
 
+    if (matched.istrans == true) {
+      throw badRequest(
+        `ไม่สามารถเพิ่มเอกสารไม่ที่ต้องจัด packing ลงกล่องได้ ${matched.no ?? "-"}, ${matched.invoice ?? "-"}, ${matched.origin ?? "-"}`,
+      );
+    }
+
     const alreadyPacked = await prisma.pack_product_outbound.findFirst({
       where: {
         outbound_id: matched.id,
@@ -1532,12 +1630,26 @@ export const closeBangkokPackBox = asyncHandler(
 
 export const getPackProducts = asyncHandler(
   async (req: Request, res: Response) => {
+    res.set("Cache-Control", "no-store");
+
     const page = parsePositiveInt(req.query.page, 1);
     const limit = Math.min(parsePositiveInt(req.query.limit, 20), 200);
     const skip = (page - 1) * limit;
 
     const search = firstText(req.query.search);
     const rawStatus = firstText(req.query.status)?.toLowerCase();
+
+    const searchFields = Array.isArray(req.query.searchFields)
+      ? req.query.searchFields
+          .flatMap((x) => String(x).split(","))
+          .map((x) => x.trim())
+          .filter(Boolean)
+      : req.query.searchFields
+        ? String(req.query.searchFields)
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean)
+        : [];
 
     const allowedStatuses = ["completed", "process"] as const;
 
@@ -1548,22 +1660,23 @@ export const getPackProducts = asyncHandler(
       throw badRequest("status ต้องเป็น completed หรือ process");
     }
 
-    const where: Prisma.pack_productWhereInput =
-      buildPackProductSearchWhere(search);
+    const where: Prisma.pack_productWhereInput = buildPackProductSearchWhere(
+      search,
+      searchFields,
+    );
 
     if (rawStatus) {
       where.status = rawStatus;
     }
 
     const whereForCount: Prisma.pack_productWhereInput =
-      buildPackProductSearchWhere(search);
+      buildPackProductSearchWhere(search, searchFields);
 
     const [rows, total, processCount, completedCount] = await Promise.all([
       prisma.pack_product.findMany({
         where,
         include: {
           transport_bkk: true,
-
           outbounds: {
             include: {
               outbound: {
@@ -1582,7 +1695,6 @@ export const getPackProducts = asyncHandler(
             },
             orderBy: { id: "asc" },
           },
-
           boxes: {
             where: { deleted_at: null },
             include: {
@@ -1609,6 +1721,7 @@ export const getPackProducts = asyncHandler(
           status: "process",
         },
       }),
+
       prisma.pack_product.count({
         where: {
           ...whereForCount,
@@ -2066,6 +2179,43 @@ export const scanPackProductBarcode = asyncHandler(
 
     const outbounds = await findOutboundsByDocKeys(parsed.docKeys);
 
+    if (outbounds.length === 0) {
+      throw notFound(
+        `ไม่พบ outbound จาก prefix: ${parsed.prefixRaw} (ค้นจาก no/origin/invoice)`,
+      );
+    }
+
+    const noPackOutbounds = parsed.docKeys
+      .map((docKey) => {
+        const normalized = normalizePrefixForCompare(docKey);
+
+        return outbounds.find((ob: any) => {
+          if (ob.istrans !== true) return false;
+
+          const no = normalizePrefixForCompare(ob.no ?? "");
+          const origin = normalizePrefixForCompare(ob.origin ?? "");
+          const invoice = normalizePrefixForCompare(ob.invoice ?? "");
+
+          return (
+            normalized === no || normalized === origin || normalized === invoice
+          );
+        });
+      })
+      .filter(Boolean);
+
+    if (noPackOutbounds.length > 0) {
+      const docs = noPackOutbounds
+        .map((ob: any) =>
+          [ob.no, ob.invoice, ob.origin]
+            .map((x) => String(x ?? "").trim())
+            .filter(Boolean)
+            .join(", "),
+        )
+        .join(" | ");
+
+      throw badRequest(`ไม่สามารถเพิ่มเอกสารที่ไม่จัด pack ลงกล่องได้ ${docs}`);
+    }
+
     const blockedOutbounds = outbounds.filter((ob: any) =>
       isBlockedOutboundLocation(ob.location),
     );
@@ -2076,12 +2226,6 @@ export const scanPackProductBarcode = asyncHandler(
           .map((x: any) => x.no)
           .filter(Boolean)
           .join(", ")}`,
-      );
-    }
-
-    if (outbounds.length === 0) {
-      throw notFound(
-        `ไม่พบ outbound จาก prefix: ${parsed.prefixRaw} (ค้นจาก no/origin/invoice)`,
       );
     }
 
@@ -5301,3 +5445,306 @@ export const moveRtcPackingToLocation = asyncHandler(
     });
   },
 );
+
+export const scanReceiveNoPackDoc = asyncHandler(async (req, res) => {
+  const doc = String(req.body?.doc ?? "").trim();
+
+  const outbound = await prisma.outbound.findFirst({
+    where: {
+      deleted_at: null,
+      istrans: true,
+      status_nopack: false,
+      OR: [
+        { no: { equals: doc, mode: "insensitive" } },
+        { invoice: { equals: doc, mode: "insensitive" } },
+        { origin: { equals: doc, mode: "insensitive" } },
+
+        // ✅ รองรับ scan 200 แล้วเจอ WH/DO/200
+        { no: { endsWith: `/${doc}`, mode: "insensitive" } },
+        { invoice: { endsWith: `/${doc}`, mode: "insensitive" } },
+        { origin: { endsWith: `/${doc}`, mode: "insensitive" } },
+      ],
+    },
+    select: {
+      id: true,
+      no: true,
+      invoice: true,
+      origin: true,
+      department: true,
+      istrans: true,
+      status_nopack: true,
+      user_ref_nopack: true,
+      time_ref_nopack: true,
+    },
+  });
+
+  if (!outbound) {
+    throw badRequest("ไม่พบเอกสารไม่ทำการ Packing หรือเอกสารถูกรับไปแล้ว");
+  }
+
+  req.app.get("io")?.emit("outbound:nopack_receive_scanned", {
+    doc: outbound,
+  });
+
+  res.json({ success: true, data: outbound });
+});
+
+export const confirmReceiveNoPackDocs = asyncHandler(async (req, res) => {
+  const docs = Array.isArray(req.body?.docs)
+    ? req.body.docs.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+    : [];
+
+  const userRef = String(req.body?.user_ref ?? "").trim();
+
+  if (docs.length === 0) throw badRequest("docs is required");
+  if (!userRef) throw badRequest("user_ref is required");
+
+  const result = await prisma.$transaction(async (tx) => {
+    const outbounds = await tx.outbound.findMany({
+      where: {
+        deleted_at: null,
+        istrans: true,
+        status_nopack: false,
+        no: { in: docs },
+      },
+      include: {
+        batch_lock: {
+          select: {
+            name: true,
+          },
+        },
+        goods_outs: {
+          where: {
+            deleted_at: null,
+          },
+          orderBy: [{ sequence: "asc" }, { id: "asc" }],
+        },
+      },
+      orderBy: [{ id: "asc" }],
+    });
+
+    if (outbounds.length === 0) {
+      throw badRequest("ไม่พบเอกสารสำหรับรับ No Pack");
+    }
+
+    const alreadyPacked = await tx.pack_product_outbound.findMany({
+      where: {
+        outbound_id: {
+          in: outbounds.map((x: any) => Number(x.id)),
+        },
+        pack_product: {
+          deleted_at: null,
+          status: {
+            in: ["process", "completed"],
+          },
+        },
+      } as any,
+      include: {
+        outbound: {
+          select: {
+            no: true,
+          },
+        },
+        pack_product: {
+          select: {
+            name: true,
+            status: true,
+          },
+        },
+      },
+    });
+
+    if (alreadyPacked.length > 0) {
+      throw badRequest(
+        `มีเอกสารถูกนำไปสร้าง Batch Pack แล้ว: ${alreadyPacked
+          .map(
+            (x: any) =>
+              `${x.outbound?.no ?? "-"} (${x.pack_product?.name ?? "-"})`,
+          )
+          .join(", ")}`,
+      );
+    }
+
+    const generatedName = await generatePackProductNameTx(tx);
+
+    const scanPrefix = outbounds
+      .map((x: any) => String(x.no ?? "").trim())
+      .filter(Boolean)
+      .join(", ");
+
+    const batchName = Array.from(
+      new Set(
+        outbounds
+          .map((x: any) => String(x.batch_lock?.name ?? "").trim())
+          .filter(Boolean),
+      ),
+    ).join(", ");
+
+    const allItems = outbounds.flatMap((outbound: any) =>
+      (outbound.goods_outs ?? []).map((item: any) => ({
+        outbound,
+        item,
+      })),
+    );
+
+    if (allItems.length === 0) {
+      throw badRequest("ไม่พบสินค้าในเอกสาร No Pack");
+    }
+
+    const totalQty = allItems.reduce(
+      (sum: number, row: any) =>
+        sum + Math.max(0, Math.floor(Number(row.item.qty ?? 0))),
+      0,
+    );
+
+    const packProduct = await tx.pack_product.create({
+      data: {
+        name: generatedName,
+        scan_prefix: scanPrefix,
+        max_box: 1,
+        status: "completed",
+        remark: `no_pack_received_by=${userRef}`,
+        note: "NO_PACK_AUTO_COMPLETED",
+        batch_name: batchName || null,
+        isbk_pack: false,
+        updated_at: new Date(),
+      } as any,
+      select: {
+        id: true,
+        name: true,
+        scan_prefix: true,
+        max_box: true,
+        status: true,
+        remark: true,
+        note: true,
+        batch_name: true,
+        created_at: true,
+        updated_at: true,
+      },
+    });
+
+    for (const outbound of outbounds as any[]) {
+      await tx.pack_product_outbound.create({
+        data: {
+          pack_product_id: packProduct.id,
+          outbound_id: outbound.id,
+        },
+      });
+    }
+
+    const packBox = await tx.pack_product_box.create({
+      data: {
+        pack_product_id: packProduct.id,
+        box_no: 1,
+        box_max: 1,
+        box_label: "1/1",
+        box_code: `${scanPrefix}_ 1/1`,
+        status: "closed",
+        updated_at: new Date(),
+      },
+      select: {
+        id: true,
+        pack_product_id: true,
+        box_no: true,
+        box_max: true,
+        box_label: true,
+        box_code: true,
+        status: true,
+        created_at: true,
+        updated_at: true,
+      },
+    });
+
+    const boxItems: any[] = [];
+
+    for (const row of allItems as any[]) {
+      const item = row.item;
+      const qty = Math.max(0, Math.floor(Number(item.qty ?? 0)));
+
+      if (qty <= 0) continue;
+
+      const boxItem = await tx.pack_product_box_item.create({
+        data: {
+          pack_product_box_id: packBox.id,
+          goods_out_item_id: item.id,
+          quantity: qty,
+        },
+        select: {
+          id: true,
+          pack_product_box_id: true,
+          goods_out_item_id: true,
+          quantity: true,
+          created_at: true,
+          updated_at: true,
+        },
+      });
+
+      await tx.goods_out_item.update({
+        where: {
+          id: Number(item.id),
+        },
+        data: {
+          pick: qty,
+          confirmed_pick: qty,
+          pack: qty,
+          status: "completed",
+          in_process: true,
+          user_pack: userRef,
+          pack_time: new Date(),
+          updated_at: new Date(),
+        } as any,
+      });
+
+      boxItems.push(boxItem);
+    }
+
+const now = new Date();
+
+await tx.outbound.updateMany({
+  where: {
+    id: { in: outbounds.map((x: any) => Number(x.id)) },
+    istrans: true,
+    status_nopack: false,
+    deleted_at: null,
+  },
+  data: {
+    status_nopack: true,
+    user_ref_nopack: userRef,
+    time_ref_nopack: now,
+    in_process: true,
+    updated_at: now,
+  } as any,
+});
+
+    return {
+      pack_product: packProduct,
+      box: packBox,
+      box_items: boxItems,
+      total_items: boxItems.length,
+      total_qty: totalQty,
+      outbounds: outbounds.map((x: any) => ({
+        id: x.id,
+        no: x.no,
+        invoice: x.invoice ?? null,
+        origin: x.origin ?? null,
+        istrans: true,
+        status_nopack: true,
+        user_ref_nopack: userRef,
+        time_ref_nopack: now,
+      })),
+    };
+  });
+
+  req.app.get("io")?.emit("outbound:nopack_receive_confirmed", {
+    docs: result.outbounds,
+    pack_product: result.pack_product,
+    box: result.box,
+    user_ref: userRef,
+  });
+
+  res.json({
+    success: true,
+    message: "รับเอกสาร No Pack และสร้าง Batch Pack สำเร็จ",
+    data: result,
+  });
+});

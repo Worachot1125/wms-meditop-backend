@@ -398,6 +398,9 @@ model outbound {
   invoice                     String?
   in_process                  Boolean                   @default(false)
   istrans                     Boolean                   @default(false)
+  status_nopack               Boolean                   @default(false)
+  user_ref_nopack             String?
+  time_ref_nopack             DateTime?
   created_at                  DateTime                  @default(now())
   updated_at                  DateTime?
   deleted_at                  DateTime?

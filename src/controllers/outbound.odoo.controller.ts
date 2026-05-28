@@ -2112,6 +2112,17 @@ const getOdooOutboundsInProcessBase = async (
 
   const rawSearch = req.query.search;
   const search = typeof rawSearch === "string" ? rawSearch.trim() : "";
+  const rawIstrans = String(req.query.istrans ?? "false")
+    .trim()
+    .toLowerCase();
+
+  const istrans = rawIstrans === "true" || rawIstrans === "1";
+
+  const rawStatusNoPack = String(req.query.status_nopack ?? "false")
+    .trim()
+    .toLowerCase();
+
+  const statusNoPack = rawStatusNoPack === "true" || rawStatusNoPack === "1";
 
   const selectedDepartmentNames = parseDepartmentNames(req.query.department);
 
@@ -2273,6 +2284,14 @@ const getOdooOutboundsInProcessBase = async (
     },
   };
 
+  const istransWhere: Prisma.outboundWhereInput = {
+    istrans,
+  };
+
+  const statusNoPackWhere: Prisma.outboundWhereInput = istrans
+    ? { status_nopack: statusNoPack }
+    : {};
+
   const baseWhere: Prisma.outboundWhereInput = {
     AND: [
       {
@@ -2280,9 +2299,11 @@ const getOdooOutboundsInProcessBase = async (
         in_process: true,
         ...selectedDepartmentWhere,
       },
+      istransWhere,
+      statusNoPackWhere,
       packActionWhere,
       blockedLocationWhere,
-      notInPackProductWhere,
+      ...(istrans && statusNoPack ? [] : [notInPackProductWhere]),
     ],
   };
 
@@ -2456,6 +2477,10 @@ const getOdooOutboundsInProcessBase = async (
       has_rtc_bor_pack_action: hasRtcBor,
       rtc_bor_mode: hasRtcBor ? returnPackMode : null,
       rtc_no: hasRtcBor ? ob.no : null,
+      istrans: Boolean(ob.istrans),
+      status_nopack: Boolean(ob.status_nopack),
+      user_ref_nopack: ob.user_ref_nopack ?? null,
+      time_ref_nopack: ob.time_ref_nopack ?? null,
 
       batch: ob.batch_lock
         ? {
@@ -2487,6 +2512,8 @@ const getOdooOutboundsInProcessBase = async (
           ? selectedDepartmentNames.join(",")
           : null,
       mode,
+      istrans,
+      status_nopack: statusNoPack,
     },
   });
 };
@@ -6860,3 +6887,126 @@ export const applyAutoLocationPack = asyncHandler(
     });
   },
 );
+
+export const scanReversePackingDoc = asyncHandler(async (req, res) => {
+  const doc = String(req.body?.doc ?? "").trim();
+  const targetMode = String(req.body?.target_mode ?? "").trim();
+
+  const currentDocs = Array.isArray(req.body?.current_docs)
+    ? req.body.current_docs
+        .map((x: any) => String(x ?? "").trim())
+        .filter(Boolean)
+    : [];
+
+  if (!doc) throw badRequest("doc is required");
+
+  const currentIsTrans =
+    targetMode === "to_no_pack"
+      ? false
+      : targetMode === "to_pack"
+        ? true
+        : null;
+
+  if (currentIsTrans === null) {
+    throw badRequest("target_mode is invalid");
+  }
+
+  if (currentDocs.some((x: string) => x.toLowerCase() === doc.toLowerCase())) {
+    throw badRequest("เอกสารนี้ถูกสแกนแล้ว");
+  }
+
+  const outbound = await prisma.outbound.findFirst({
+    where: {
+      deleted_at: null,
+      istrans: currentIsTrans,
+      OR: [
+        { no: { equals: doc, mode: "insensitive" } },
+        { invoice: { equals: doc, mode: "insensitive" } },
+        { origin: { equals: doc, mode: "insensitive" } },
+      ],
+    },
+    select: {
+      id: true,
+      no: true,
+      invoice: true,
+      origin: true,
+      department: true,
+      istrans: true,
+    },
+  });
+
+  if (!outbound) {
+    throw badRequest(
+      targetMode === "to_no_pack"
+        ? "ไม่พบเอกสารรอ Packing ที่สามารถเปลี่ยนเป็นไม่ทำการ Packing ได้"
+        : "ไม่พบเอกสารไม่ทำการ Packing ที่สามารถ Reverse ได้",
+    );
+  }
+
+  return res.json({
+    success: true,
+    data: outbound,
+  });
+});
+
+export const confirmReversePackingDocs = asyncHandler(async (req, res) => {
+  const targetMode = String(req.body?.target_mode ?? "").trim();
+
+  const docs = Array.isArray(req.body?.docs)
+    ? req.body.docs.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+    : [];
+
+  if (docs.length === 0) throw badRequest("docs is required");
+
+  const currentIsTrans =
+    targetMode === "to_no_pack"
+      ? false
+      : targetMode === "to_pack"
+        ? true
+        : null;
+
+  const nextIsTrans =
+    targetMode === "to_no_pack"
+      ? true
+      : targetMode === "to_pack"
+        ? false
+        : null;
+
+  if (currentIsTrans === null || nextIsTrans === null) {
+    throw badRequest("target_mode is invalid");
+  }
+
+  const outbounds = await prisma.outbound.findMany({
+    where: {
+      deleted_at: null,
+      istrans: currentIsTrans,
+      no: { in: docs },
+    },
+    select: {
+      id: true,
+      no: true,
+    },
+  });
+
+  if (outbounds.length === 0) {
+    throw badRequest("ไม่พบเอกสารสำหรับ Reverse");
+  }
+
+  await prisma.outbound.updateMany({
+    where: {
+      id: { in: outbounds.map((x) => x.id) },
+      deleted_at: null,
+      istrans: currentIsTrans,
+    },
+    data: {
+      istrans: nextIsTrans,
+      updated_at: new Date(),
+    },
+  });
+
+  return res.json({
+    success: true,
+    message: "Reverse สำเร็จ",
+    data: outbounds,
+  });
+});
