@@ -2568,7 +2568,7 @@ export const listCombinedAdjustments = asyncHandler(
           .filter(Boolean)
       : [];
 
-    const allowedStatuses = ["pending", "completed"] as const;
+    const allowedStatuses = ["pending", "completed", "waiting"] as const;
 
     if (
       statuses.length > 0 &&
@@ -2576,7 +2576,7 @@ export const listCombinedAdjustments = asyncHandler(
         (s) => !allowedStatuses.includes(s as (typeof allowedStatuses)[number]),
       )
     ) {
-      throw badRequest("status ต้องเป็น pending หรือ completed");
+      throw badRequest("status ต้องเป็น pending, waiting หรือ completed");
     }
 
     const mode = String(req.query.level ?? req.query.mode ?? "")
@@ -2796,10 +2796,15 @@ export const listCombinedAdjustments = asyncHandler(
       return "";
     };
 
-    const getCombinedStatus = (row: any): "pending" | "completed" | "" => {
+    const getCombinedStatus = (
+      row: any,
+    ): "pending" | "waiting" | "completed" | "" => {
       if (row.source === "adjust") {
         const st = String(row.status ?? "").toLowerCase();
+
         if (st === "completed") return "completed";
+        if (st === "waiting") return "waiting";
+
         return "pending";
       }
 
@@ -2819,10 +2824,12 @@ export const listCombinedAdjustments = asyncHandler(
     const statusCounts = {
       manual: {
         pending: 0,
+        waiting: 0,
         completed: 0,
       },
       auto: {
         pending: 0,
+        waiting: 0,
         completed: 0,
       },
     };

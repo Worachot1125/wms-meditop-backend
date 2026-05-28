@@ -6,11 +6,7 @@ import type {
   DeductMergedItem,
   ReplaceMergedItem,
 } from "./outbound.type";
-import {
-  normalizeExpDate,
-  sameExpDate,
-  toDateOnlyKey,
-} from "./outbound.parse";
+import { normalizeExpDate, sameExpDate, toDateOnlyKey } from "./outbound.parse";
 
 export const BOR_SER_DEDUCT_TYPES = new Set(["GA", "BOS", "SV", "BOCR/DO"]);
 export const BOR_SER_REPLACE_TYPES = new Set(["EX", "BOA"]);
@@ -159,30 +155,50 @@ export async function decrementBorSerStocksForGaBosSv(
       no: string;
       location_id?: number | null;
       location?: string | null;
+      location_owner?: string | null;
+      location_owner_display?: string | null;
       location_dest_id?: number | null;
       location_dest?: string | null;
+      location_dest_owner?: string | null;
+      location_dest_owner_display?: string | null;
     };
     mergedItems: DeductMergedItem[];
   },
-): Promise<{ adjustmentStatus: "completed" | "waiting"; waitingReason?: string | null }> {
+): Promise<{
+  adjustmentStatus: "completed" | "waiting";
+  waitingReason?: string | null;
+}> {
   const { outType, transfer, mergedItems } = args;
-  const isBos = String(outType).toUpperCase() === "BOS";
 
   const target =
-    (await resolveBorSerTargetFromSource(tx, {
-      location: transfer.location ?? null,
-      location_id: transfer.location_id ?? null,
-    })) ??
-    (await resolveBorSerTargetFromDest(tx, {
-      location_dest: transfer.location_dest ?? null,
-      location_dest_id: transfer.location_dest_id ?? null,
-    }));
+    String(outType).toUpperCase() === "BOS"
+      ? ("BOR" as const)
+      : ((await resolveBorSerTargetFromSource(tx, {
+          location: transfer.location ?? null,
+          location_id: transfer.location_id ?? null,
+        })) ??
+        (await resolveBorSerTargetFromDest(tx, {
+          location_dest: transfer.location_dest ?? null,
+          location_dest_id: transfer.location_dest_id ?? null,
+        })));
 
   if (!target) {
-    throw badRequest(
-      `type (${outType}) ต้องมี BOR/SER ใน location หรือ location_dest (ตอนนี้ location=${transfer.location ?? "-"} location_id=${transfer.location_id ?? "null"} location_dest=${transfer.location_dest ?? "-"} location_dest_id=${transfer.location_dest_id ?? "null"})`,
-    );
+    return {
+      adjustmentStatus: "waiting",
+      waitingReason: `type (${outType}) ต้องมี BOR/SER ใน location หรือ location_dest (ตอนนี้ location=${transfer.location ?? "-"} location_id=${transfer.location_id ?? "null"} location_dest=${transfer.location_dest ?? "-"} location_dest_id=${transfer.location_dest_id ?? "null"})`,
+    };
   }
+
+  const targetLocationName =
+    String(transfer.location_owner ?? "").trim() || null;
+
+  if (!targetLocationName) {
+    return {
+      adjustmentStatus: "waiting",
+      waitingReason: `ไม่พบ location_owner สำหรับตัด ${target === "SER" ? "ser_stock" : "bor_stock"} (no=${transfer.no})`,
+    };
+  }
+
 
   for (const it of mergedItems) {
     if (!it.product_id) continue;
@@ -201,7 +217,13 @@ export async function decrementBorSerStocksForGaBosSv(
       product_id: it.product_id,
       lot_id: it.lot_id ?? null,
       lot_serial: it.lot_serial ?? null,
+      location_name: targetLocationName,
     });
+
+
+    if (effectiveExp) {
+      whereBase.expiration_date = effectiveExp;
+    }
 
     const model = target === "SER" ? tx.ser_stock : tx.bor_stock;
     const stockName = target === "SER" ? "ser_stock" : "bor_stock";
@@ -218,45 +240,65 @@ export async function decrementBorSerStocksForGaBosSv(
       orderBy: { id: "desc" },
     });
 
+    if (rows.length === 0) {
+      const debugRows = await (model as any).findMany({
+        where: {
+          product_id: it.product_id,
+        },
+        select: {
+          id: true,
+          product_id: true,
+          lot_id: true,
+          lot_name: true,
+          location_name: true,
+          expiration_date: true,
+          quantity: true,
+          active: true,
+          deleted_at: true,
+        },
+        orderBy: { id: "desc" },
+        take: 20,
+      });
+
+    }
+
     const row =
       rows.find((r: any) => sameExpDate(r.expiration_date, effectiveExp)) ??
       null;
 
     if (!row) {
-      const reason = `ไม่พบ ${stockName} สำหรับตัด (product_id=${it.product_id}, lot_id=${it.lot_id ?? "null"}, lot_serial=${it.lot_serial ?? "null"}, exp=${toDateOnlyKey(effectiveExp) ?? "null"})`;
-
-      if (isBos) {
-        return {
-          adjustmentStatus: "waiting",
-          waitingReason: reason,
-        };
-      }
-
-      throw badRequest(reason);
+      return {
+        adjustmentStatus: "waiting",
+        waitingReason: `ไม่พบ ${stockName} สำหรับตัด (location_name=${targetLocationName}, product_id=${it.product_id}, lot_id=${it.lot_id ?? "null"}, lot_serial=${it.lot_serial ?? "null"}, exp=${toDateOnlyKey(effectiveExp) ?? "null"})`,
+      };
     }
 
     const current = Number(row.quantity ?? 0);
+
     if (current < qty) {
-      const reason = `${stockName} ไม่พอ (need=${qty}, have=${current}) product_id=${it.product_id} lot_id=${it.lot_id ?? "null"} lot_serial=${it.lot_serial ?? "null"} exp=${toDateOnlyKey(effectiveExp) ?? "null"}`;
-
-      if (isBos) {
-        return {
-          adjustmentStatus: "waiting",
-          waitingReason: reason,
-        };
-      }
-
-      throw badRequest(reason);
+      return {
+        adjustmentStatus: "waiting",
+        waitingReason: `${stockName} ไม่พอ (need=${qty}, have=${current}) product_id=${it.product_id} lot_id=${it.lot_id ?? "null"} lot_serial=${it.lot_serial ?? "null"} exp=${toDateOnlyKey(effectiveExp) ?? "null"}`,
+      };
     }
 
     const remain = current - qty;
+
     if (remain <= 0) {
-      await (model as any).delete({ where: { id: row.id } });
+      await (model as any).delete({
+        where: {
+          id: row.id,
+        },
+      });
     } else {
       await (model as any).update({
-        where: { id: row.id },
+        where: {
+          id: row.id,
+        },
         data: {
-          quantity: { decrement: new Prisma.Decimal(qty) },
+          quantity: {
+            decrement: new Prisma.Decimal(qty),
+          },
           updated_at: new Date(),
         },
       });
@@ -323,6 +365,9 @@ export async function replaceBorSerStocksForExBoa(
       lot_id: it.lot_id ?? null,
       lot_serial: it.lot_serial ?? null,
     });
+    if (effectiveExp) {
+      whereBase.expiration_date = effectiveExp;
+    }
 
     const model = target === "SER" ? tx.ser_stock : tx.bor_stock;
 
@@ -442,8 +487,7 @@ export async function decrementSourceBorSerStockByLocationId(
   });
 
   const row =
-    rows.find((x: any) => sameExpDate(x.expiration_date, effectiveExp)) ??
-    null;
+    rows.find((x: any) => sameExpDate(x.expiration_date, effectiveExp)) ?? null;
 
   if (!row) {
     throw badRequest(
@@ -536,8 +580,7 @@ export async function incrementDestBorSerStockByLocationId(
   });
 
   const row =
-    rows.find((x: any) => sameExpDate(x.expiration_date, effectiveExp)) ??
-    null;
+    rows.find((x: any) => sameExpDate(x.expiration_date, effectiveExp)) ?? null;
 
   if (row?.id) {
     await (model as any).update({

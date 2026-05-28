@@ -1,6 +1,57 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 
+async function resolveAdjustmentItemExp(
+  tx: Prisma.TransactionClient,
+  item: {
+    product_id: number | null;
+    lot_id: number | null;
+    lot_serial: string | null;
+    exp: Date | null;
+  },
+) {
+  if (item.exp) return item.exp;
+  if (typeof item.product_id !== "number") return null;
+
+  if (typeof item.lot_id === "number") {
+    const row = await tx.wms_mdt_goods.findFirst({
+      where: {
+        product_id: item.product_id,
+        lot_id: item.lot_id,
+      },
+      select: {
+        expiration_date: true,
+      },
+      orderBy: {
+        id: "desc",
+      },
+    });
+
+    if (row?.expiration_date) return row.expiration_date;
+  }
+
+  const lotSerial = String(item.lot_serial ?? "").trim();
+
+  if (lotSerial) {
+    const row = await tx.wms_mdt_goods.findFirst({
+      where: {
+        product_id: item.product_id,
+        lot_name: lotSerial,
+      },
+      select: {
+        expiration_date: true,
+      },
+      orderBy: {
+        id: "desc",
+      },
+    });
+
+    if (row?.expiration_date) return row.expiration_date;
+  }
+
+  return null;
+}
+
 export async function createCompletedAutoAdjustmentFromTransfer(
   tx: Prisma.TransactionClient,
   input: {
@@ -17,6 +68,8 @@ export async function createCompletedAutoAdjustmentFromTransfer(
     department_id?: string | null;
     department?: string | null;
     reference?: string | null;
+    status?: "completed" | "waiting";
+    waiting_reason?: string | null;
     origin?: string | null;
     type: string;
     items: Array<{
@@ -54,7 +107,7 @@ export async function createCompletedAutoAdjustmentFromTransfer(
         origin: input.origin ?? null,
         level: "post-process",
         type: input.type,
-        status: "completed",
+        status: input.status ?? "completed",
         is_system_generated: true,
         date: new Date(),
         updated_at: new Date(),
@@ -87,7 +140,7 @@ export async function createCompletedAutoAdjustmentFromTransfer(
         origin: input.origin ?? null,
         level: "post-process",
         type: input.type,
-        status: "completed",
+        status: input.status ?? "completed",
         is_system_generated: true,
         date: new Date(),
       },
@@ -98,34 +151,48 @@ export async function createCompletedAutoAdjustmentFromTransfer(
   }
 
   if (input.items.length > 0) {
+    const itemRows = await Promise.all(
+      input.items.map(async (item) => {
+        const resolvedExp = await resolveAdjustmentItemExp(tx, {
+          product_id: item.product_id,
+          lot_id: item.lot_id,
+          lot_serial: item.lot_serial,
+          exp: item.exp ?? null,
+        });
+
+        return {
+          adjustment_id: adjustmentId,
+          sequence: item.sequence,
+          product_id: item.product_id,
+          code: item.code,
+          name: item.name ?? "",
+          unit: item.unit ?? "",
+          location_id: input.location_id ?? null,
+          location: input.location_owner ?? input.location ?? null,
+
+          location_owner: input.location_owner ?? null,
+          location_owner_display: input.location_owner_display ?? null,
+
+          location_dest_id: input.location_dest_id ?? null,
+          location_dest: input.location_dest ?? null,
+
+          location_dest_owner: input.location_dest_owner ?? null,
+          location_dest_owner_display:
+            input.location_dest_owner_display ?? null,
+
+          tracking: item.tracking ?? null,
+          lot_id: item.lot_id ?? null,
+          lot_serial: item.lot_serial ?? null,
+          qty: item.qty,
+          exp: resolvedExp,
+          barcode_payload: item.barcode_payload ?? null,
+          qty_pick: item.qty,
+        };
+      }),
+    );
+
     await tx.adjustment_item.createMany({
-      data: input.items.map((item) => ({
-        adjustment_id: adjustmentId,
-        sequence: item.sequence,
-        product_id: item.product_id,
-        code: item.code,
-        name: item.name ?? "",
-        unit: item.unit ?? "",
-        location_id: input.location_id ?? null,
-        location: input.location_owner ?? input.location ?? null,
-
-        location_owner: input.location_owner ?? null,
-        location_owner_display: input.location_owner_display ?? null,
-
-        location_dest_id: input.location_dest_id ?? null,
-        location_dest: input.location_dest ?? null,
-
-        location_dest_owner: input.location_dest_owner ?? null,
-        location_dest_owner_display: input.location_dest_owner_display ?? null,
-
-        tracking: item.tracking ?? null,
-        lot_id: item.lot_id ?? null,
-        lot_serial: item.lot_serial ?? null,
-        qty: item.qty,
-        exp: item.exp ?? null,
-        barcode_payload: item.barcode_payload ?? null,
-        qty_pick: item.qty,
-      })),
+      data: itemRows,
     });
   }
 }

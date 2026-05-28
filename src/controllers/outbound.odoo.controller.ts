@@ -1020,30 +1020,37 @@ export const receiveOutboundFromOdoo = asyncHandler(
             });
           }
 
-          if (BOR_SER_DEDUCT_TYPES.has(outType)) {
-            await decrementBorSerStocksForGaBosSv(tx, {
-              outType,
-              transfer: {
-                no,
-                location_id:
-                  typeof location_id === "number" ? location_id : null,
-                location: typeof location === "string" ? location : null,
-                location_dest_id:
-                  typeof location_dest_id === "number"
-                    ? location_dest_id
-                    : null,
-                location_dest:
-                  typeof location_dest === "string" ? location_dest : null,
-              },
-              mergedItems: mergedItems.map((x: any) => ({
-                product_id: x.product_id,
-                lot_id: x.lot_id,
-                lot_serial: x.lot_serial,
-                qty: x.qty,
-                exp: x.exp ?? null,
-              })),
-            });
-          }
+let borSerAdjustResult:
+  | {
+      adjustmentStatus: "completed" | "waiting";
+      waitingReason?: string | null;
+    }
+  | null = null;
+
+if (BOR_SER_DEDUCT_TYPES.has(outType)) {
+  borSerAdjustResult = await decrementBorSerStocksForGaBosSv(tx, {
+    outType,
+    transfer: {
+      no,
+      location_id:
+        typeof location_id === "number" ? location_id : null,
+      location: typeof location === "string" ? location : null,
+      location_dest_id:
+        typeof location_dest_id === "number"
+          ? location_dest_id
+          : null,
+      location_dest:
+        typeof location_dest === "string" ? location_dest : null,
+    },
+    mergedItems: mergedItems.map((x: any) => ({
+      product_id: x.product_id,
+      lot_id: x.lot_id,
+      lot_serial: x.lot_serial,
+      qty: x.qty,
+      exp: x.exp ?? null,
+    })),
+  });
+}
 
           if (BOR_SER_REPLACE_TYPES.has(outType)) {
             await replaceBorSerStocksForExBoa(tx, {
@@ -1083,45 +1090,57 @@ export const receiveOutboundFromOdoo = asyncHandler(
           }
 
           // ✅ สร้าง completed adjust auto สำหรับ SV / GA / BOS
-          if (["SV", "GA", "BOS"].includes(outType)) {
-            await createCompletedAutoAdjustmentFromTransfer(tx, {
-              no,
-              picking_id: typeof picking_id === "number" ? picking_id : null,
-              location_id: typeof location_id === "number" ? location_id : null,
-              location: typeof location === "string" ? location : null,
-              location_dest_id:
-                typeof location_dest_id === "number" ? location_dest_id : null,
-              location_dest:
-                typeof location_dest === "string" ? location_dest : null,
-              location_owner: normalizeOwnerText(location_owner),
-              location_owner_display: normalizeOwnerText(
-                location_owner_display,
-              ),
-              location_dest_owner: normalizeOwnerText(location_dest_owner),
-              location_dest_owner_display: normalizeOwnerText(
-                location_dest_owner_display,
-              ),
-              department_id:
-                department_id != null ? String(department_id) : null,
-              department: department != null ? String(department) : null,
-              reference: convertedReference,
-              origin: convertedOrigin,
-              type: outType,
-              items: mergedItems.map((x: any, idx: number) => ({
-                sequence: idx + 1,
-                product_id: x.product_id,
-                code: x.code ?? null,
-                name: x.name ?? null,
-                unit: x.unit ?? null,
-                tracking: x.tracking ?? null,
-                lot_id: x.lot_id,
-                lot_serial: x.lot_serial,
-                qty: x.qty,
-                exp: x.exp ?? null,
-                barcode_payload: null,
-              })),
-            });
-          }
+if (["SV", "GA", "BOS"].includes(outType)) {
+  const adjustmentStatus =
+    borSerAdjustResult?.adjustmentStatus ?? "completed";
+
+  const waitingReason =
+    borSerAdjustResult?.waitingReason ?? null;
+
+  await createCompletedAutoAdjustmentFromTransfer(tx, {
+    no,
+    picking_id: typeof picking_id === "number" ? picking_id : null,
+    location_id: typeof location_id === "number" ? location_id : null,
+    location: typeof location === "string" ? location : null,
+    location_dest_id:
+      typeof location_dest_id === "number"
+        ? location_dest_id
+        : null,
+    location_dest:
+      typeof location_dest === "string" ? location_dest : null,
+    location_owner: normalizeOwnerText(location_owner),
+    location_owner_display: normalizeOwnerText(
+      location_owner_display,
+    ),
+    location_dest_owner: normalizeOwnerText(location_dest_owner),
+    location_dest_owner_display: normalizeOwnerText(
+      location_dest_owner_display,
+    ),
+    department_id:
+      department_id != null ? String(department_id) : null,
+    department: department != null ? String(department) : null,
+    reference: convertedReference,
+    origin: convertedOrigin,
+    type: outType,
+
+    status: adjustmentStatus,
+    waiting_reason: waitingReason,
+
+    items: mergedItems.map((x: any, idx: number) => ({
+      sequence: idx + 1,
+      product_id: x.product_id,
+      code: x.code ?? null,
+      name: x.name ?? null,
+      unit: x.unit ?? null,
+      tracking: x.tracking ?? null,
+      lot_id: x.lot_id,
+      lot_serial: x.lot_serial,
+      qty: x.qty,
+      exp: x.exp ?? null,
+      barcode_payload: null,
+    })),
+  });
+}
 
           if (autoProcess) {
             const now = new Date();

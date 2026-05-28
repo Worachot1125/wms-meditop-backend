@@ -22,6 +22,7 @@ import {
 } from "../utils/helper_scan/barcode";
 
 import { sendQueuedOutboundLotAdjustmentsToOdoo } from "../utils/helper_scan/change_lot";
+import { decrementBorSerStocksForGaBosSv } from "../utils/outbound/outbound.bor-ser-stock";
 
 /**
  * =========================
@@ -1173,23 +1174,6 @@ export const scanOutboundPickNcr = asyncHandler(
       if (!matchedStock) continue;
 
       if (!lotMatched && !loc.ncr_check) {
-        console.log("[NCR scan match debug]", {
-          item_id: item.id,
-          product_id: item.product_id,
-          item_lot: item.lot_serial,
-          parsed_lot: parsed.lot_serial,
-          parsed_exp: parsed.exp,
-          parsed_exp_text: parsed.exp_text,
-          lotMatched,
-          matchedStock: matchedStock
-            ? {
-                id: matchedStock.id,
-                quantity: matchedStock.quantity,
-              }
-            : null,
-          location_id: loc.id,
-          location_name: loc.full_name,
-        });
         continue;
       }
 
@@ -3175,6 +3159,127 @@ async function resolveBorSerVirtualLocation(
   };
 }
 
+const retryWaitingBosAdjustments = async (tx: Prisma.TransactionClient) => {
+  const waitingAdjustments = await tx.adjustment.findMany({
+    where: {
+      deleted_at: null,
+      is_system_generated: true,
+      type: {
+        equals: "BOS",
+        mode: "insensitive",
+      },
+      status: "waiting",
+    },
+    include: {
+      items: {
+        where: {
+          deleted_at: null,
+        },
+        orderBy: [{ sequence: "asc" }, { id: "asc" }],
+      },
+    },
+    orderBy: [{ created_at: "asc" }, { id: "asc" }],
+  });
+
+  let completed = 0;
+  let stillWaiting = 0;
+
+  for (const adj of waitingAdjustments as any[]) {
+    const firstItem = (adj.items ?? [])[0];
+
+    const result = await decrementBorSerStocksForGaBosSv(tx, {
+      outType: "BOS",
+      transfer: {
+        no: adj.no ?? "",
+        location_id: firstItem?.location_id ?? null,
+
+        // ✅ ใช้ type BOS บังคับให้รู้ว่าเป็น BOR source
+        location: "BOR",
+
+        // ✅ อันนี้ใช้ match bor_stock.location_name
+        location_owner:
+          firstItem?.location_owner ?? firstItem?.location ?? null,
+        location_owner_display: firstItem?.location_owner_display ?? null,
+
+        location_dest_id: firstItem?.location_dest_id ?? null,
+        location_dest: firstItem?.location_dest ?? null,
+        location_dest_owner: firstItem?.location_dest_owner ?? null,
+        location_dest_owner_display:
+          firstItem?.location_dest_owner_display ?? null,
+      },
+      mergedItems: (adj.items ?? []).map((item: any) => ({
+        product_id: item.product_id,
+        lot_id: item.lot_id,
+        lot_serial: item.lot_serial,
+        qty: item.qty,
+        exp: item.exp ?? null,
+      })),
+    });
+
+    if (result.adjustmentStatus === "completed") {
+      await tx.adjustment.update({
+        where: { id: adj.id },
+        data: {
+          status: "completed",
+          description: null,
+          updated_at: new Date(),
+        } as any,
+      });
+
+      completed++;
+    } else {
+      await tx.adjustment.update({
+        where: { id: adj.id },
+        data: {
+          status: "waiting",
+          description: result.waitingReason ?? adj.description ?? null,
+          updated_at: new Date(),
+        } as any,
+      });
+
+      stillWaiting++;
+    }
+  }
+
+  return {
+    checked: waitingAdjustments.length,
+    completed,
+    stillWaiting,
+  };
+};
+
+const resolveBorSerExpForItem = async (
+  tx: Prisma.TransactionClient,
+  item: {
+    product_id: number | null;
+    lot_id: number | null;
+    lot_serial: string | null;
+  },
+  fallbackExp: Date | null,
+) => {
+  if (fallbackExp) return fallbackExp;
+  if (!item.product_id) return null;
+
+  const row = await tx.wms_mdt_goods.findFirst({
+    where: {
+      product_id: item.product_id,
+      ...(item.lot_id != null
+        ? { lot_id: item.lot_id }
+        : item.lot_serial
+          ? { lot_name: item.lot_serial }
+          : {}),
+    },
+    select: {
+      expiration_date: true,
+    },
+    orderBy: {
+      id: "desc",
+    },
+  });
+
+  return row?.expiration_date ?? null;
+};
+
 export const confirmOutboundPickToStock = asyncHandler(
   async (req: Request<{ no: string }>, res: Response) => {
     const no = decodeURIComponent(String(req.params.no || "")).trim();
@@ -3190,7 +3295,8 @@ export const confirmOutboundPickToStock = asyncHandler(
     const istrans = (req.body as any)?.istrans === true;
 
     const skipStockDecrement =
-      istrans || (req.body as any)?.skip_stock_decrement === true ||
+      istrans ||
+      (req.body as any)?.skip_stock_decrement === true ||
       String((req.body as any)?.source ?? "").trim() === "AUTO_LOCATION_PACK";
 
     const outbound = await prisma.outbound.findFirst({
@@ -3413,6 +3519,16 @@ export const confirmOutboundPickToStock = asyncHandler(
           remainToCut = 0;
         }
 
+        const borSerExpirationDate = await resolveBorSerExpForItem(
+          tx,
+          {
+            product_id: item.product_id,
+            lot_id: item.lot_id,
+            lot_serial: item.lot_serial,
+          },
+          firstExpirationDate,
+        );
+
         if (shouldMoveToBorStock && qtyToConfirm > 0) {
           const existingBorStock = await tx.bor_stock.findFirst({
             where: {
@@ -3421,6 +3537,7 @@ export const confirmOutboundPickToStock = asyncHandler(
               product_id: item.product_id,
               lot_id: item.lot_id,
               lot_name: item.lot_serial,
+              expiration_date: borSerExpirationDate,
               location_name: borSerLocationName,
             },
             orderBy: {
@@ -3456,7 +3573,7 @@ export const confirmOutboundPickToStock = asyncHandler(
                 location_name: borSerLocationName,
                 lot_id: item.lot_id,
                 lot_name: item.lot_serial,
-                expiration_date: firstExpirationDate,
+                expiration_date: borSerExpirationDate,
                 department_id: outbound.department_id,
                 department_name: outbound.department,
                 source: "OUTBOUND_BO",
@@ -3478,6 +3595,7 @@ export const confirmOutboundPickToStock = asyncHandler(
               product_id: item.product_id,
               lot_id: item.lot_id,
               lot_name: item.lot_serial,
+              expiration_date: borSerExpirationDate,
               location_name: borSerLocationName,
             },
             orderBy: {
@@ -3572,12 +3690,15 @@ export const confirmOutboundPickToStock = asyncHandler(
         } as any,
       });
 
+      const bosRetryResult = await retryWaitingBosAdjustments(tx);
+
       return {
         updatedItems,
         stockUpdated,
         borStockUpdated,
         serStockUpdated,
         outboundCompleted,
+        bosRetryResult,
       };
     });
 
