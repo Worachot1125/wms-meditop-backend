@@ -1622,6 +1622,273 @@ export const getBorrowStockById = asyncHandler(
   },
 );
 
+export const getBorrowStockItemsPaginated = asyncHandler(
+  async (req: Request, res: Response) => {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(Math.max(1, Number(req.query.limit) || 20), 200);
+    const skip = (page - 1) * limit;
+
+    const search = String(req.query.search || "").trim();
+    const columns = String(req.query.columns || "")
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean);
+
+    const dateFrom = String(req.query.dateFrom || "").trim();
+    const dateTo = String(req.query.dateTo || "").trim();
+
+    const sortByRaw = String(req.query.sortBy || "created_at").trim();
+    const sortDirRaw = String(req.query.sortDir || "desc").trim();
+    const sortDir: Prisma.SortOrder = sortDirRaw === "asc" ? "asc" : "desc";
+
+    const borrowStockId = req.query.borrow_stock_id
+      ? Number(req.query.borrow_stock_id)
+      : undefined;
+
+    const searchColumns = columns.length
+      ? columns
+      : [
+          "created_at",
+          "code",
+          "name",
+          "lot_serial",
+          "location_name",
+          "system_qty",
+          "executed_qty",
+          "user_ref",
+          "department_name",
+        ];
+
+    const getDateStart = (value: string) =>
+      new Date(`${value}T00:00:00.000+07:00`);
+    const getDateEnd = (value: string) =>
+      new Date(`${value}T23:59:59.999+07:00`);
+
+    const searchOr: Prisma.borrow_stock_itemWhereInput[] = [];
+
+    if (search) {
+      if (searchColumns.includes("code")) {
+        searchOr.push({
+          code: {
+            contains: search,
+            mode: Prisma.QueryMode.insensitive,
+          },
+        });
+      }
+
+      if (searchColumns.includes("name")) {
+        searchOr.push({
+          name: {
+            contains: search,
+            mode: Prisma.QueryMode.insensitive,
+          },
+        });
+      }
+
+      if (searchColumns.includes("lot_serial")) {
+        searchOr.push({
+          lot_serial: {
+            contains: search,
+            mode: Prisma.QueryMode.insensitive,
+          },
+        });
+      }
+
+      if (searchColumns.includes("location_name")) {
+        searchOr.push({
+          borrow_stock: {
+            location_name: {
+              contains: search,
+              mode: Prisma.QueryMode.insensitive,
+            },
+          },
+        });
+      }
+
+      if (searchColumns.includes("user_ref")) {
+        searchOr.push({
+          borrow_stock: {
+            user_ref: {
+              contains: search,
+              mode: Prisma.QueryMode.insensitive,
+            },
+          },
+        });
+      }
+
+      if (searchColumns.includes("department_name")) {
+        searchOr.push({
+          borrow_stock: {
+            borrowStockDepartments: {
+              some: {
+                department: {
+                  OR: [
+                    {
+                      short_name: {
+                        contains: search,
+                        mode: Prisma.QueryMode.insensitive,
+                      },
+                    },
+                    {
+                      full_name: {
+                        contains: search,
+                        mode: Prisma.QueryMode.insensitive,
+                      },
+                    },
+                    {
+                      department_name: {
+                        contains: search,
+                        mode: Prisma.QueryMode.insensitive,
+                      },
+                    },
+                    {
+                      department_code: {
+                        contains: search,
+                        mode: Prisma.QueryMode.insensitive,
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        });
+      }
+
+      const searchNumber = Number(search);
+
+      if (Number.isFinite(searchNumber)) {
+        if (searchColumns.includes("system_qty")) {
+          searchOr.push({
+            system_qty: searchNumber,
+          });
+        }
+
+        if (searchColumns.includes("executed_qty")) {
+          searchOr.push({
+            executed_qty: searchNumber,
+          });
+        }
+      }
+    }
+
+    const where: Prisma.borrow_stock_itemWhereInput = {
+      deleted_at: null,
+
+      borrow_stock: {
+        status: "completed",
+      },
+
+      ...(borrowStockId ? { borrow_stock_id: borrowStockId } : {}),
+
+      ...(dateFrom || dateTo
+        ? {
+            created_at: {
+              ...(dateFrom ? { gte: getDateStart(dateFrom) } : {}),
+              ...(dateTo ? { lte: getDateEnd(dateTo) } : {}),
+            },
+          }
+        : {}),
+
+      ...(search && searchOr.length ? { OR: searchOr } : {}),
+    };
+
+    const orderBy: Prisma.borrow_stock_itemOrderByWithRelationInput =
+      sortByRaw === "location_name"
+        ? {
+            borrow_stock: {
+              location_name: sortDir,
+            },
+          }
+        : sortByRaw === "user_ref"
+          ? {
+              borrow_stock: {
+                user_ref: sortDir,
+              },
+            }
+          : sortByRaw === "department_name"
+            ? {
+                borrow_stock: {
+                  department: {
+                    short_name: sortDir,
+                  },
+                },
+              }
+            : sortByRaw === "code" ||
+                sortByRaw === "name" ||
+                sortByRaw === "lot_serial" ||
+                sortByRaw === "system_qty" ||
+                sortByRaw === "executed_qty" ||
+                sortByRaw === "created_at"
+              ? {
+                  [sortByRaw]: sortDir,
+                }
+              : {
+                  created_at: "desc",
+                };
+
+    const [rows, total] = await Promise.all([
+      prisma.borrow_stock_item.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy,
+        include: {
+          borrow_stock: {
+            select: {
+              id: true,
+              location_name: true,
+              movement_type: true,
+              status: true,
+              user_ref: true,
+              remark: true,
+              created_at: true,
+              department: {
+                select: {
+                  id: true,
+                  full_name: true,
+                  short_name: true,
+                  department_name: true,
+                  department_code: true,
+                },
+              },
+              borrowStockDepartments: {
+                select: {
+                  department: {
+                    select: {
+                      id: true,
+                      full_name: true,
+                      short_name: true,
+                      department_name: true,
+                      department_code: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      }),
+      prisma.borrow_stock_item.count({ where }),
+    ]);
+
+    return res.json({
+      data: rows,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        sortBy: sortByRaw,
+        sortDir,
+        dateFrom,
+        dateTo,
+        columns: searchColumns,
+      },
+    });
+  },
+);
+
 export const updateBorrowStock = asyncHandler(
   async (
     req: Request<
@@ -2245,19 +2512,15 @@ export const confirmBorrowStocksBulk = asyncHandler(
   },
 );
 
-
 export const runBorrowStockDailySnapshot = asyncHandler(
   async (req: Request, res: Response) => {
     const date =
-      typeof req.query.date === "string"
-        ? req.query.date.trim()
-        : undefined;
+      typeof req.query.date === "string" ? req.query.date.trim() : undefined;
 
-    const result =
-      await borrowStockDailyService.createDailySnapshot(
-        "manual-api",
-        date,
-      );
+    const result = await borrowStockDailyService.createDailySnapshot(
+      "manual-api",
+      date,
+    );
 
     return res.json(result);
   },

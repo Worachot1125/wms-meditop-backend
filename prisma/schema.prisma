@@ -491,6 +491,13 @@ model pack_product_box_item {
   @@map("pack_product_box_items")
 }
 
+model transaction_packing {
+  id                  Int       @id @default(autoincrement())
+  ignore_max_box      Boolean   @default(false)
+
+  @@map("transaction_packing")
+}
+
 model goods_out_item {
   sequence           Int?
   product_id         Int?

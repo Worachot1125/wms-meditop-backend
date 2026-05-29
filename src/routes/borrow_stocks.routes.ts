@@ -19,6 +19,7 @@ import {
   getBorStockById,
   getBorrowStocksByLocationName,
   runBorrowStockDailySnapshot,
+  getBorrowStockItemsPaginated,
 } from "../controllers/borrow_stock.controller";
 
 const router = Router();
@@ -27,6 +28,7 @@ router.post("/sync", runBorrowStockDailySnapshot);
 router.get("/getAll", getBorrowStocks);
 router.get("/bor/get", getAllBorStocks);
 router.get("/get", auth, attachDepartmentAccess, getBorrowStocksPaginated);
+router.get("/get/items", getBorrowStockItemsPaginated);
 router.get("/daily", getBorrowStockDailyPaginated);
 router.get("/bor/get", getBorStocksPaginated);
 router.get(

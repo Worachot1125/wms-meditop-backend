@@ -1994,14 +1994,21 @@ export const getPackProductById = asyncHandler(
       throw notFound("ไม่พบ pack_product");
     }
 
+    const transactionPacking = await prisma.transaction_packing.findFirst({
+      orderBy: {
+        id: "desc",
+      },
+      select: {
+        id: true,
+        ignore_max_box: true,
+      },
+    });
+
     const adjusted = applyReturnToPackProduct(row as any);
 
-    // ✅ คืนค่า pack จาก DB กลับเข้าไป หลัง applyReturnToPackProduct ลด qty แล้ว
     const originalPackByItemId = new Map<number, number>();
 
-    for (const po of (row as any).pack_outbounds ??
-      (row as any).outbounds ??
-      []) {
+    for (const po of (row as any).pack_outbounds ?? (row as any).outbounds ?? []) {
       const outbound = po?.outbound ?? po;
       for (const item of outbound?.goods_outs ?? outbound?.items ?? []) {
         originalPackByItemId.set(Number(item.id), Number(item.pack ?? 0));
@@ -2024,7 +2031,15 @@ export const getPackProductById = asyncHandler(
 
     res.set("Cache-Control", "no-store");
 
-    return res.json({ data });
+    return res.json({
+      data: {
+        ...data,
+        transaction_packing: transactionPacking ?? {
+          id: null,
+          ignore_max_box: false,
+        },
+      },
+    });
   },
 );
 
@@ -4118,32 +4133,44 @@ export const finalizePackProduct = asyncHandler(
         : String(req.body.user_ref).trim() || null;
     const force = Boolean(req.body?.force);
 
-    const packProduct = await prisma.pack_product.findUnique({
-      where: { id: packProductId },
-      include: {
-        outbounds: {
-          include: {
-            outbound: {
-              include: {
-                goods_outs: {
-                  where: { deleted_at: null },
-                  orderBy: [{ sequence: "asc" }, { id: "asc" }],
+    const [packProduct, transactionPacking] = await Promise.all([
+      prisma.pack_product.findUnique({
+        where: { id: packProductId },
+        include: {
+          outbounds: {
+            include: {
+              outbound: {
+                include: {
+                  goods_outs: {
+                    where: { deleted_at: null },
+                    orderBy: [{ sequence: "asc" }, { id: "asc" }],
+                  },
                 },
               },
             },
           },
-        },
-        boxes: {
-          where: { deleted_at: null },
-          include: {
-            items: {
-              where: { deleted_at: null },
+          boxes: {
+            where: { deleted_at: null },
+            include: {
+              items: {
+                where: { deleted_at: null },
+              },
             },
+            orderBy: [{ box_no: "asc" }, { id: "asc" }],
           },
-          orderBy: [{ box_no: "asc" }, { id: "asc" }],
         },
-      },
-    });
+      }),
+
+      prisma.transaction_packing.findFirst({
+        orderBy: { id: "desc" },
+        select: {
+          id: true,
+          ignore_max_box: true,
+        },
+      }),
+    ]);
+
+    const ignoreMaxBox = transactionPacking?.ignore_max_box === true;
 
     if (!packProduct || packProduct.deleted_at) {
       throw notFound("ไม่พบ pack_product");
@@ -4157,6 +4184,7 @@ export const finalizePackProduct = asyncHandler(
           name: packProduct.name,
           status: packProduct.status,
           already_completed: true,
+          ignore_max_box: ignoreMaxBox,
         },
       });
     }
@@ -4164,6 +4192,7 @@ export const finalizePackProduct = asyncHandler(
     const adjustedPackProduct = applyReturnToPackProduct(packProduct as any);
     const maxBox = Number(packProduct.max_box ?? 0);
     const boxes = Array.isArray(packProduct.boxes) ? packProduct.boxes : [];
+
     const uniqueBoxNos = (
       Array.from(
         new Set(
@@ -4193,6 +4222,8 @@ export const finalizePackProduct = asyncHandler(
         lot_serial: item.lot_serial ?? null,
         qty: Number(item.qty ?? 0),
         pack: Number(item.pack ?? 0),
+        pd: Number(item.pd ?? 0),
+        return: Number(item.return ?? 0),
         status: item.status ?? null,
       })),
     );
@@ -4216,18 +4247,20 @@ export const finalizePackProduct = asyncHandler(
     });
 
     if (!force) {
-      if (openBoxes.length > 0) {
-        throw badRequest(
-          `ยังมีกล่องที่เปิดอยู่ ${openBoxes
-            .map((b: any) => b.box_label || `${b.box_no}/${b.box_max}`)
-            .join(", ")}`,
-        );
-      }
+      if (!ignoreMaxBox) {
+        if (openBoxes.length > 0) {
+          throw badRequest(
+            `ยังมีกล่องที่เปิดอยู่ ${openBoxes
+              .map((b: any) => b.box_label || `${b.box_no}/${b.box_max}`)
+              .join(", ")}`,
+          );
+        }
 
-      if (maxBox > 0 && missingBoxNos.length > 0) {
-        throw badRequest(
-          `จำนวนกล่องยังไม่ครบตาม max_box (${maxBox}) ขาดกล่อง: ${missingBoxNos.join(", ")}`,
-        );
+        if (maxBox > 0 && missingBoxNos.length > 0) {
+          throw badRequest(
+            `จำนวนกล่องยังไม่ครบตาม max_box (${maxBox}) ขาดกล่อง: ${missingBoxNos.join(", ")}`,
+          );
+        }
       }
 
       if (incompleteItems.length > 0) {
@@ -4309,6 +4342,7 @@ export const finalizePackProduct = asyncHandler(
       confirmed_by: userRef,
       status: result.status,
       message: "Delivery confirmed",
+      ignore_max_box: ignoreMaxBox,
     };
 
     try {
@@ -4317,7 +4351,6 @@ export const finalizePackProduct = asyncHandler(
         data: result,
       });
 
-      // ✅ สำคัญ: ให้หน้า ScanBox ทุกคนใน pack นี้เด้งออก
       io.to(`pack-product:${packProductId}`).emit(
         "outbound:delivery_confirmed",
         {
@@ -4339,6 +4372,10 @@ export const finalizePackProduct = asyncHandler(
       message: "finalize pack_product สำเร็จ",
       data: {
         pack_product: result,
+        transaction_packing: transactionPacking ?? {
+          id: null,
+          ignore_max_box: false,
+        },
         summary: {
           total_boxes: boxes.length,
           distinct_box_count: uniqueBoxNos.length,
@@ -4348,6 +4385,7 @@ export const finalizePackProduct = asyncHandler(
           total_items: allItems.length,
           incomplete_items: incompleteItems,
           force,
+          ignore_max_box: ignoreMaxBox,
         },
       },
     });
