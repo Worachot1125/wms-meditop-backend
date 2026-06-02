@@ -87,7 +87,7 @@ function leaveDocRoom(socket: Socket, prefix: string, payload: DocRoomPayload) {
 export const io = new Server(httpServer, {
   path: "/socket.io",
   cors: {
-    origin: ["http://localhost:5173", ...(process.env.CORS_ORIGIN ? [process.env.CORS_ORIGIN] : []),"http://172.20.10.3:5173"],
+    origin: ["http://localhost:5173", ...(process.env.CORS_ORIGIN ? [process.env.CORS_ORIGIN] : [])],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
   },
