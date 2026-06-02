@@ -648,7 +648,7 @@ export const getOdooInboundByNo = asyncHandler(
         const lock_locations = buildInboundLockLocations(gi);
 
         const lock_no = lock_locations.map(
-          (x) => `${x.location_name ?? "-"} (จำนวน ${x.qty})`,
+          (x) => `${x.location_name ?? "-"} (QTY ${x.qty})`,
         );
 
         return {

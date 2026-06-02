@@ -161,7 +161,7 @@ export function resolveLockNoFromMap(
   lot_name: string | null | undefined,
 ) {
   const locs = resolveLockLocationsFromMap(map, product_id, lot_name);
-  return locs.map((x) => `${x.location_name} (จำนวน ${x.qty})`);
+  return locs.map((x) => `${x.location_name} (QTY ${x.qty})`);
 }
 
 export type ExpKeyLoc = string;

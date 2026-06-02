@@ -3702,13 +3702,29 @@ export const confirmOutboundPickToStock = asyncHandler(
       };
     });
 
-    const odooLotAdjustment = await sendQueuedOutboundLotAdjustmentsToOdoo({
-      outbound: {
-        id: outbound.id,
-        no: outbound.no,
+    const transactionChangelot = await prisma.transaction_changelot.findFirst({
+      orderBy: { id: "desc" },
+      select: {
+        id: true,
+        ignore_changelot: true,
       },
-      reqOriginalUrl: req.originalUrl,
     });
+
+    const ignoreChangelot = transactionChangelot?.ignore_changelot === true;
+
+    const odooLotAdjustment = ignoreChangelot
+      ? {
+          skipped: true,
+          reason: "ignore_changelot=true",
+          transaction_changelot: transactionChangelot,
+        }
+      : await sendQueuedOutboundLotAdjustmentsToOdoo({
+          outbound: {
+            id: outbound.id,
+            no: outbound.no,
+          },
+          reqOriginalUrl: req.originalUrl,
+        });
 
     emitOutboundRealtime(
       outbound.no,

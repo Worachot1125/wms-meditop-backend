@@ -1020,37 +1020,35 @@ export const receiveOutboundFromOdoo = asyncHandler(
             });
           }
 
-let borSerAdjustResult:
-  | {
-      adjustmentStatus: "completed" | "waiting";
-      waitingReason?: string | null;
-    }
-  | null = null;
+          let borSerAdjustResult: {
+            adjustmentStatus: "completed" | "waiting";
+            waitingReason?: string | null;
+          } | null = null;
 
-if (BOR_SER_DEDUCT_TYPES.has(outType)) {
-  borSerAdjustResult = await decrementBorSerStocksForGaBosSv(tx, {
-    outType,
-    transfer: {
-      no,
-      location_id:
-        typeof location_id === "number" ? location_id : null,
-      location: typeof location === "string" ? location : null,
-      location_dest_id:
-        typeof location_dest_id === "number"
-          ? location_dest_id
-          : null,
-      location_dest:
-        typeof location_dest === "string" ? location_dest : null,
-    },
-    mergedItems: mergedItems.map((x: any) => ({
-      product_id: x.product_id,
-      lot_id: x.lot_id,
-      lot_serial: x.lot_serial,
-      qty: x.qty,
-      exp: x.exp ?? null,
-    })),
-  });
-}
+          if (BOR_SER_DEDUCT_TYPES.has(outType)) {
+            borSerAdjustResult = await decrementBorSerStocksForGaBosSv(tx, {
+              outType,
+              transfer: {
+                no,
+                location_id:
+                  typeof location_id === "number" ? location_id : null,
+                location: typeof location === "string" ? location : null,
+                location_dest_id:
+                  typeof location_dest_id === "number"
+                    ? location_dest_id
+                    : null,
+                location_dest:
+                  typeof location_dest === "string" ? location_dest : null,
+              },
+              mergedItems: mergedItems.map((x: any) => ({
+                product_id: x.product_id,
+                lot_id: x.lot_id,
+                lot_serial: x.lot_serial,
+                qty: x.qty,
+                exp: x.exp ?? null,
+              })),
+            });
+          }
 
           if (BOR_SER_REPLACE_TYPES.has(outType)) {
             await replaceBorSerStocksForExBoa(tx, {
@@ -1090,57 +1088,54 @@ if (BOR_SER_DEDUCT_TYPES.has(outType)) {
           }
 
           // ✅ สร้าง completed adjust auto สำหรับ SV / GA / BOS
-if (["SV", "GA", "BOS"].includes(outType)) {
-  const adjustmentStatus =
-    borSerAdjustResult?.adjustmentStatus ?? "completed";
+          if (["SV", "GA", "BOS"].includes(outType)) {
+            const adjustmentStatus =
+              borSerAdjustResult?.adjustmentStatus ?? "completed";
 
-  const waitingReason =
-    borSerAdjustResult?.waitingReason ?? null;
+            const waitingReason = borSerAdjustResult?.waitingReason ?? null;
 
-  await createCompletedAutoAdjustmentFromTransfer(tx, {
-    no,
-    picking_id: typeof picking_id === "number" ? picking_id : null,
-    location_id: typeof location_id === "number" ? location_id : null,
-    location: typeof location === "string" ? location : null,
-    location_dest_id:
-      typeof location_dest_id === "number"
-        ? location_dest_id
-        : null,
-    location_dest:
-      typeof location_dest === "string" ? location_dest : null,
-    location_owner: normalizeOwnerText(location_owner),
-    location_owner_display: normalizeOwnerText(
-      location_owner_display,
-    ),
-    location_dest_owner: normalizeOwnerText(location_dest_owner),
-    location_dest_owner_display: normalizeOwnerText(
-      location_dest_owner_display,
-    ),
-    department_id:
-      department_id != null ? String(department_id) : null,
-    department: department != null ? String(department) : null,
-    reference: convertedReference,
-    origin: convertedOrigin,
-    type: outType,
+            await createCompletedAutoAdjustmentFromTransfer(tx, {
+              no,
+              picking_id: typeof picking_id === "number" ? picking_id : null,
+              location_id: typeof location_id === "number" ? location_id : null,
+              location: typeof location === "string" ? location : null,
+              location_dest_id:
+                typeof location_dest_id === "number" ? location_dest_id : null,
+              location_dest:
+                typeof location_dest === "string" ? location_dest : null,
+              location_owner: normalizeOwnerText(location_owner),
+              location_owner_display: normalizeOwnerText(
+                location_owner_display,
+              ),
+              location_dest_owner: normalizeOwnerText(location_dest_owner),
+              location_dest_owner_display: normalizeOwnerText(
+                location_dest_owner_display,
+              ),
+              department_id:
+                department_id != null ? String(department_id) : null,
+              department: department != null ? String(department) : null,
+              reference: convertedReference,
+              origin: convertedOrigin,
+              type: outType,
 
-    status: adjustmentStatus,
-    waiting_reason: waitingReason,
+              status: adjustmentStatus,
+              waiting_reason: waitingReason,
 
-    items: mergedItems.map((x: any, idx: number) => ({
-      sequence: idx + 1,
-      product_id: x.product_id,
-      code: x.code ?? null,
-      name: x.name ?? null,
-      unit: x.unit ?? null,
-      tracking: x.tracking ?? null,
-      lot_id: x.lot_id,
-      lot_serial: x.lot_serial,
-      qty: x.qty,
-      exp: x.exp ?? null,
-      barcode_payload: null,
-    })),
-  });
-}
+              items: mergedItems.map((x: any, idx: number) => ({
+                sequence: idx + 1,
+                product_id: x.product_id,
+                code: x.code ?? null,
+                name: x.name ?? null,
+                unit: x.unit ?? null,
+                tracking: x.tracking ?? null,
+                lot_id: x.lot_id,
+                lot_serial: x.lot_serial,
+                qty: x.qty,
+                exp: x.exp ?? null,
+                barcode_payload: null,
+              })),
+            });
+          }
 
           if (autoProcess) {
             const now = new Date();
@@ -1313,7 +1308,7 @@ export const getOdooOutbounds = asyncHandler(
             ),
 
             lock_no: lockLocations.map(
-              (x) => `${x.location_name} (จำนวน ${x.qty})`,
+              (x) => `${x.location_name} (QTY ${x.qty})`,
             ),
             lock_locations: lockLocations,
 
@@ -1519,7 +1514,7 @@ export const getSpecialOutbounds = asyncHandler(
             ),
 
             lock_no: lockLocations.map(
-              (x: any) => `${x.location_name} (จำนวน ${x.qty})`,
+              (x: any) => `${x.location_name} (QTY ${x.qty})`,
             ),
             lock_locations: lockLocations,
 
@@ -1690,7 +1685,7 @@ export const getSpecialOutboundById = asyncHandler(
         ),
 
         lock_no: lockLocations.map(
-          (x: any) => `${x.location_name} (จำนวน ${x.qty})`,
+          (x: any) => `${x.location_name} (QTY ${x.qty})`,
         ),
         lock_locations: lockLocations,
 
@@ -2632,7 +2627,7 @@ export const getOdooOutboundByNo = asyncHandler(
         ),
 
         lock_no: lockLocations.map(
-          (x) => `${x.location_name} (จำนวน ${x.qty})`,
+          (x) => `${x.location_name} (QTY ${x.qty})`,
         ),
         lock_locations: lockLocations,
 
@@ -2856,7 +2851,7 @@ export const getOdooOutboundsByMyBatch = asyncHandler(
             ),
 
             lock_no: (locks || []).map(
-              (x) => `${x.location_name} (จำนวน ${x.qty})`,
+              (x) => `${x.location_name} (QTY ${x.qty})`,
             ),
             lock_locations: locks,
 
@@ -3292,6 +3287,14 @@ export const getOdooOutboundsByBatchName = asyncHandler(
 
     const deptMap = await buildDepartmentCodeMapFromOutbounds(outbounds as any);
 
+    const transactionChangelot = await prisma.transaction_changelot.findFirst({
+      orderBy: { id: "desc" },
+      select: {
+        id: true,
+        ignore_changelot: true,
+      },
+    });
+
     const data = await Promise.all(
       outbounds.map(async (outbound) => {
         const formatted: any = formatOdooOutbound(outbound as any);
@@ -3591,7 +3594,7 @@ export const getOdooOutboundsByBatchName = asyncHandler(
               gi.lot_serial,
             ),
             lock_no: sortedLocks.map(
-              (x) => `${x.location_name} (จำนวน ${x.qty})`,
+              (x) => `${x.location_name} (QTY ${x.qty})`,
             ),
             lock_locations: sortedLocks,
             location_picks,
@@ -3630,6 +3633,10 @@ export const getOdooOutboundsByBatchName = asyncHandler(
       total,
       page,
       limit,
+      transaction_changelot: transactionChangelot ?? {
+        id: null,
+        ignore_changelot: false,
+      },
       search_criteria: {
         search: search || null,
         code: code || null,

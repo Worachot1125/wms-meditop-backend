@@ -56,12 +56,6 @@ function movementGoodsKey(product_id: number, lot_serial: unknown) {
   return `p:${product_id}|lot:${normalizeLotText(lot_serial)}`;
 }
 
-function normalizeText(v: unknown): string {
-  return String(v ?? "")
-    .trim()
-    .replace(/\s+/g, " ");
-}
-
 /**
  * ✅ core helper (ใช้จริง)
  * สร้าง Map<key, barcode_text> จาก transfer_movement_item[]

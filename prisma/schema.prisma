@@ -650,6 +650,13 @@ model outbound_lot_adjustment_line {
   @@index([goods_out_item_id])
 }
 
+model transaction_changelot {
+  id               Int       @id @default(autoincrement())
+  ignore_changelot  Boolean   @default(false)
+
+  @@map("transaction_changelot")
+}
+
 model odoo_sync_log {
   id               Int       @id @default(autoincrement())
   entity_type      String

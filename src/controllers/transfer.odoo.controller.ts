@@ -328,7 +328,7 @@ export function resolveLockNoListFromMap(
   lot_name: string | null | undefined,
 ) {
   const locs = resolveLockLocationsFromMap(map, product_id, lot_name);
-  return locs.map((x) => `${x.location_name} (จำนวน ${x.qty})`);
+  return locs.map((x) => `${x.location_name} (QTY ${x.qty})`);
 }
 
 // ✅ enrich: lock_locations[].ncr_check จาก locations.full_name

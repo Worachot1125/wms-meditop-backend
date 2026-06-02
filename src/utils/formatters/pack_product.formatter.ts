@@ -212,7 +212,7 @@ function mergeBoxDetails(
 function buildBoxDisplay(details: GroupedPackProductBoxDetailFormatter[]) {
   if (!details.length) return null;
 
-  return details.map((d) => `${d.box_label} (จำนวน ${d.qty})`).join(", ");
+  return details.map((d) => `${d.box_label} (QTY ${d.qty})`).join(", ");
 }
 
 function buildItemBoxMap(boxes: PackBoxWithItems[]) {

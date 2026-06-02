@@ -2736,7 +2736,7 @@ export const listCombinedAdjustments = asyncHandler(
             ),
 
             lock_no: lockLocations.map(
-              (x: any) => `${x.location_name} (จำนวน ${x.qty})`,
+              (x: any) => `${x.location_name} (QTY ${x.qty})`,
             ),
             lock_locations: lockLocations,
 
@@ -2950,7 +2950,7 @@ export const getAdjustmentDetail = asyncHandler(
 
           const lockNo = sortedLocations.map(
             (x: any) =>
-              `${x.location_name ?? x.full_name ?? "-"} (จำนวน ${
+              `${x.location_name ?? x.full_name ?? "-"} (QTY ${
                 x.qty ?? x.quantity ?? 0
               })`,
           );

@@ -114,7 +114,7 @@ export function resolveStockNoListFromMap(
     product_id,
     lot_serial_or_name,
   );
-  return locs.map((x) => `${x.location_name} (จำนวน ${x.qty})`);
+  return locs.map((x) => `${x.location_name} (QTY ${x.qty})`);
 }
 
 /**
@@ -636,7 +636,7 @@ export const getTransferDocsPaginated = asyncHandler(
             );
 
             const lock_no_list = lock_locations.map(
-              (x) => `${x.location_name} (จำนวน ${x.qty})`,
+              (x) => `${x.location_name} (QTY ${x.qty})`,
             );
 
             return {
@@ -761,7 +761,7 @@ export const getTransferDocByNo = asyncHandler(
         );
 
         const lock_no_list = lock_locations.map(
-          (x) => `${x.location_name} (จำนวน ${x.qty})`,
+          (x) => `${x.location_name} (QTY ${x.qty})`,
         );
 
         return {
